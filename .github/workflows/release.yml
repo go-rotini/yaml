@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Semantic Release
+        uses: go-semantic-release/action@v1
+        id: semrel
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate SBOM
+        if: steps.semrel.outputs.version != ''
+        uses: anchore/sbom-action@v0
+        with:
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Attest SBOM provenance
+        if: steps.semrel.outputs.version != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: sbom.spdx.json
+
+      - name: Upload SBOM to release
+        if: steps.semrel.outputs.version != ''
+        run: gh release upload v${{ steps.semrel.outputs.version }} sbom.spdx.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
