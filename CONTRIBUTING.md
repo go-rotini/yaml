@@ -7,15 +7,14 @@ Contributions are welcome! Here's how to get started.
 ```bash
 git clone https://github.com/go-rotini/yaml.git
 cd yaml
-make test-suite  # clone the YAML test suite
-make ci          # run the full CI check locally
+make all   # run all project processes
 ```
 
 ## Making Changes
 
 1. Fork the repository and create a branch from `main`.
 2. Write tests for any new functionality.
-3. Ensure `make ci` passes before submitting a pull request.
+3. Ensure `make all` passes before submitting a pull request.
 4. Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages (e.g., `feat:`, `fix:`, `test:`, `docs:`).
 
 ## Running Tests
