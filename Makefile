@@ -2,39 +2,39 @@ TEST_SUITE_DIR := testdata/yaml-test-suite
 TEST_SUITE_REPO := https://github.com/yaml/yaml-test-suite.git
 TEST_SUITE_TAG := $(shell git ls-remote --tags $(TEST_SUITE_REPO) 'refs/tags/data-*' | grep -v '\^{}' | sed 's|.*refs/tags/||' | sort | tail -1)
 
-.PHONY: test-suite test test-verbose clean-test-suite ci fmt vet staticcheck bench fuzz fuzz-smoke
+.PHONY: all clean compliance test test-verbose fmt vet staticcheck bench fuzz fuzz-smoke
 
-test-suite: $(TEST_SUITE_DIR)
+clean:
+	rm -rf $(TEST_SUITE_DIR)
+
+clone-test-suite: $(TEST_SUITE_DIR)
 
 $(TEST_SUITE_DIR):
-	git clone --branch $(TEST_SUITE_TAG) --depth 1 $(TEST_SUITE_REPO) $(TEST_SUITE_DIR)
+	@git clone --branch $(TEST_SUITE_TAG) --depth 1 $(TEST_SUITE_REPO) $(TEST_SUITE_DIR)
 
-test: test-suite
-	go test ./...
+test: clone-test-suite
+	@go test -v -cover . | tee test.out
 
-test-verbose: test-suite
-	go test -v -run TestYAMLTestSuite ./...
+test-bench:
+	@go test -bench=. -benchmem -count=1 . | tee test_bench.out
 
-fmt:
-	@test -z "$$(gofmt -l .)" || (echo "files not formatted:" && gofmt -l . && exit 1)
+test-conformance: clone-test-suite
+	@go test -v -run -cover TestYAMLTestSuite ./... | tee test_conformance.out
 
-vet:
+test-fuzz:
+	@go test -fuzz=FuzzUnmarshal -fuzztime=60s . | tee test_fuzz_unmarshal.out
+	@go test -fuzz=FuzzScanner -fuzztime=60s . | tee test_fuzz_scanner.out
+	@go test -fuzz=FuzzRoundTrip -fuzztime=60s . | tee test_fuzz_roundtrip.out
+
+test-race:
+	@go test -race -coverprofile=test_conformance.out . | tee test_race.out
+
+go:
+	go fmt ./...
 	go vet ./...
-
-staticcheck:
 	staticcheck ./...
+	go-licenses check ./...
+	govulncheck ./...
 
-bench:
-	go test -bench=. -benchmem -count=1 ./... | tee bench.out
-
-fuzz:
-	go test -fuzz=FuzzUnmarshal -fuzztime=30s .
-	go test -fuzz=FuzzScanner -fuzztime=30s .
-	go test -fuzz=FuzzRoundTrip -fuzztime=30s .
-
-ci: test-suite fmt vet staticcheck fuzz
-	go test -race -coverprofile=coverage.out ./...
+all: test test-bench test-conformance test-fuzz test-race
 	@go tool cover -func=coverage.out | tail -1
-
-clean-test-suite:
-	rm -rf $(TEST_SUITE_DIR)
