@@ -16,6 +16,19 @@ func Unmarshal(data []byte, v any) error {
 	return UnmarshalWithOptions(data, v)
 }
 
+// UnmarshalTo parses YAML data into a value of type T and returns it.
+// This is a generic alternative to [Unmarshal] that allocates the target
+// value internally, removing the need for the caller to declare a variable
+// and pass its address.
+func UnmarshalTo[T any](data []byte, opts ...DecodeOption) (T, error) {
+	var v T
+	if err := UnmarshalWithOptions(data, &v, opts...); err != nil {
+		var zero T
+		return zero, err
+	}
+	return v, nil
+}
+
 // UnmarshalWithOptions parses YAML data into v, applying the given
 // [DecodeOption] values to control strictness, limits, and custom resolvers.
 func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {

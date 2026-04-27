@@ -544,3 +544,77 @@ func TestLoadReferencesRecursiveBrokenSymlink(t *testing.T) {
 		t.Fatal("expected error from broken symlink in recursive reference dir")
 	}
 }
+
+func TestUnmarshalToStruct(t *testing.T) {
+	type Config struct {
+		Name string `yaml:"name"`
+		Port int    `yaml:"port"`
+	}
+	cfg, err := UnmarshalTo[Config]([]byte("name: app\nport: 8080"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Name != "app" {
+		t.Errorf("expected name=app, got %q", cfg.Name)
+	}
+	if cfg.Port != 8080 {
+		t.Errorf("expected port=8080, got %d", cfg.Port)
+	}
+}
+
+func TestUnmarshalToMap(t *testing.T) {
+	m, err := UnmarshalTo[map[string]int]([]byte("a: 1\nb: 2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["a"] != 1 || m["b"] != 2 {
+		t.Errorf("unexpected map: %v", m)
+	}
+}
+
+func TestUnmarshalToSlice(t *testing.T) {
+	s, err := UnmarshalTo[[]string]([]byte("- x\n- y\n- z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s) != 3 || s[0] != "x" {
+		t.Errorf("unexpected slice: %v", s)
+	}
+}
+
+func TestUnmarshalToScalar(t *testing.T) {
+	v, err := UnmarshalTo[string]([]byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != "hello" {
+		t.Errorf("expected hello, got %q", v)
+	}
+}
+
+func TestUnmarshalToWithOptions(t *testing.T) {
+	type S struct {
+		Name string `yaml:"name"`
+	}
+	_, err := UnmarshalTo[S]([]byte("name: test\nextra: field"), WithStrict())
+	if err == nil {
+		t.Error("expected error in strict mode")
+	}
+}
+
+func TestUnmarshalToInvalidYAML(t *testing.T) {
+	_, err := UnmarshalTo[map[string]any]([]byte("[unclosed"))
+	if err == nil {
+		t.Error("expected error for invalid YAML")
+	}
+}
+
+func TestUnmarshalToEmpty(t *testing.T) {
+	v, err := UnmarshalTo[map[string]any]([]byte(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != nil {
+		t.Errorf("expected nil map for empty input, got %v", v)
+	}
+}
