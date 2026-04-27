@@ -8,14 +8,14 @@ import (
 )
 
 type scanner struct {
-	src            []byte
-	pos            int
-	line           int
-	col            int
-	tokens         []token
-	indent         int
-	indents        []int
-	flow           int
+	src               []byte
+	pos               int
+	line              int
+	col               int
+	tokens            []token
+	indent            int
+	indents           []int
+	flow              int
 	docStarted        bool
 	scanErr           error
 	lastContentLine   int

@@ -35,4 +35,4 @@ go.work.sum
 .DS_Store
 
 # YAML test suite (cloned separately)
-toolkit/encoding/yaml/testdata/yaml-test-suite/
+testdata/yaml-test-suite/

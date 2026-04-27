@@ -6,13 +6,13 @@ import (
 )
 
 type parser struct {
-	tokens             []token
-	pos                int
-	anchors            map[string]*node
-	tagHandles         map[string]string
-	maxNodes           int
-	nodeCount          int
-	seenYAMLDirective  bool
+	tokens            []token
+	pos               int
+	anchors           map[string]*node
+	tagHandles        map[string]string
+	maxNodes          int
+	nodeCount         int
+	seenYAMLDirective bool
 }
 
 func newParser(tokens []token) *parser {

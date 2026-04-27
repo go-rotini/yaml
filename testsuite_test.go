@@ -223,14 +223,14 @@ func TestYAMLTestSuite(t *testing.T) {
 	sort.Strings(testIDs)
 
 	var (
-		passed      atomic.Int32
-		failed      atomic.Int32
-		errCorrect  atomic.Int32
-		errMissed   atomic.Int32
-		skipped     atomic.Int32
-		timedOut    atomic.Int32
-		failedIDs   []string
-		failedMu    sync.Mutex
+		passed     atomic.Int32
+		failed     atomic.Int32
+		errCorrect atomic.Int32
+		errMissed  atomic.Int32
+		skipped    atomic.Int32
+		timedOut   atomic.Int32
+		failedIDs  []string
+		failedMu   sync.Mutex
 	)
 
 	for _, id := range testIDs {
