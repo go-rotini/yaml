@@ -793,9 +793,6 @@ func TestMarshalStructOmitEmpty(t *testing.T) {
 }
 
 func TestMarshalStructOmitEmptyPopulated(t *testing.T) {
-	type Config struct {
-		Str string `yaml:"str,omitempty"`
-	}
 	s := "hello"
 	data, err := Marshal(struct {
 		Str string  `yaml:"str,omitempty"`

@@ -2,7 +2,7 @@ TEST_SUITE_DIR := testdata/yaml-test-suite
 TEST_SUITE_REPO := https://github.com/yaml/yaml-test-suite.git
 TEST_SUITE_TAG := $(shell git ls-remote --tags $(TEST_SUITE_REPO) 'refs/tags/data-*' | grep -v '\^{}' | sed 's|.*refs/tags/||' | sort | tail -1)
 
-.PHONY: test-suite test test-verbose clean-test-suite ci fmt vet
+.PHONY: test-suite test test-verbose clean-test-suite ci fmt vet staticcheck bench fuzz fuzz-smoke
 
 test-suite: $(TEST_SUITE_DIR)
 
@@ -21,7 +21,18 @@ fmt:
 vet:
 	go vet ./...
 
-ci: test-suite fmt vet
+staticcheck:
+	staticcheck ./...
+
+bench:
+	go test -bench=. -benchmem -count=1 ./... | tee bench.out
+
+fuzz:
+	go test -fuzz=FuzzUnmarshal -fuzztime=30s ./...
+	go test -fuzz=FuzzScanner -fuzztime=30s ./...
+	go test -fuzz=FuzzRoundTrip -fuzztime=30s ./...
+
+ci: test-suite fmt vet staticcheck fuzz
 	go test -race -coverprofile=coverage.out ./...
 	@go tool cover -func=coverage.out | tail -1
 

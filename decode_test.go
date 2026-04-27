@@ -2140,18 +2140,6 @@ func TestDecodeCustomUnmarshalerError(t *testing.T) {
 
 // ─── decode: Unmarshaler with non-pointer target ────────────────────────────
 
-type decodeUnmarshalerNonPtr struct {
-	Val string
-}
-
-func (u *decodeUnmarshalerNonPtr) UnmarshalYAML(unmarshal func(any) error) error {
-	var m map[string]string
-	if err := unmarshal(m); err != nil {
-		return err
-	}
-	return nil
-}
-
 // ─── decode: BytesUnmarshaler in struct ─────────────────────────────────────
 
 func TestDecodeBytesUnmarshalerMapping(t *testing.T) {
@@ -3475,7 +3463,7 @@ unicode8: "\U00000041"
 		"double_quote": "\"",
 		"backslash":    "\\",
 		"slash":        "/",
-		"next_line":    "",
+		"next_line":    "\u0085",
 		"nbsp":         " ",
 		"line_sep":     " ",
 		"para_sep":     " ",
@@ -6225,6 +6213,9 @@ func TestDecodeUnexportedFieldSkipped(t *testing.T) {
 	if s.Exported != "public" {
 		t.Errorf("expected public, got %q", s.Exported)
 	}
+	if s.unexported != "" {
+		t.Errorf("expected unexported to be empty, got %q", s.unexported)
+	}
 }
 
 type nonPtrUnmarshaler struct {
@@ -6402,6 +6393,9 @@ func TestDecodeMappingToStructUnexportedField(t *testing.T) {
 	err := Unmarshal([]byte("exported: a\nunexported: b"), &s)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if s.exported != "" {
+		t.Errorf("expected unexported field to be empty, got %q", s.exported)
 	}
 }
 

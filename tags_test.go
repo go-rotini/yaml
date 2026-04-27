@@ -151,12 +151,13 @@ func TestGetStructFieldsSkip(t *testing.T) {
 func TestGetStructFieldsUnexported(t *testing.T) {
 	type S struct {
 		Name     string `yaml:"name"`
-		internal string //nolint:unused
+		internal string
 	}
 	sf := getStructFields(reflect.TypeOf(S{}))
 	if len(sf.fields) != 1 {
 		t.Fatalf("expected 1 field (unexported skipped), got %d", len(sf.fields))
 	}
+	_ = S{}.internal
 }
 
 func TestGetStructFieldsNoTag(t *testing.T) {
