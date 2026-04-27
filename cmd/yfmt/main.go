@@ -27,9 +27,9 @@ func main() {
 	}
 
 	var opts []yaml.EncodeOption
-	opts = append(opts, yaml.Indent(*indent))
+	opts = append(opts, yaml.WithIndent(*indent))
 	if *flow {
-		opts = append(opts, yaml.Flow(true))
+		opts = append(opts, yaml.WithFlow(true))
 	}
 
 	files := flag.Args()

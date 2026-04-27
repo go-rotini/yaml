@@ -53,7 +53,7 @@ func TestUnmarshalWithOptionsStrict(t *testing.T) {
 		Name string `yaml:"name"`
 	}
 	var s S
-	err := UnmarshalWithOptions([]byte("name: test\nextra: field"), &s, Strict())
+	err := UnmarshalWithOptions([]byte("name: test\nextra: field"), &s, WithStrict())
 	if err == nil {
 		t.Error("expected error in strict mode for unknown field")
 	}
@@ -62,7 +62,7 @@ func TestUnmarshalWithOptionsStrict(t *testing.T) {
 func TestUnmarshalMaxDocumentSize(t *testing.T) {
 	data := []byte("key: " + strings.Repeat("x", 100))
 	var v any
-	err := UnmarshalWithOptions(data, &v, MaxDocumentSize(10))
+	err := UnmarshalWithOptions(data, &v, WithMaxDocumentSize(10))
 	if err == nil {
 		t.Error("expected error for exceeding max document size")
 	}
@@ -74,7 +74,7 @@ func TestUnmarshalMaxDocumentSize(t *testing.T) {
 func TestUnmarshalMaxDocumentSizeWithinLimit(t *testing.T) {
 	data := []byte("key: val")
 	var v any
-	err := UnmarshalWithOptions(data, &v, MaxDocumentSize(1000))
+	err := UnmarshalWithOptions(data, &v, WithMaxDocumentSize(1000))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestUnmarshalMaxDocumentSizeWithinLimit(t *testing.T) {
 func TestUnmarshalMaxNodes(t *testing.T) {
 	data := []byte("a: 1\nb: 2\nc: 3\nd: 4\ne: 5\n")
 	var v any
-	err := UnmarshalWithOptions(data, &v, MaxNodes(2))
+	err := UnmarshalWithOptions(data, &v, WithMaxNodes(2))
 	if err == nil {
 		t.Fatal("expected error for too many nodes")
 	}
@@ -161,7 +161,7 @@ func TestDecoderDecodeContext(t *testing.T) {
 }
 
 func TestDecoderWithOptions(t *testing.T) {
-	dec := NewDecoder(strings.NewReader("a: 1"), MaxDepth(50))
+	dec := NewDecoder(strings.NewReader("a: 1"), WithMaxDepth(50))
 	var v any
 	err := dec.Decode(&v)
 	if err != nil {
@@ -178,7 +178,7 @@ func TestReferenceFiles(t *testing.T) {
   <<: *defaults
   name: widget`
 	var out map[string]any
-	err := UnmarshalWithOptions([]byte(input), &out, ReferenceFiles(refFile))
+	err := UnmarshalWithOptions([]byte(input), &out, WithReferenceFiles(refFile))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestReferenceDirs(t *testing.T) {
 
 	input := `val: *base`
 	var out map[string]any
-	err := UnmarshalWithOptions([]byte(input), &out, ReferenceDirs(dir))
+	err := UnmarshalWithOptions([]byte(input), &out, WithReferenceDirs(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestReferenceDuplicateAnchor(t *testing.T) {
 
 	input := `val: *dup`
 	var out map[string]any
-	err := UnmarshalWithOptions([]byte(input), &out, ReferenceDirs(dir))
+	err := UnmarshalWithOptions([]byte(input), &out, WithReferenceDirs(dir))
 	if err == nil {
 		t.Fatal("expected duplicate anchor error")
 	}
@@ -222,8 +222,8 @@ func TestRecursiveDirOption(t *testing.T) {
 	data := []byte("val: *myref\n")
 	var v map[string]string
 	err := UnmarshalWithOptions(data, &v,
-		ReferenceDirs(dir),
-		RecursiveDir(true),
+		WithReferenceDirs(dir),
+		WithRecursiveDir(true),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +235,7 @@ func TestRecursiveDirOption(t *testing.T) {
 
 func TestReferenceFileNotFound(t *testing.T) {
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceFiles("/nonexistent/file.yaml"))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceFiles("/nonexistent/file.yaml"))
 	if err == nil {
 		t.Error("expected error for nonexistent reference file")
 	}
@@ -243,7 +243,7 @@ func TestReferenceFileNotFound(t *testing.T) {
 
 func TestReferenceDirNotFound(t *testing.T) {
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceDirs("/nonexistent/dir"))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceDirs("/nonexistent/dir"))
 	if err == nil {
 		t.Error("expected error for nonexistent reference dir")
 	}
@@ -251,7 +251,7 @@ func TestReferenceDirNotFound(t *testing.T) {
 
 func TestDecoderMaxDocumentSize(t *testing.T) {
 	data := "key: " + strings.Repeat("x", 100)
-	dec := NewDecoder(strings.NewReader(data), MaxDocumentSize(10))
+	dec := NewDecoder(strings.NewReader(data), WithMaxDocumentSize(10))
 	var v any
 	err := dec.Decode(&v)
 	if err == nil {
@@ -262,7 +262,7 @@ func TestDecoderMaxDocumentSize(t *testing.T) {
 func TestAllowDuplicateMapKey(t *testing.T) {
 	data := []byte("a: 1\na: 2\n")
 	var v map[string]int
-	err := UnmarshalWithOptions(data, &v, AllowDuplicateMapKey())
+	err := UnmarshalWithOptions(data, &v, WithAllowDuplicateMapKey())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestUnmarshalValidator(t *testing.T) {
 		Name string `yaml:"name"`
 	}
 	var s S
-	err := UnmarshalWithOptions([]byte("name: test"), &s, Validator(&testStructValidator{}))
+	err := UnmarshalWithOptions([]byte("name: test"), &s, WithValidator(&testStructValidator{}))
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
@@ -341,7 +341,7 @@ func TestDecoderValidator(t *testing.T) {
 	type S struct {
 		Name string `yaml:"name"`
 	}
-	dec := NewDecoder(strings.NewReader("name: test"), Validator(&testStructValidator{}))
+	dec := NewDecoder(strings.NewReader("name: test"), WithValidator(&testStructValidator{}))
 	var s S
 	err := dec.Decode(&s)
 	if err == nil {
@@ -363,7 +363,7 @@ func TestLoadReferencesSymlinkEscape(t *testing.T) {
 	os.Symlink(filepath.Join(outside, "evil.yaml"), filepath.Join(sub, "link.yaml"))
 
 	var v any
-	err := UnmarshalWithOptions([]byte("val: *a"), &v, ReferenceDirs(sub))
+	err := UnmarshalWithOptions([]byte("val: *a"), &v, WithReferenceDirs(sub))
 	if err == nil {
 		t.Fatal("expected symlink escape error")
 	}
@@ -380,7 +380,7 @@ func TestLoadReferencesRecursiveSymlinkEscape(t *testing.T) {
 	os.Symlink(filepath.Join(outside, "evil.yaml"), filepath.Join(sub, "inner", "link.yaml"))
 
 	var v any
-	err := UnmarshalWithOptions([]byte("val: *a"), &v, ReferenceDirs(sub), RecursiveDir(true))
+	err := UnmarshalWithOptions([]byte("val: *a"), &v, WithReferenceDirs(sub), WithRecursiveDir(true))
 	if err == nil {
 		t.Fatal("expected symlink escape error for recursive dir")
 	}
@@ -388,7 +388,7 @@ func TestLoadReferencesRecursiveSymlinkEscape(t *testing.T) {
 
 func TestLoadReferencesWalkDirError(t *testing.T) {
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceDirs("/nonexistent/dir"), RecursiveDir(true))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceDirs("/nonexistent/dir"), WithRecursiveDir(true))
 	if err == nil {
 		t.Error("expected error for nonexistent recursive dir")
 	}
@@ -399,7 +399,7 @@ func TestLoadReferencesBadScanInRefFile(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte{0x01}, 0o644)
 
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceFiles(filepath.Join(dir, "bad.yaml")))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceFiles(filepath.Join(dir, "bad.yaml")))
 	if err == nil {
 		t.Fatal("expected scan error from reference file")
 	}
@@ -410,7 +410,7 @@ func TestLoadReferencesBadParseInRefFile(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte("{unclosed"), 0o644)
 
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceFiles(filepath.Join(dir, "bad.yaml")))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceFiles(filepath.Join(dir, "bad.yaml")))
 	if err == nil {
 		t.Fatal("expected parse error from reference file")
 	}
@@ -418,7 +418,7 @@ func TestLoadReferencesBadParseInRefFile(t *testing.T) {
 
 func TestDecoderMaxDocumentSizeExceeded(t *testing.T) {
 	data := "key: " + strings.Repeat("x", 200)
-	dec := NewDecoder(strings.NewReader(data), MaxDocumentSize(50))
+	dec := NewDecoder(strings.NewReader(data), WithMaxDocumentSize(50))
 	var v any
 	err := dec.Decode(&v)
 	if err == nil {
@@ -427,7 +427,7 @@ func TestDecoderMaxDocumentSizeExceeded(t *testing.T) {
 }
 
 func TestDecoderValidatorNonStruct(t *testing.T) {
-	dec := NewDecoder(strings.NewReader("hello"), Validator(&testStructValidator{}))
+	dec := NewDecoder(strings.NewReader("hello"), WithValidator(&testStructValidator{}))
 	var s string
 	err := dec.Decode(&s)
 	if err != nil {
@@ -456,7 +456,7 @@ func TestLoadReferencesNonRecursiveDirWithSubdir(t *testing.T) {
 	os.WriteFile(filepath.Join(sub, "ref2.yaml"), []byte("y: &b 2\n"), 0o644)
 
 	var v any
-	err := UnmarshalWithOptions([]byte("val: *a"), &v, ReferenceDirs(dir))
+	err := UnmarshalWithOptions([]byte("val: *a"), &v, WithReferenceDirs(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestLoadReferencesNonRecursiveSymlinkEscape(t *testing.T) {
 	os.Symlink(filepath.Join(outside, "evil.yaml"), filepath.Join(dir, "link.yaml"))
 
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceDirs(dir))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceDirs(dir))
 	if err == nil {
 		t.Fatal("expected symlink escape error in non-recursive mode")
 	}
@@ -484,7 +484,7 @@ func TestLoadReferencesRecursiveWalkError(t *testing.T) {
 	defer os.Chmod(sub, 0o755)
 
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceDirs(dir), RecursiveDir(true))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceDirs(dir), WithRecursiveDir(true))
 	if err == nil {
 		t.Log("walk error test: OS may not enforce permissions for root")
 	}
@@ -495,7 +495,7 @@ func TestLoadReferencesRefFileScanError(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte{0x01}, 0o644)
 
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceDirs(dir))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceDirs(dir))
 	if err == nil {
 		t.Fatal("expected scan error from reference file in dir")
 	}
@@ -506,7 +506,7 @@ func TestLoadReferencesRefFileParseError(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte("{unclosed"), 0o644)
 
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceDirs(dir))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceDirs(dir))
 	if err == nil {
 		t.Fatal("expected parse error from reference file in dir")
 	}
@@ -517,7 +517,7 @@ func TestLoadReferencesNonRecursiveReadDirError(t *testing.T) {
 	os.WriteFile(f, []byte("x"), 0o644)
 
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceDirs(f))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceDirs(f))
 	if err == nil {
 		t.Fatal("expected error from ReadDir on a file path")
 	}
@@ -528,7 +528,7 @@ func TestLoadReferencesNonRecursiveBrokenSymlink(t *testing.T) {
 	os.Symlink("/nonexistent/target.yaml", filepath.Join(dir, "broken.yaml"))
 
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceDirs(dir))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceDirs(dir))
 	if err == nil {
 		t.Fatal("expected error from broken symlink in reference dir")
 	}
@@ -539,7 +539,7 @@ func TestLoadReferencesRecursiveBrokenSymlink(t *testing.T) {
 	os.Symlink("/nonexistent/target.yaml", filepath.Join(dir, "broken.yaml"))
 
 	var v any
-	err := UnmarshalWithOptions([]byte("a: 1"), &v, ReferenceDirs(dir), RecursiveDir(true))
+	err := UnmarshalWithOptions([]byte("a: 1"), &v, WithReferenceDirs(dir), WithRecursiveDir(true))
 	if err == nil {
 		t.Fatal("expected error from broken symlink in recursive reference dir")
 	}

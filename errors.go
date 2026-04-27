@@ -52,7 +52,7 @@ func (e *TypeError) Is(target error) bool {
 	return ok
 }
 
-// UnknownFieldError is returned when decoding with [Strict] and a YAML key
+// UnknownFieldError is returned when decoding with [WithStrict] and a YAML key
 // has no corresponding struct field.
 type UnknownFieldError struct {
 	Field string
@@ -69,7 +69,7 @@ func (e *UnknownFieldError) Is(target error) bool {
 }
 
 // CycleError is returned when alias expansion detects a cycle or exceeds
-// the maximum expansion depth set by [MaxAliasExpansion].
+// the maximum expansion depth set by [WithMaxAliasExpansion].
 type CycleError struct {
 	Anchor string
 	Pos    Position
@@ -84,7 +84,7 @@ func (e *CycleError) Is(target error) bool {
 	return ok
 }
 
-// DuplicateKeyError is returned when decoding with [DisallowDuplicateKey]
+// DuplicateKeyError is returned when decoding with [WithDisallowDuplicateKey]
 // and a mapping contains the same key more than once.
 type DuplicateKeyError struct {
 	Key string
@@ -129,7 +129,7 @@ var (
 	ErrUnknownField = &UnknownFieldError{}
 	ErrCycle        = &CycleError{}
 	ErrDuplicateKey = &DuplicateKeyError{}
-	ErrValidation  = &ValidationError{}
+	ErrValidation   = &ValidationError{}
 )
 
 // FormatError returns a human-readable string for a [SyntaxError] or

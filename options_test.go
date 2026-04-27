@@ -46,7 +46,7 @@ func TestDefaultDecodeOptions(t *testing.T) {
 
 func TestIndentOption(t *testing.T) {
 	o := defaultEncodeOptions()
-	Indent(4)(o)
+	WithIndent(4)(o)
 	if o.indent != 4 {
 		t.Errorf("expected indent=4, got %d", o.indent)
 	}
@@ -54,7 +54,7 @@ func TestIndentOption(t *testing.T) {
 
 func TestIndentSequenceOption(t *testing.T) {
 	o := defaultEncodeOptions()
-	IndentSequence(true)(o)
+	WithIndentSequence(true)(o)
 	if !o.indentSequence {
 		t.Error("expected indentSequence=true")
 	}
@@ -62,7 +62,7 @@ func TestIndentSequenceOption(t *testing.T) {
 
 func TestFlowOption(t *testing.T) {
 	o := defaultEncodeOptions()
-	Flow(true)(o)
+	WithFlow(true)(o)
 	if !o.flow {
 		t.Error("expected flow=true")
 	}
@@ -70,7 +70,7 @@ func TestFlowOption(t *testing.T) {
 
 func TestJSONOption(t *testing.T) {
 	o := defaultEncodeOptions()
-	JSON(true)(o)
+	WithJSON(true)(o)
 	if !o.jsonCompat {
 		t.Error("expected jsonCompat=true")
 	}
@@ -78,7 +78,7 @@ func TestJSONOption(t *testing.T) {
 
 func TestUseLiteralStyleOption(t *testing.T) {
 	o := defaultEncodeOptions()
-	UseLiteralStyleIfMultiline(true)(o)
+	WithLiteralStyle(true)(o)
 	if !o.useLiteral {
 		t.Error("expected useLiteral=true")
 	}
@@ -86,7 +86,7 @@ func TestUseLiteralStyleOption(t *testing.T) {
 
 func TestUseSingleQuoteOption(t *testing.T) {
 	o := defaultEncodeOptions()
-	UseSingleQuote(true)(o)
+	WithSingleQuote(true)(o)
 	if !o.useSingleQuote {
 		t.Error("expected useSingleQuote=true")
 	}
@@ -94,7 +94,7 @@ func TestUseSingleQuoteOption(t *testing.T) {
 
 func TestOmitEmptyOption(t *testing.T) {
 	o := defaultEncodeOptions()
-	OmitEmpty(true)(o)
+	WithOmitEmpty(true)(o)
 	if !o.omitEmpty {
 		t.Error("expected omitEmpty=true")
 	}
@@ -102,7 +102,7 @@ func TestOmitEmptyOption(t *testing.T) {
 
 func TestAutoIntOption(t *testing.T) {
 	o := defaultEncodeOptions()
-	AutoInt(true)(o)
+	WithAutoInt(true)(o)
 	if !o.autoInt {
 		t.Error("expected autoInt=true")
 	}
@@ -110,7 +110,7 @@ func TestAutoIntOption(t *testing.T) {
 
 func TestLineWidthOptionSetter(t *testing.T) {
 	o := defaultEncodeOptions()
-	LineWidth(120)(o)
+	WithLineWidth(120)(o)
 	if o.lineWidth != 120 {
 		t.Errorf("expected lineWidth=120, got %d", o.lineWidth)
 	}
@@ -132,7 +132,7 @@ func TestWithCommentOption(t *testing.T) {
 
 func TestStrictOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	Strict()(o)
+	WithStrict()(o)
 	if !o.strict {
 		t.Error("expected strict=true")
 	}
@@ -140,7 +140,7 @@ func TestStrictOption(t *testing.T) {
 
 func TestDisallowDuplicateKeyOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	DisallowDuplicateKey()(o)
+	WithDisallowDuplicateKey()(o)
 	if !o.disallowDuplicates {
 		t.Error("expected disallowDuplicates=true")
 	}
@@ -148,7 +148,7 @@ func TestDisallowDuplicateKeyOption(t *testing.T) {
 
 func TestAllowDuplicateMapKeyOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	AllowDuplicateMapKey()(o)
+	WithAllowDuplicateMapKey()(o)
 	if !o.allowDuplicates {
 		t.Error("expected allowDuplicates=true")
 	}
@@ -156,7 +156,7 @@ func TestAllowDuplicateMapKeyOption(t *testing.T) {
 
 func TestUseOrderedMapOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	UseOrderedMap()(o)
+	WithOrderedMap()(o)
 	if !o.useOrderedMap {
 		t.Error("expected useOrderedMap=true")
 	}
@@ -164,7 +164,7 @@ func TestUseOrderedMapOption(t *testing.T) {
 
 func TestUseJSONUnmarshalerOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	UseJSONUnmarshaler()(o)
+	WithJSONUnmarshaler()(o)
 	if !o.useJSONUnmarshaler {
 		t.Error("expected useJSONUnmarshaler=true")
 	}
@@ -172,7 +172,7 @@ func TestUseJSONUnmarshalerOption(t *testing.T) {
 
 func TestMaxDepthOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	MaxDepth(50)(o)
+	WithMaxDepth(50)(o)
 	if o.maxDepth != 50 {
 		t.Errorf("expected maxDepth=50, got %d", o.maxDepth)
 	}
@@ -180,7 +180,7 @@ func TestMaxDepthOption(t *testing.T) {
 
 func TestMaxAliasExpansionOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	MaxAliasExpansion(500)(o)
+	WithMaxAliasExpansion(500)(o)
 	if o.maxAliasExpansion != 500 {
 		t.Errorf("expected maxAliasExpansion=500, got %d", o.maxAliasExpansion)
 	}
@@ -188,7 +188,7 @@ func TestMaxAliasExpansionOption(t *testing.T) {
 
 func TestMaxDocumentSizeOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	MaxDocumentSize(1024)(o)
+	WithMaxDocumentSize(1024)(o)
 	if o.maxDocumentSize != 1024 {
 		t.Errorf("expected maxDocumentSize=1024, got %d", o.maxDocumentSize)
 	}
@@ -196,7 +196,7 @@ func TestMaxDocumentSizeOption(t *testing.T) {
 
 func TestMaxNodesOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	MaxNodes(100)(o)
+	WithMaxNodes(100)(o)
 	if o.maxNodes != 100 {
 		t.Errorf("expected maxNodes=100, got %d", o.maxNodes)
 	}
@@ -204,7 +204,7 @@ func TestMaxNodesOption(t *testing.T) {
 
 func TestRecursiveDirOptionSetter(t *testing.T) {
 	o := defaultDecodeOptions()
-	RecursiveDir(true)(o)
+	WithRecursiveDir(true)(o)
 	if !o.recursiveDir {
 		t.Error("expected recursiveDir=true")
 	}
@@ -212,7 +212,7 @@ func TestRecursiveDirOptionSetter(t *testing.T) {
 
 func TestValidatorOptionSetter(t *testing.T) {
 	o := defaultDecodeOptions()
-	Validator(nil)(o)
+	WithValidator(nil)(o)
 	if o.validator != nil {
 		t.Error("expected nil validator")
 	}
@@ -220,7 +220,7 @@ func TestValidatorOptionSetter(t *testing.T) {
 
 func TestReferenceFilesOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	ReferenceFiles("a.yaml", "b.yaml")(o)
+	WithReferenceFiles("a.yaml", "b.yaml")(o)
 	if len(o.referenceFiles) != 2 {
 		t.Fatalf("expected 2 reference files, got %d", len(o.referenceFiles))
 	}
@@ -231,8 +231,8 @@ func TestReferenceFilesOption(t *testing.T) {
 
 func TestReferenceFilesOptionAppend(t *testing.T) {
 	o := defaultDecodeOptions()
-	ReferenceFiles("a.yaml")(o)
-	ReferenceFiles("b.yaml")(o)
+	WithReferenceFiles("a.yaml")(o)
+	WithReferenceFiles("b.yaml")(o)
 	if len(o.referenceFiles) != 2 {
 		t.Fatalf("expected 2 reference files, got %d", len(o.referenceFiles))
 	}
@@ -240,7 +240,7 @@ func TestReferenceFilesOptionAppend(t *testing.T) {
 
 func TestReferenceDirsOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	ReferenceDirs("/dir1", "/dir2")(o)
+	WithReferenceDirs("/dir1", "/dir2")(o)
 	if len(o.referenceDirs) != 2 {
 		t.Fatalf("expected 2 reference dirs, got %d", len(o.referenceDirs))
 	}
@@ -248,8 +248,8 @@ func TestReferenceDirsOption(t *testing.T) {
 
 func TestReferenceDirsOptionAppend(t *testing.T) {
 	o := defaultDecodeOptions()
-	ReferenceDirs("/dir1")(o)
-	ReferenceDirs("/dir2")(o)
+	WithReferenceDirs("/dir1")(o)
+	WithReferenceDirs("/dir2")(o)
 	if len(o.referenceDirs) != 2 {
 		t.Fatalf("expected 2 reference dirs, got %d", len(o.referenceDirs))
 	}
@@ -257,7 +257,7 @@ func TestReferenceDirsOptionAppend(t *testing.T) {
 
 func TestCustomMarshalerOption(t *testing.T) {
 	o := defaultEncodeOptions()
-	CustomMarshaler(func(s string) ([]byte, error) {
+	WithCustomMarshaler(func(s string) ([]byte, error) {
 		return []byte(s), nil
 	})(o)
 	if o.customMarshalers == nil {
@@ -270,10 +270,10 @@ func TestCustomMarshalerOption(t *testing.T) {
 
 func TestCustomMarshalerOptionMultiple(t *testing.T) {
 	o := defaultEncodeOptions()
-	CustomMarshaler(func(s string) ([]byte, error) {
+	WithCustomMarshaler(func(s string) ([]byte, error) {
 		return []byte(s), nil
 	})(o)
-	CustomMarshaler(func(n int) ([]byte, error) {
+	WithCustomMarshaler(func(n int) ([]byte, error) {
 		return nil, nil
 	})(o)
 	if len(o.customMarshalers) != 2 {
@@ -283,7 +283,7 @@ func TestCustomMarshalerOptionMultiple(t *testing.T) {
 
 func TestCustomUnmarshalerOption(t *testing.T) {
 	o := defaultDecodeOptions()
-	CustomUnmarshaler(func(s *string, raw []byte) error {
+	WithCustomUnmarshaler(func(s *string, raw []byte) error {
 		*s = string(raw)
 		return nil
 	})(o)
@@ -297,10 +297,10 @@ func TestCustomUnmarshalerOption(t *testing.T) {
 
 func TestCustomUnmarshalerOptionMultiple(t *testing.T) {
 	o := defaultDecodeOptions()
-	CustomUnmarshaler(func(s *string, raw []byte) error {
+	WithCustomUnmarshaler(func(s *string, raw []byte) error {
 		return nil
 	})(o)
-	CustomUnmarshaler(func(n *int, raw []byte) error {
+	WithCustomUnmarshaler(func(n *int, raw []byte) error {
 		return nil
 	})(o)
 	if len(o.customUnmarshalers) != 2 {
@@ -358,14 +358,14 @@ func TestCommentStruct(t *testing.T) {
 }
 
 func TestEncodeOptionIsFunc(t *testing.T) {
-	var opt EncodeOption = Indent(4)
+	var opt EncodeOption = WithIndent(4)
 	if opt == nil {
 		t.Error("expected non-nil option")
 	}
 }
 
 func TestDecodeOptionIsFunc(t *testing.T) {
-	var opt DecodeOption = Strict()
+	var opt DecodeOption = WithStrict()
 	if opt == nil {
 		t.Error("expected non-nil option")
 	}
@@ -374,7 +374,7 @@ func TestDecodeOptionIsFunc(t *testing.T) {
 func TestOptionConflictDuplicateKey(t *testing.T) {
 	data := []byte("a: 1")
 	var v any
-	err := UnmarshalWithOptions(data, &v, DisallowDuplicateKey(), AllowDuplicateMapKey())
+	err := UnmarshalWithOptions(data, &v, WithDisallowDuplicateKey(), WithAllowDuplicateMapKey())
 	if err == nil {
 		t.Fatal("expected error for conflicting options")
 	}
@@ -385,7 +385,7 @@ func TestOptionConflictDuplicateKey(t *testing.T) {
 
 func TestOptionConflictDuplicateKeyDecoder(t *testing.T) {
 	r := strings.NewReader("a: 1")
-	dec := NewDecoder(r, DisallowDuplicateKey(), AllowDuplicateMapKey())
+	dec := NewDecoder(r, WithDisallowDuplicateKey(), WithAllowDuplicateMapKey())
 	var v any
 	err := dec.Decode(&v)
 	if err == nil {

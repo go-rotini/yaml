@@ -47,45 +47,45 @@ func defaultEncodeOptions() *encoderOptions {
 	}
 }
 
-// Indent sets the number of spaces per indentation level (default 2).
-func Indent(n int) EncodeOption {
+// WithIndent sets the number of spaces per indentation level (default 2).
+func WithIndent(n int) EncodeOption {
 	return func(o *encoderOptions) { o.indent = n }
 }
 
-// IndentSequence controls whether sequence items are indented relative to
+// WithIndentSequence controls whether sequence items are indented relative to
 // their parent key. When false (the default), the "- " prefix aligns with
 // the parent's indentation level.
-func IndentSequence(b bool) EncodeOption {
+func WithIndentSequence(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.indentSequence = b }
 }
 
-// Flow encodes all values in flow style (JSON-like inline notation)
+// WithFlow encodes all values in flow style (JSON-like inline notation)
 // when set to true.
-func Flow(b bool) EncodeOption {
+func WithFlow(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.flow = b }
 }
 
-// JSON enables JSON-compatible output: all strings are double-quoted, keys
+// WithJSON enables JSON-compatible output: all strings are double-quoted, keys
 // are quoted, and null is used instead of YAML's tilde notation.
-func JSON(b bool) EncodeOption {
+func WithJSON(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.jsonCompat = b }
 }
 
-// UseLiteralStyleIfMultiline encodes multi-line strings as YAML literal
+// WithLiteralStyle encodes multi-line strings as YAML literal
 // block scalars (|) instead of quoted scalars when set to true.
-func UseLiteralStyleIfMultiline(b bool) EncodeOption {
+func WithLiteralStyle(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.useLiteral = b }
 }
 
-// UseSingleQuote prefers single-quoted scalars over double-quoted when
+// WithSingleQuote prefers single-quoted scalars over double-quoted when
 // the value contains no characters requiring escape sequences.
-func UseSingleQuote(b bool) EncodeOption {
+func WithSingleQuote(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.useSingleQuote = b }
 }
 
-// OmitEmpty omits struct fields and map entries whose values are zero/empty,
+// WithOmitEmpty omits struct fields and map entries whose values are zero/empty,
 // equivalent to adding ",omitempty" to every field tag.
-func OmitEmpty(b bool) EncodeOption {
+func WithOmitEmpty(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.omitEmpty = b }
 }
 
@@ -95,15 +95,15 @@ func WithComment(comments map[string][]Comment) EncodeOption {
 	return func(o *encoderOptions) { o.comments = comments }
 }
 
-// AutoInt encodes float64 values that have no fractional part as integers
+// WithAutoInt encodes float64 values that have no fractional part as integers
 // (e.g. 42 instead of 42.0).
-func AutoInt(b bool) EncodeOption {
+func WithAutoInt(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.autoInt = b }
 }
 
-// LineWidth sets the preferred line width for scalar wrapping (default 80).
+// WithLineWidth sets the preferred line width for scalar wrapping (default 80).
 // The encoder may exceed this width when a single word is longer than the limit.
-func LineWidth(n int) EncodeOption {
+func WithLineWidth(n int) EncodeOption {
 	return func(o *encoderOptions) { o.lineWidth = n }
 }
 
@@ -173,7 +173,7 @@ func defaultDecodeOptions() *decoderOptions {
 
 func (o *decoderOptions) validate() error {
 	if o.disallowDuplicates && o.allowDuplicates {
-		return fmt.Errorf("yaml: conflicting options: DisallowDuplicateKey and AllowDuplicateMapKey cannot both be set")
+		return fmt.Errorf("yaml: conflicting options: WithDisallowDuplicateKey and WithAllowDuplicateMapKey cannot both be set")
 	}
 	return nil
 }
@@ -185,90 +185,90 @@ func WithSchema(s Schema) DecodeOption {
 	return func(o *decoderOptions) { o.schema = s }
 }
 
-// Strict causes decoding to return an [UnknownFieldError] if a YAML key does
+// WithStrict causes decoding to return an [UnknownFieldError] if a YAML key does
 // not correspond to any field in the target struct.
-func Strict() DecodeOption {
+func WithStrict() DecodeOption {
 	return func(o *decoderOptions) { o.strict = true }
 }
 
-// DisallowDuplicateKey causes decoding to return a [DuplicateKeyError] if a
+// WithDisallowDuplicateKey causes decoding to return a [DuplicateKeyError] if a
 // mapping contains the same key more than once.
-func DisallowDuplicateKey() DecodeOption {
+func WithDisallowDuplicateKey() DecodeOption {
 	return func(o *decoderOptions) { o.disallowDuplicates = true }
 }
 
-// UseOrderedMap causes decoding into any (interface{}) to produce [MapSlice]
+// WithOrderedMap causes decoding into any (interface{}) to produce [MapSlice]
 // values for mappings instead of map[string]any, preserving key order.
-func UseOrderedMap() DecodeOption {
+func WithOrderedMap() DecodeOption {
 	return func(o *decoderOptions) { o.useOrderedMap = true }
 }
 
-// UseJSONUnmarshaler causes the decoder to try a type's UnmarshalJSON method
+// WithJSONUnmarshaler causes the decoder to try a type's UnmarshalJSON method
 // if no YAML-specific unmarshaler is found.
-func UseJSONUnmarshaler() DecodeOption {
+func WithJSONUnmarshaler() DecodeOption {
 	return func(o *decoderOptions) { o.useJSONUnmarshaler = true }
 }
 
-// MaxDepth limits the nesting depth of the decoded value (default 100).
+// WithMaxDepth limits the nesting depth of the decoded value (default 100).
 // Deeply nested documents are rejected with a [SyntaxError].
-func MaxDepth(n int) DecodeOption {
+func WithMaxDepth(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDepth = n }
 }
 
-// MaxAliasExpansion limits the total number of alias expansions during
+// WithMaxAliasExpansion limits the total number of alias expansions during
 // decoding (default 1000). This prevents denial-of-service via
 // exponentially expanding aliases (the "billion laughs" attack).
-func MaxAliasExpansion(n int) DecodeOption {
+func WithMaxAliasExpansion(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxAliasExpansion = n }
 }
 
-// Validator registers a [StructValidator] that is called after each struct
+// WithValidator registers a [StructValidator] that is called after each struct
 // is fully decoded.
-func Validator(v StructValidator) DecodeOption {
+func WithValidator(v StructValidator) DecodeOption {
 	return func(o *decoderOptions) { o.validator = v }
 }
 
-// ReferenceFiles loads the given YAML files and makes their anchors
+// WithReferenceFiles loads the given YAML files and makes their anchors
 // available for alias resolution in the primary document.
-func ReferenceFiles(files ...string) DecodeOption {
+func WithReferenceFiles(files ...string) DecodeOption {
 	return func(o *decoderOptions) { o.referenceFiles = append(o.referenceFiles, files...) }
 }
 
-// ReferenceDirs loads all .yaml and .yml files in the given directories
+// WithReferenceDirs loads all .yaml and .yml files in the given directories
 // and makes their anchors available for alias resolution. By default only
-// the top level of each directory is scanned; use [RecursiveDir] to walk
+// the top level of each directory is scanned; use [WithRecursiveDir] to walk
 // subdirectories.
-func ReferenceDirs(dirs ...string) DecodeOption {
+func WithReferenceDirs(dirs ...string) DecodeOption {
 	return func(o *decoderOptions) { o.referenceDirs = append(o.referenceDirs, dirs...) }
 }
 
-// RecursiveDir controls whether [ReferenceDirs] walks subdirectories
+// WithRecursiveDir controls whether [WithReferenceDirs] walks subdirectories
 // recursively. Symlinks that escape the directory root are rejected.
-func RecursiveDir(b bool) DecodeOption {
+func WithRecursiveDir(b bool) DecodeOption {
 	return func(o *decoderOptions) { o.recursiveDir = b }
 }
 
-// AllowDuplicateMapKey silently accepts duplicate mapping keys, with the
+// WithAllowDuplicateMapKey silently accepts duplicate mapping keys, with the
 // last value winning. This is the default YAML 1.2.2 behavior; use
-// [DisallowDuplicateKey] for stricter handling.
-func AllowDuplicateMapKey() DecodeOption {
+// [WithDisallowDuplicateKey] for stricter handling.
+func WithAllowDuplicateMapKey() DecodeOption {
 	return func(o *decoderOptions) { o.allowDuplicates = true }
 }
 
-// MaxDocumentSize rejects input that exceeds n bytes before parsing begins.
-func MaxDocumentSize(n int) DecodeOption {
+// WithMaxDocumentSize rejects input that exceeds n bytes before parsing begins.
+func WithMaxDocumentSize(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDocumentSize = n }
 }
 
-// MaxNodes limits the total number of AST nodes the parser may create.
+// WithMaxNodes limits the total number of AST nodes the parser may create.
 // Zero means no limit.
-func MaxNodes(n int) DecodeOption {
+func WithMaxNodes(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxNodes = n }
 }
 
-// CustomMarshaler registers a function that encodes values of type T to YAML
+// WithCustomMarshaler registers a function that encodes values of type T to YAML
 // bytes, overriding the default encoding for that type.
-func CustomMarshaler[T any](fn func(T) ([]byte, error)) EncodeOption {
+func WithCustomMarshaler[T any](fn func(T) ([]byte, error)) EncodeOption {
 	return func(o *encoderOptions) {
 		if o.customMarshalers == nil {
 			o.customMarshalers = make(map[reflect.Type]any)
@@ -277,9 +277,9 @@ func CustomMarshaler[T any](fn func(T) ([]byte, error)) EncodeOption {
 	}
 }
 
-// CustomUnmarshaler registers a function that decodes YAML bytes into a
+// WithCustomUnmarshaler registers a function that decodes YAML bytes into a
 // value of type T, overriding the default decoding for that type.
-func CustomUnmarshaler[T any](fn func(*T, []byte) error) DecodeOption {
+func WithCustomUnmarshaler[T any](fn func(*T, []byte) error) DecodeOption {
 	return func(o *decoderOptions) {
 		if o.customUnmarshalers == nil {
 			o.customUnmarshalers = make(map[reflect.Type]any)

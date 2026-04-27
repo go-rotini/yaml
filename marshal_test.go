@@ -37,7 +37,7 @@ func TestMarshalWithOptionsIndent(t *testing.T) {
 	}
 	v := S{}
 	v.A.B = "val"
-	data, err := MarshalWithOptions(v, Indent(4))
+	data, err := MarshalWithOptions(v, WithIndent(4))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestMarshalWithOptionsIndent(t *testing.T) {
 }
 
 func TestMarshalWithOptionsFlow(t *testing.T) {
-	data, err := MarshalWithOptions([]int{1, 2, 3}, Flow(true))
+	data, err := MarshalWithOptions([]int{1, 2, 3}, WithFlow(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestNewEncoder(t *testing.T) {
 
 func TestNewEncoderWithOptions(t *testing.T) {
 	var buf bytes.Buffer
-	enc := NewEncoder(&buf, Indent(4), Flow(true))
+	enc := NewEncoder(&buf, WithIndent(4), WithFlow(true))
 	if enc == nil {
 		t.Fatal("expected non-nil encoder")
 	}
@@ -141,7 +141,7 @@ func TestEncoderEncodeContext(t *testing.T) {
 }
 
 func TestEncoderWriteError(t *testing.T) {
-	enc := NewEncoder(&failWriter{}, Indent(4))
+	enc := NewEncoder(&failWriter{}, WithIndent(4))
 	err := enc.Encode(map[string]string{"a": "b"})
 	if err != nil {
 		t.Fatal(err)

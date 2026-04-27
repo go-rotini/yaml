@@ -419,7 +419,7 @@ func TestMarshalCustomMarshalerOption(t *testing.T) {
 		R, G, B uint8
 	}
 	c := Color{R: 255, G: 128, B: 0}
-	out, err := MarshalWithOptions(c, CustomMarshaler(func(c Color) ([]byte, error) {
+	out, err := MarshalWithOptions(c, WithCustomMarshaler(func(c Color) ([]byte, error) {
 		return []byte(fmt.Sprintf("#%02x%02x%02x", c.R, c.G, c.B)), nil
 	}))
 	if err != nil {
@@ -614,7 +614,7 @@ func TestMarshalSliceWithCompoundElements(t *testing.T) {
 }
 
 func TestMarshalFlowSequence(t *testing.T) {
-	data, err := MarshalWithOptions([]int{1, 2, 3}, Flow(true))
+	data, err := MarshalWithOptions([]int{1, 2, 3}, WithFlow(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +625,7 @@ func TestMarshalFlowSequence(t *testing.T) {
 }
 
 func TestMarshalFlowSequenceStrings(t *testing.T) {
-	data, err := MarshalWithOptions([]string{"a", "b", "c"}, Flow(true))
+	data, err := MarshalWithOptions([]string{"a", "b", "c"}, WithFlow(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +652,7 @@ func TestMarshalIndentSequence(t *testing.T) {
 		Items []string `yaml:"items"`
 	}
 	v := S{Items: []string{"a", "b"}}
-	data, err := MarshalWithOptions(v, IndentSequence(true))
+	data, err := MarshalWithOptions(v, WithIndentSequence(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +726,7 @@ func TestMarshalMapWithCompoundValues(t *testing.T) {
 }
 
 func TestMarshalFlowMapping(t *testing.T) {
-	data, err := MarshalWithOptions(map[string]int{"a": 1, "b": 2}, Flow(true))
+	data, err := MarshalWithOptions(map[string]int{"a": 1, "b": 2}, WithFlow(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -782,7 +782,7 @@ func TestMarshalStructOmitEmpty(t *testing.T) {
 		Iface any               `yaml:"iface,omitempty"`
 		Time  time.Time         `yaml:"time,omitempty"`
 	}
-	data, err := MarshalWithOptions(Config{}, Flow(true))
+	data, err := MarshalWithOptions(Config{}, WithFlow(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -873,7 +873,7 @@ func TestMarshalFlowStruct(t *testing.T) {
 		Name  string `yaml:"name"`
 		Value int    `yaml:"value"`
 	}
-	data, err := MarshalWithOptions(Config{Name: "a", Value: 1}, Flow(true))
+	data, err := MarshalWithOptions(Config{Name: "a", Value: 1}, WithFlow(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -888,7 +888,7 @@ func TestMarshalFlowStructOmitEmpty(t *testing.T) {
 		Name  string `yaml:"name"`
 		Value int    `yaml:"value,omitempty"`
 	}
-	data, err := MarshalWithOptions(Config{Name: "a"}, Flow(true))
+	data, err := MarshalWithOptions(Config{Name: "a"}, WithFlow(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -909,7 +909,7 @@ func TestWriteScalarPlain(t *testing.T) {
 }
 
 func TestWriteScalarJSONCompat(t *testing.T) {
-	data, err := MarshalWithOptions(map[string]string{"key": "value"}, JSON(true))
+	data, err := MarshalWithOptions(map[string]string{"key": "value"}, WithJSON(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -921,7 +921,7 @@ func TestWriteScalarJSONCompat(t *testing.T) {
 
 func TestWriteScalarLiteralBlock(t *testing.T) {
 	m := map[string]string{"config": "line one\nline two\nline three\n"}
-	data, err := MarshalWithOptions(m, UseLiteralStyleIfMultiline(true))
+	data, err := MarshalWithOptions(m, WithLiteralStyle(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -933,7 +933,7 @@ func TestWriteScalarLiteralBlock(t *testing.T) {
 
 func TestWriteScalarLiteralBlockNoTrailingNewline(t *testing.T) {
 	m := map[string]string{"config": "line one\nline two"}
-	data, err := MarshalWithOptions(m, UseLiteralStyleIfMultiline(true))
+	data, err := MarshalWithOptions(m, WithLiteralStyle(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -944,7 +944,7 @@ func TestWriteScalarLiteralBlockNoTrailingNewline(t *testing.T) {
 }
 
 func TestWriteScalarAutoInt(t *testing.T) {
-	out, err := MarshalWithOptions("42", AutoInt(true))
+	out, err := MarshalWithOptions("42", WithAutoInt(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -955,7 +955,7 @@ func TestWriteScalarAutoInt(t *testing.T) {
 }
 
 func TestWriteScalarAutoIntNonNumeric(t *testing.T) {
-	out, err := MarshalWithOptions("hello", AutoInt(true))
+	out, err := MarshalWithOptions("hello", WithAutoInt(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -967,7 +967,7 @@ func TestWriteScalarAutoIntNonNumeric(t *testing.T) {
 
 func TestWriteScalarSingleQuote(t *testing.T) {
 	m := map[string]string{"key": "needs: quoting"}
-	data, err := MarshalWithOptions(m, UseSingleQuote(true))
+	data, err := MarshalWithOptions(m, WithSingleQuote(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -978,7 +978,7 @@ func TestWriteScalarSingleQuote(t *testing.T) {
 
 func TestWriteScalarSingleQuoteFallbackForNewline(t *testing.T) {
 	m := map[string]string{"key": "has\nnewline"}
-	data, err := MarshalWithOptions(m, UseSingleQuote(true))
+	data, err := MarshalWithOptions(m, WithSingleQuote(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -993,7 +993,7 @@ func TestWriteScalarSingleQuoteFallbackForNewline(t *testing.T) {
 
 func TestWriteScalarSingleQuoteFallbackForApostrophe(t *testing.T) {
 	m := map[string]string{"key": "it's"}
-	data, err := MarshalWithOptions(m, UseSingleQuote(true))
+	data, err := MarshalWithOptions(m, WithSingleQuote(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1041,7 +1041,7 @@ func TestMarshalIndent(t *testing.T) {
 	type Outer struct {
 		Inner Inner `yaml:"inner"`
 	}
-	data, err := MarshalWithOptions(Outer{Inner: Inner{Key: "val"}}, Indent(4))
+	data, err := MarshalWithOptions(Outer{Inner: Inner{Key: "val"}}, WithIndent(4))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1428,7 +1428,7 @@ func TestMarshalNilMapAndSlice(t *testing.T) {
 
 func TestMarshalWithOmitEmptyOption(t *testing.T) {
 	m := map[string]string{"key": "val", "empty": ""}
-	data, err := MarshalWithOptions(m, OmitEmpty(true))
+	data, err := MarshalWithOptions(m, WithOmitEmpty(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1495,7 +1495,7 @@ func TestMarshalQuotedStringsRoundTrip(t *testing.T) {
 
 func TestMarshalFlowOption(t *testing.T) {
 	m := map[string]int{"a": 1, "b": 2}
-	data, err := MarshalWithOptions(m, Flow(true))
+	data, err := MarshalWithOptions(m, WithFlow(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1505,7 +1505,7 @@ func TestMarshalFlowOption(t *testing.T) {
 }
 
 func TestMarshalLineWidthOption(t *testing.T) {
-	out, err := MarshalWithOptions(map[string]string{"key": "value"}, LineWidth(120))
+	out, err := MarshalWithOptions(map[string]string{"key": "value"}, WithLineWidth(120))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1730,7 +1730,7 @@ func TestMarshalConcurrent(t *testing.T) {
 
 func TestEncoderWithIndentOption(t *testing.T) {
 	var buf bytes.Buffer
-	enc := NewEncoder(&buf, Indent(4))
+	enc := NewEncoder(&buf, WithIndent(4))
 	type Inner struct {
 		Key string `yaml:"key"`
 	}
@@ -1801,7 +1801,7 @@ func TestMarshalSliceErrorPropagation(t *testing.T) {
 
 func TestMarshalFlowSequenceErrorPropagation(t *testing.T) {
 	v := []encodeErrorMarshaler{{}}
-	_, err := MarshalWithOptions(v, Flow(true))
+	_, err := MarshalWithOptions(v, WithFlow(true))
 	if err == nil {
 		t.Error("expected error from flow sequence element marshal")
 	}
@@ -1817,7 +1817,7 @@ func TestMarshalMapErrorPropagation(t *testing.T) {
 
 func TestMarshalFlowMappingErrorPropagation(t *testing.T) {
 	m := map[string]encodeErrorMarshaler{"key": {}}
-	_, err := MarshalWithOptions(m, Flow(true))
+	_, err := MarshalWithOptions(m, WithFlow(true))
 	if err == nil {
 		t.Error("expected error from flow mapping value marshal")
 	}
@@ -1837,7 +1837,7 @@ func TestMarshalFlowStructErrorPropagation(t *testing.T) {
 	type S struct {
 		Field encodeErrorMarshaler `yaml:"field"`
 	}
-	_, err := MarshalWithOptions(S{}, Flow(true))
+	_, err := MarshalWithOptions(S{}, WithFlow(true))
 	if err == nil {
 		t.Error("expected error from flow struct field marshal")
 	}
@@ -1874,7 +1874,7 @@ func TestMarshalMapKeyError(t *testing.T) {
 
 func TestMarshalFlowMapKeyError(t *testing.T) {
 	m := map[encodeErrorMarshaler]string{{}: "val"}
-	_, err := MarshalWithOptions(m, Flow(true))
+	_, err := MarshalWithOptions(m, WithFlow(true))
 	if err == nil {
 		t.Error("expected error from flow map key marshal")
 	}
@@ -1882,7 +1882,7 @@ func TestMarshalFlowMapKeyError(t *testing.T) {
 
 func TestMarshalCustomMarshalerError(t *testing.T) {
 	type Color struct{ R uint8 }
-	_, err := MarshalWithOptions(Color{R: 1}, CustomMarshaler(func(c Color) ([]byte, error) {
+	_, err := MarshalWithOptions(Color{R: 1}, WithCustomMarshaler(func(c Color) ([]byte, error) {
 		return nil, fmt.Errorf("custom error")
 	}))
 	if err == nil {

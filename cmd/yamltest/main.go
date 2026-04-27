@@ -33,12 +33,12 @@ type report struct {
 }
 
 type failureReport struct {
-	Total      int                    `json:"total"`
-	Fail       int                    `json:"fail"`
-	ErrMissed  int                    `json:"error_missed"`
-	Timeout    int                    `json:"timeout"`
-	Failures   []result               `json:"failures"`
-	ByTag      map[string][]string    `json:"by_tag,omitempty"`
+	Total     int                 `json:"total"`
+	Fail      int                 `json:"fail"`
+	ErrMissed int                 `json:"error_missed"`
+	Timeout   int                 `json:"timeout"`
+	Failures  []result            `json:"failures"`
+	ByTag     map[string][]string `json:"by_tag,omitempty"`
 }
 
 func main() {

@@ -40,7 +40,7 @@ func ExampleUnmarshal() {
 
 func ExampleMarshalWithOptions() {
 	v := map[string][]int{"nums": {1, 2, 3}}
-	data, err := yaml.MarshalWithOptions(v, yaml.Flow(true))
+	data, err := yaml.MarshalWithOptions(v, yaml.WithFlow(true))
 	if err != nil {
 		panic(err)
 	}
@@ -163,7 +163,7 @@ func ExampleUnmarshalWithOptions_strict() {
 	}
 	data := []byte("name: test\nunknown: field\n")
 	var cfg Config
-	err := yaml.UnmarshalWithOptions(data, &cfg, yaml.Strict())
+	err := yaml.UnmarshalWithOptions(data, &cfg, yaml.WithStrict())
 	fmt.Println(err != nil)
 	// Output:
 	// true

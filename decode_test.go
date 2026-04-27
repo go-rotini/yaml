@@ -61,7 +61,7 @@ func TestDecodeMaxDepth(t *testing.T) {
 	}
 	input := "a:\n  b:\n    c:\n      d: val"
 	var v Level1
-	err := UnmarshalWithOptions([]byte(input), &v, MaxDepth(3))
+	err := UnmarshalWithOptions([]byte(input), &v, WithMaxDepth(3))
 	if err == nil {
 		t.Fatal("expected max depth error")
 	}
@@ -143,7 +143,7 @@ func TestDecodeAliasUnknown(t *testing.T) {
 func TestDecodeAliasCycle(t *testing.T) {
 	input := "a: &a\n  b: *a"
 	var v any
-	err := UnmarshalWithOptions([]byte(input), &v, MaxAliasExpansion(1))
+	err := UnmarshalWithOptions([]byte(input), &v, WithMaxAliasExpansion(1))
 	if err == nil {
 		t.Fatal("expected cycle error")
 	}
@@ -657,7 +657,7 @@ func TestDecodeMappingToMapDuplicateKey(t *testing.T) {
 func TestDecodeMappingToMapDuplicateKeyDisallowed(t *testing.T) {
 	input := "a: 1\na: 2"
 	var v map[string]int
-	err := UnmarshalWithOptions([]byte(input), &v, DisallowDuplicateKey())
+	err := UnmarshalWithOptions([]byte(input), &v, WithDisallowDuplicateKey())
 	if err == nil {
 		t.Fatal("expected duplicate key error")
 	}
@@ -670,7 +670,7 @@ func TestDecodeMappingToStructStrict(t *testing.T) {
 		Name string `yaml:"name"`
 	}
 	var s S
-	err := UnmarshalWithOptions([]byte("name: alice\nunknown: val"), &s, Strict())
+	err := UnmarshalWithOptions([]byte("name: alice\nunknown: val"), &s, WithStrict())
 	if err == nil {
 		t.Fatal("expected unknown field error in strict mode")
 	}
@@ -1066,7 +1066,7 @@ func TestDecodeToAnySequenceError(t *testing.T) {
 func TestDecodeMappingToOrderedMap(t *testing.T) {
 	input := "b: 2\na: 1\nc: 3"
 	var v any
-	err := UnmarshalWithOptions([]byte(input), &v, UseOrderedMap())
+	err := UnmarshalWithOptions([]byte(input), &v, WithOrderedMap())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1666,7 +1666,7 @@ func (j *decodeJSONTarget) UnmarshalJSON(data []byte) error {
 func TestDecodeJSONUnmarshaler(t *testing.T) {
 	input := "name: alice"
 	var v decodeJSONTarget
-	err := UnmarshalWithOptions([]byte(input), &v, UseJSONUnmarshaler())
+	err := UnmarshalWithOptions([]byte(input), &v, WithJSONUnmarshaler())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1683,7 +1683,7 @@ func TestDecodeCustomUnmarshalerOption(t *testing.T) {
 	}
 	data := []byte("color: \"#ff8000\"\n")
 	var m map[string]Color
-	err := UnmarshalWithOptions(data, &m, CustomUnmarshaler(func(c *Color, raw []byte) error {
+	err := UnmarshalWithOptions(data, &m, WithCustomUnmarshaler(func(c *Color, raw []byte) error {
 		s := strings.Trim(string(raw), " \n\"'")
 		if !strings.HasPrefix(s, "#") || len(s) != 7 {
 			return fmt.Errorf("invalid color: %s", s)
@@ -1943,7 +1943,7 @@ result:
 func TestDecodeOrderedMapPreservesOrder(t *testing.T) {
 	input := "z: 3\na: 1\nm: 2"
 	var v any
-	err := UnmarshalWithOptions([]byte(input), &v, UseOrderedMap())
+	err := UnmarshalWithOptions([]byte(input), &v, WithOrderedMap())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1964,7 +1964,7 @@ func TestDecodeOrderedMapPreservesOrder(t *testing.T) {
 func TestDecodeAllowDuplicateMapKey(t *testing.T) {
 	input := "a: 1\na: 2"
 	var v map[string]int
-	err := UnmarshalWithOptions([]byte(input), &v, AllowDuplicateMapKey())
+	err := UnmarshalWithOptions([]byte(input), &v, WithAllowDuplicateMapKey())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1978,7 +1978,7 @@ func TestDecodeAllowDuplicateMapKey(t *testing.T) {
 func TestDecodeDisallowDuplicateKey(t *testing.T) {
 	input := "a: 1\na: 2"
 	var v map[string]int
-	err := UnmarshalWithOptions([]byte(input), &v, DisallowDuplicateKey())
+	err := UnmarshalWithOptions([]byte(input), &v, WithDisallowDuplicateKey())
 	if err == nil {
 		t.Fatal("expected duplicate key error")
 	}
@@ -2127,7 +2127,7 @@ func TestDecodeCustomUnmarshalerError(t *testing.T) {
 	type T struct{ V int }
 	data := []byte("v: 42")
 	var out T
-	err := UnmarshalWithOptions(data, &out, CustomUnmarshaler(func(t *T, raw []byte) error {
+	err := UnmarshalWithOptions(data, &out, WithCustomUnmarshaler(func(t *T, raw []byte) error {
 		return fmt.Errorf("custom error")
 	}))
 	if err == nil {
@@ -3096,7 +3096,7 @@ unknown_field: value`
 	}
 
 	var c Config
-	err := UnmarshalWithOptions([]byte(input), &c, Strict())
+	err := UnmarshalWithOptions([]byte(input), &c, WithStrict())
 	if err == nil {
 		t.Error("expected error for unknown field in strict mode")
 	}
@@ -3984,7 +3984,7 @@ func TestDecoderWithStrictOption(t *testing.T) {
 	type Config struct {
 		Name string `yaml:"name"`
 	}
-	dec := NewDecoder(strings.NewReader(input), Strict())
+	dec := NewDecoder(strings.NewReader(input), WithStrict())
 	var c Config
 	err := dec.Decode(&c)
 	if err == nil {
@@ -4245,7 +4245,7 @@ b: 2
 a: 3
 `
 	var out map[string]any
-	err := UnmarshalWithOptions([]byte(input), &out, DisallowDuplicateKey())
+	err := UnmarshalWithOptions([]byte(input), &out, WithDisallowDuplicateKey())
 	if err == nil {
 		t.Fatal("expected error for duplicate key")
 	}
@@ -4270,7 +4270,7 @@ a: 2
 m: 3
 `
 	var out any
-	err := UnmarshalWithOptions([]byte(input), &out, UseOrderedMap())
+	err := UnmarshalWithOptions([]byte(input), &out, WithOrderedMap())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4294,7 +4294,7 @@ a:
       d: deep
 `
 	var out map[string]any
-	err := UnmarshalWithOptions([]byte(input), &out, MaxDepth(2))
+	err := UnmarshalWithOptions([]byte(input), &out, WithMaxDepth(2))
 	if err == nil {
 		t.Fatal("expected error for exceeded max depth")
 	}
@@ -4302,7 +4302,7 @@ a:
 		t.Errorf("expected max depth error, got: %v", err)
 	}
 
-	err = UnmarshalWithOptions([]byte(input), &out, MaxDepth(100))
+	err = UnmarshalWithOptions([]byte(input), &out, WithMaxDepth(100))
 	if err != nil {
 		t.Fatalf("should succeed with large max depth: %v", err)
 	}
@@ -4315,12 +4315,12 @@ anchor: &a
 ref: *a
 `
 	var out any
-	err := UnmarshalWithOptions([]byte(input), &out, MaxAliasExpansion(1000))
+	err := UnmarshalWithOptions([]byte(input), &out, WithMaxAliasExpansion(1000))
 	if err != nil {
 		t.Fatalf("should succeed with large alias expansion: %v", err)
 	}
 
-	err = UnmarshalWithOptions([]byte(input), &out, MaxAliasExpansion(0))
+	err = UnmarshalWithOptions([]byte(input), &out, WithMaxAliasExpansion(0))
 	if err == nil {
 		t.Fatal("expected error for exceeded alias expansion with limit 0")
 	}
@@ -4331,7 +4331,7 @@ func TestOptionUseJSONUnmarshaler(t *testing.T) {
 	var out struct {
 		Value jsonTarget `yaml:"value"`
 	}
-	err := UnmarshalWithOptions([]byte(input), &out, UseJSONUnmarshaler())
+	err := UnmarshalWithOptions([]byte(input), &out, WithJSONUnmarshaler())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5194,7 +5194,7 @@ func TestValidatorOption(t *testing.T) {
 	input := `name: ""
 age: 30`
 	var out validatedStruct
-	err := UnmarshalWithOptions([]byte(input), &out, Validator(testValidator{}))
+	err := UnmarshalWithOptions([]byte(input), &out, WithValidator(testValidator{}))
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
@@ -5212,7 +5212,7 @@ age: 30`
 
 	input2 := `name: alice
 age: 30`
-	err = UnmarshalWithOptions([]byte(input2), &out, Validator(testValidator{}))
+	err = UnmarshalWithOptions([]byte(input2), &out, WithValidator(testValidator{}))
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -5221,7 +5221,7 @@ age: 30`
 func TestValidatorFormatError(t *testing.T) {
 	input := []byte("name: \"\"\nage: 30")
 	var out validatedStruct
-	err := UnmarshalWithOptions(input, &out, Validator(testValidator{}))
+	err := UnmarshalWithOptions(input, &out, WithValidator(testValidator{}))
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
@@ -5237,7 +5237,7 @@ func TestValidatorFormatError(t *testing.T) {
 func TestValidatorNotCalledOnMap(t *testing.T) {
 	input := `a: 1`
 	var out map[string]int
-	err := UnmarshalWithOptions([]byte(input), &out, Validator(testValidator{}))
+	err := UnmarshalWithOptions([]byte(input), &out, WithValidator(testValidator{}))
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -5481,7 +5481,7 @@ func TestCustomUnmarshaler(t *testing.T) {
 	}
 	data := []byte("color: \"#ff8000\"\n")
 	var m map[string]Color
-	err := UnmarshalWithOptions(data, &m, CustomUnmarshaler(func(c *Color, raw []byte) error {
+	err := UnmarshalWithOptions(data, &m, WithCustomUnmarshaler(func(c *Color, raw []byte) error {
 		s := strings.Trim(string(raw), " \n\"'")
 		if !strings.HasPrefix(s, "#") || len(s) != 7 {
 			return fmt.Errorf("invalid color: %s", s)
@@ -6009,7 +6009,7 @@ func TestUnmarshalBinary(t *testing.T) {
 func TestMaxDocumentSize(t *testing.T) {
 	data := []byte("key: value\n")
 	var v any
-	err := UnmarshalWithOptions(data, &v, MaxDocumentSize(5))
+	err := UnmarshalWithOptions(data, &v, WithMaxDocumentSize(5))
 	if err == nil {
 		t.Fatal("expected error for oversized document")
 	}
@@ -6081,7 +6081,7 @@ merged:
 
 func TestDecodeDuplicateKeyInMap(t *testing.T) {
 	var m map[string]int
-	err := UnmarshalWithOptions([]byte("a: 1\na: 2\n"), &m, DisallowDuplicateKey())
+	err := UnmarshalWithOptions([]byte("a: 1\na: 2\n"), &m, WithDisallowDuplicateKey())
 	if err == nil {
 		t.Fatal("expected duplicate key error")
 	}
