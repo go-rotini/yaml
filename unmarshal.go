@@ -23,10 +23,6 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 	for _, opt := range opts {
 		opt(o)
 	}
-	if err := o.validate(); err != nil {
-		return err
-	}
-
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return fmt.Errorf("yaml: unmarshal requires a non-nil pointer, got %T", v)
@@ -108,9 +104,6 @@ func (dec *Decoder) Decode(v any) error {
 // DecodeContext reads the next YAML document, passing ctx to types that
 // implement [UnmarshalerContext].
 func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
-	if err := dec.opts.validate(); err != nil {
-		return err
-	}
 	if !dec.init {
 		data, err := io.ReadAll(dec.r)
 		if err != nil {

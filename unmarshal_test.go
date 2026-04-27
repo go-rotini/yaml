@@ -262,7 +262,7 @@ func TestDecoderMaxDocumentSize(t *testing.T) {
 func TestAllowDuplicateMapKey(t *testing.T) {
 	data := []byte("a: 1\na: 2\n")
 	var v map[string]int
-	err := UnmarshalWithOptions(data, &v, WithAllowDuplicateMapKey())
+	err := Unmarshal(data, &v)
 	if err != nil {
 		t.Fatal(err)
 	}

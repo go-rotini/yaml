@@ -2,7 +2,6 @@ package yaml
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -36,7 +35,7 @@ func TestDefaultDecodeOptions(t *testing.T) {
 	if o.maxAliasExpansion != 1000 {
 		t.Errorf("expected maxAliasExpansion=1000, got %d", o.maxAliasExpansion)
 	}
-	if o.strict || o.disallowDuplicates || o.allowDuplicates || o.useOrderedMap || o.useJSONUnmarshaler || o.recursiveDir {
+	if o.strict || o.disallowDuplicates || o.useOrderedMap || o.useJSONUnmarshaler || o.recursiveDir {
 		t.Error("expected all bool options false by default")
 	}
 	if o.maxDocumentSize != 0 || o.maxNodes != 0 {
@@ -143,14 +142,6 @@ func TestDisallowDuplicateKeyOption(t *testing.T) {
 	WithDisallowDuplicateKey()(o)
 	if !o.disallowDuplicates {
 		t.Error("expected disallowDuplicates=true")
-	}
-}
-
-func TestAllowDuplicateMapKeyOption(t *testing.T) {
-	o := defaultDecodeOptions()
-	WithAllowDuplicateMapKey()(o)
-	if !o.allowDuplicates {
-		t.Error("expected allowDuplicates=true")
 	}
 }
 
@@ -371,27 +362,3 @@ func TestDecodeOptionIsFunc(t *testing.T) {
 	}
 }
 
-func TestOptionConflictDuplicateKey(t *testing.T) {
-	data := []byte("a: 1")
-	var v any
-	err := UnmarshalWithOptions(data, &v, WithDisallowDuplicateKey(), WithAllowDuplicateMapKey())
-	if err == nil {
-		t.Fatal("expected error for conflicting options")
-	}
-	if !strings.Contains(err.Error(), "conflicting options") {
-		t.Errorf("expected 'conflicting options' in error, got: %v", err)
-	}
-}
-
-func TestOptionConflictDuplicateKeyDecoder(t *testing.T) {
-	r := strings.NewReader("a: 1")
-	dec := NewDecoder(r, WithDisallowDuplicateKey(), WithAllowDuplicateMapKey())
-	var v any
-	err := dec.Decode(&v)
-	if err == nil {
-		t.Fatal("expected error for conflicting options")
-	}
-	if !strings.Contains(err.Error(), "conflicting options") {
-		t.Errorf("expected 'conflicting options' in error, got: %v", err)
-	}
-}

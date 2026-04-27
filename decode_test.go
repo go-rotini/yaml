@@ -1964,7 +1964,7 @@ func TestDecodeOrderedMapPreservesOrder(t *testing.T) {
 func TestDecodeAllowDuplicateMapKey(t *testing.T) {
 	input := "a: 1\na: 2"
 	var v map[string]int
-	err := UnmarshalWithOptions([]byte(input), &v, WithAllowDuplicateMapKey())
+	err := Unmarshal([]byte(input), &v)
 	if err != nil {
 		t.Fatal(err)
 	}

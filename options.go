@@ -1,9 +1,6 @@
 package yaml
 
-import (
-	"fmt"
-	"reflect"
-)
+import "reflect"
 
 // EncodeOption configures the behavior of [Marshal], [MarshalWithOptions],
 // and [Encoder].
@@ -148,7 +145,6 @@ const (
 type decoderOptions struct {
 	strict             bool
 	disallowDuplicates bool
-	allowDuplicates    bool
 	useOrderedMap      bool
 	useJSONUnmarshaler bool
 	maxDepth           int
@@ -169,13 +165,6 @@ func defaultDecodeOptions() *decoderOptions {
 		maxDepth:          100,
 		maxAliasExpansion: 1000,
 	}
-}
-
-func (o *decoderOptions) validate() error {
-	if o.disallowDuplicates && o.allowDuplicates {
-		return fmt.Errorf("yaml: conflicting options: WithDisallowDuplicateKey and WithAllowDuplicateMapKey cannot both be set")
-	}
-	return nil
 }
 
 // WithSchema selects the YAML tag resolution schema. The default is
@@ -246,13 +235,6 @@ func WithReferenceDirs(dirs ...string) DecodeOption {
 // recursively. Symlinks that escape the directory root are rejected.
 func WithRecursiveDir(b bool) DecodeOption {
 	return func(o *decoderOptions) { o.recursiveDir = b }
-}
-
-// WithAllowDuplicateMapKey silently accepts duplicate mapping keys, with the
-// last value winning. This is the default YAML 1.2.2 behavior; use
-// [WithDisallowDuplicateKey] for stricter handling.
-func WithAllowDuplicateMapKey() DecodeOption {
-	return func(o *decoderOptions) { o.allowDuplicates = true }
 }
 
 // WithMaxDocumentSize rejects input that exceeds n bytes before parsing begins.
