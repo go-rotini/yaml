@@ -361,4 +361,3 @@ func TestDecodeOptionIsFunc(t *testing.T) {
 		t.Error("expected non-nil option")
 	}
 }
-
