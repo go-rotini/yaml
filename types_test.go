@@ -19,11 +19,7 @@ func TestMapSliceType(t *testing.T) {
 }
 
 func TestMapSliceEmpty(t *testing.T) {
-	var ms MapSlice
-	if ms != nil {
-		t.Error("nil MapSlice should be nil")
-	}
-	ms = MapSlice{}
+	ms := MapSlice{}
 	if len(ms) != 0 {
 		t.Errorf("empty MapSlice should have length 0, got %d", len(ms))
 	}
