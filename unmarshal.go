@@ -23,6 +23,9 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 	for _, opt := range opts {
 		opt(o)
 	}
+	if err := o.validate(); err != nil {
+		return err
+	}
 
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
@@ -75,6 +78,9 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 // Decoder reads and decodes YAML documents from an input stream. Use
 // successive calls to [Decoder.Decode] to iterate over a multi-document
 // stream; it returns [io.EOF] when no more documents remain.
+//
+// A Decoder is not safe for concurrent use. Callers that need to decode
+// from multiple goroutines must provide their own synchronisation.
 type Decoder struct {
 	r    io.Reader
 	opts *decoderOptions
@@ -102,6 +108,9 @@ func (dec *Decoder) Decode(v any) error {
 // DecodeContext reads the next YAML document, passing ctx to types that
 // implement [UnmarshalerContext].
 func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
+	if err := dec.opts.validate(); err != nil {
+		return err
+	}
 	if !dec.init {
 		data, err := io.ReadAll(dec.r)
 		if err != nil {

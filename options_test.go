@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -367,5 +368,30 @@ func TestDecodeOptionIsFunc(t *testing.T) {
 	var opt DecodeOption = Strict()
 	if opt == nil {
 		t.Error("expected non-nil option")
+	}
+}
+
+func TestOptionConflictDuplicateKey(t *testing.T) {
+	data := []byte("a: 1")
+	var v any
+	err := UnmarshalWithOptions(data, &v, DisallowDuplicateKey(), AllowDuplicateMapKey())
+	if err == nil {
+		t.Fatal("expected error for conflicting options")
+	}
+	if !strings.Contains(err.Error(), "conflicting options") {
+		t.Errorf("expected 'conflicting options' in error, got: %v", err)
+	}
+}
+
+func TestOptionConflictDuplicateKeyDecoder(t *testing.T) {
+	r := strings.NewReader("a: 1")
+	dec := NewDecoder(r, DisallowDuplicateKey(), AllowDuplicateMapKey())
+	var v any
+	err := dec.Decode(&v)
+	if err == nil {
+		t.Fatal("expected error for conflicting options")
+	}
+	if !strings.Contains(err.Error(), "conflicting options") {
+		t.Errorf("expected 'conflicting options' in error, got: %v", err)
 	}
 }

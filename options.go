@@ -1,6 +1,9 @@
 package yaml
 
-import "reflect"
+import (
+	"fmt"
+	"reflect"
+)
 
 // EncodeOption configures the behavior of [Marshal], [MarshalWithOptions],
 // and [Encoder].
@@ -166,6 +169,13 @@ func defaultDecodeOptions() *decoderOptions {
 		maxDepth:          100,
 		maxAliasExpansion: 1000,
 	}
+}
+
+func (o *decoderOptions) validate() error {
+	if o.disallowDuplicates && o.allowDuplicates {
+		return fmt.Errorf("yaml: conflicting options: DisallowDuplicateKey and AllowDuplicateMapKey cannot both be set")
+	}
+	return nil
 }
 
 // WithSchema selects the YAML tag resolution schema. The default is

@@ -24,6 +24,9 @@ func MarshalWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
 
 // Encoder writes YAML values to an output stream. When multiple values are
 // encoded, each is separated by a "---" document marker.
+//
+// An Encoder is not safe for concurrent use. Callers that need to encode
+// from multiple goroutines must provide their own synchronisation.
 type Encoder struct {
 	w    io.Writer
 	opts *encoderOptions
