@@ -69,14 +69,6 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 		return &TypeError{Errors: d.typeErrors}
 	}
 
-	if o.validator != nil {
-		if rv.Elem().Kind() == reflect.Struct {
-			if err := o.validator.Struct(v); err != nil {
-				return err
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -162,14 +154,6 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 
 	if len(d.typeErrors) > 0 {
 		return &TypeError{Errors: d.typeErrors}
-	}
-
-	if dec.opts.validator != nil {
-		if rv.Elem().Kind() == reflect.Struct {
-			if err := dec.opts.validator.Struct(v); err != nil {
-				return err
-			}
-		}
 	}
 
 	return nil

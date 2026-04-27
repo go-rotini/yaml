@@ -807,3 +807,17 @@ func TestParseFlowSequenceKeyOnlyTokens(t *testing.T) {
 		t.Fatal("expected at least one document")
 	}
 }
+
+func TestUnknownDirectiveWarning(t *testing.T) {
+	input := "%CUSTOM foo bar\n---\nkey: val"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(file.Warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d", len(file.Warnings))
+	}
+	if !strings.Contains(file.Warnings[0], "%CUSTOM") {
+		t.Errorf("expected warning about %%CUSTOM, got: %s", file.Warnings[0])
+	}
+}

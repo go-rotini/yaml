@@ -123,6 +123,25 @@ type TagResolver struct {
 	Resolve func(value string) (any, error)
 }
 
+// Schema selects the YAML tag resolution schema used when decoding plain
+// scalars into interface{}/any values.
+type Schema int
+
+const (
+	// CoreSchema resolves plain scalars using the YAML 1.2 Core schema:
+	// null (~, null, Null, NULL, empty), bool (true/false in any case),
+	// int (decimal, hex 0x, octal 0o), float (including .inf, .nan).
+	CoreSchema Schema = iota
+
+	// JSONSchema resolves plain scalars like JSON: null (lowercase only),
+	// true/false (lowercase only), and JSON-format numbers.
+	JSONSchema
+
+	// FailsafeSchema treats all plain scalars as strings with no type
+	// coercion. Only explicitly tagged values are resolved.
+	FailsafeSchema
+)
+
 type decoderOptions struct {
 	strict             bool
 	disallowDuplicates bool
@@ -134,6 +153,7 @@ type decoderOptions struct {
 	maxDocumentSize    int
 	maxNodes           int
 	recursiveDir       bool
+	schema             Schema
 	validator          StructValidator
 	referenceFiles     []string
 	referenceDirs      []string
@@ -146,6 +166,13 @@ func defaultDecodeOptions() *decoderOptions {
 		maxDepth:          100,
 		maxAliasExpansion: 1000,
 	}
+}
+
+// WithSchema selects the YAML tag resolution schema. The default is
+// [CoreSchema]. Use [JSONSchema] for JSON-compatible resolution or
+// [FailsafeSchema] to treat all plain scalars as strings.
+func WithSchema(s Schema) DecodeOption {
+	return func(o *decoderOptions) { o.schema = s }
 }
 
 // Strict causes decoding to return an [UnknownFieldError] if a YAML key does

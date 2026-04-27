@@ -450,3 +450,37 @@ func TestParseScanErrorNonPrintable(t *testing.T) {
 		t.Fatal("expected error for non-printable character")
 	}
 }
+
+func TestNodeValidateOddMapping(t *testing.T) {
+	n := &Node{
+		Kind: MappingNode,
+		Children: []*Node{
+			{Kind: ScalarNode, Value: "key"},
+		},
+	}
+	if err := n.Validate(); err == nil {
+		t.Fatal("expected error for odd mapping children")
+	}
+}
+
+func TestNodeValidateEmptyAlias(t *testing.T) {
+	n := &Node{
+		Kind: AliasNode,
+	}
+	if err := n.Validate(); err == nil {
+		t.Fatal("expected error for empty alias name")
+	}
+}
+
+func TestNodeValidateValid(t *testing.T) {
+	n := &Node{
+		Kind: MappingNode,
+		Children: []*Node{
+			{Kind: ScalarNode, Value: "key"},
+			{Kind: ScalarNode, Value: "val"},
+		},
+	}
+	if err := n.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

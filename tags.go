@@ -53,8 +53,9 @@ func parseTag(tag string) fieldInfo {
 }
 
 type structFields struct {
-	fields []fieldInfo
-	byName map[string]int
+	fields    []fieldInfo
+	byName    map[string]int
+	conflicts []string
 }
 
 var structFieldCache sync.Map
@@ -123,9 +124,12 @@ func collectFields(t reflect.Type, index []int, sf *structFields) {
 			fi.name = strings.ToLower(f.Name)
 		}
 
-		if _, exists := sf.byName[fi.name]; exists {
-			if len(fi.index) <= len(sf.fields[sf.byName[fi.name]].index) {
-				sf.fields[sf.byName[fi.name]] = fi
+		if idx, exists := sf.byName[fi.name]; exists {
+			existing := sf.fields[idx]
+			if len(fi.index) == len(existing.index) {
+				sf.conflicts = append(sf.conflicts, fi.name)
+			} else if len(fi.index) < len(existing.index) {
+				sf.fields[idx] = fi
 			}
 			continue
 		}

@@ -14,9 +14,10 @@ import (
 )
 
 type result struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-	Detail string `json:"detail,omitempty"`
+	ID     string   `json:"id"`
+	Status string   `json:"status"`
+	Detail string   `json:"detail,omitempty"`
+	Tags   []string `json:"tags,omitempty"`
 }
 
 type report struct {
@@ -31,9 +32,19 @@ type report struct {
 	Results      []result `json:"results"`
 }
 
+type failureReport struct {
+	Total      int                    `json:"total"`
+	Fail       int                    `json:"fail"`
+	ErrMissed  int                    `json:"error_missed"`
+	Timeout    int                    `json:"timeout"`
+	Failures   []result               `json:"failures"`
+	ByTag      map[string][]string    `json:"by_tag,omitempty"`
+}
+
 func main() {
 	dir := flag.String("dir", "testdata/yaml-test-suite", "path to yaml-test-suite data directory")
 	timeout := flag.Duration("timeout", 5*time.Second, "per-test timeout")
+	failures := flag.Bool("failures", false, "only output failed/error_missed tests with details")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: yamltest [flags]\n\nRuns the YAML test suite and emits a JSON report to stdout.\n\nFlags:\n")
 		flag.PrintDefaults()
@@ -93,11 +104,35 @@ func main() {
 		r.PassRate = float64(passing) * 100 / float64(r.Total)
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(r); err != nil {
-		fmt.Fprintf(os.Stderr, "yamltest: %v\n", err)
-		os.Exit(1)
+	if *failures {
+		fr := failureReport{
+			Total:     r.Total,
+			Fail:      r.Fail,
+			ErrMissed: r.ErrorMissed,
+			Timeout:   r.Timeout,
+			ByTag:     make(map[string][]string),
+		}
+		for _, res := range r.Results {
+			if res.Status == "fail" || res.Status == "error_missed" || res.Status == "timeout" {
+				fr.Failures = append(fr.Failures, res)
+				for _, tag := range res.Tags {
+					fr.ByTag[tag] = append(fr.ByTag[tag], res.ID)
+				}
+			}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(fr); err != nil {
+			fmt.Fprintf(os.Stderr, "yamltest: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(r); err != nil {
+			fmt.Fprintf(os.Stderr, "yamltest: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	if r.Fail > 0 || r.ErrorMissed > 0 || r.Timeout > 0 {
@@ -105,12 +140,28 @@ func main() {
 	}
 }
 
+func readTags(testDir string) []string {
+	data, err := os.ReadFile(filepath.Join(testDir, "tags"))
+	if err != nil {
+		return nil
+	}
+	var tags []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		t := strings.TrimSpace(line)
+		if t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
+}
+
 func runTest(dir, id string) result {
 	testDir := filepath.Join(dir, id)
+	tags := readTags(testDir)
 
 	inYAML, err := os.ReadFile(filepath.Join(testDir, "in.yaml"))
 	if err != nil {
-		return result{ID: id, Status: "skip", Detail: "no in.yaml"}
+		return result{ID: id, Status: "skip", Detail: "no in.yaml", Tags: tags}
 	}
 
 	_, isErrorCase := os.Stat(filepath.Join(testDir, "error"))
@@ -118,28 +169,28 @@ func runTest(dir, id string) result {
 
 	eventData, err := os.ReadFile(filepath.Join(testDir, "test.event"))
 	if err != nil {
-		return result{ID: id, Status: "skip", Detail: "no test.event"}
+		return result{ID: id, Status: "skip", Detail: "no test.event", Tags: tags}
 	}
 	expectedEvents := parseTestEvents(eventData)
 
 	file, parseErr := yaml.Parse(inYAML)
 	if parseErr != nil {
 		if expectError {
-			return result{ID: id, Status: "error_correct", Detail: "parse error"}
+			return result{ID: id, Status: "error_correct", Detail: "parse error", Tags: tags}
 		}
-		return result{ID: id, Status: "fail", Detail: fmt.Sprintf("parse: %v", parseErr)}
+		return result{ID: id, Status: "fail", Detail: fmt.Sprintf("parse: %v", parseErr), Tags: tags}
 	}
 
 	if expectError {
-		return result{ID: id, Status: "error_missed", Detail: "expected error but parsed OK"}
+		return result{ID: id, Status: "error_missed", Detail: "expected error but parsed OK", Tags: tags}
 	}
 
 	gotEvents := nodeEvents(file)
 	if !eventsEqual(expectedEvents, gotEvents) {
-		return result{ID: id, Status: "fail", Detail: eventDiff(expectedEvents, gotEvents)}
+		return result{ID: id, Status: "fail", Detail: eventDiff(expectedEvents, gotEvents), Tags: tags}
 	}
 
-	return result{ID: id, Status: "pass"}
+	return result{ID: id, Status: "pass", Tags: tags}
 }
 
 func nodeEvents(file *yaml.File) []string {

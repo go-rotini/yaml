@@ -32,6 +32,11 @@ func TestErrorIs(t *testing.T) {
 	if !errors.Is(dupErr, ErrDuplicateKey) {
 		t.Error("expected DuplicateKeyError to match ErrDuplicateKey")
 	}
+
+	valErr := &ValidationError{Err: fmt.Errorf("bad"), Pos: Position{Line: 1, Column: 1}}
+	if !errors.Is(valErr, ErrValidation) {
+		t.Error("expected ValidationError to match ErrValidation")
+	}
 }
 
 func TestErrorIsNonMatch(t *testing.T) {
@@ -88,6 +93,25 @@ func TestErrorStrings(t *testing.T) {
 	dup := &DuplicateKeyError{Key: "name", Pos: Position{Line: 2}}
 	if !strings.Contains(dup.Error(), "name") {
 		t.Errorf("expected key in error: %s", dup.Error())
+	}
+
+	val := &ValidationError{Err: fmt.Errorf("field invalid"), Pos: Position{Line: 4}}
+	if !strings.Contains(val.Error(), "validation") {
+		t.Errorf("expected 'validation' in error: %s", val.Error())
+	}
+	if !strings.Contains(val.Error(), "field invalid") {
+		t.Errorf("expected wrapped message in error: %s", val.Error())
+	}
+	if !strings.Contains(val.Error(), "line 4") {
+		t.Errorf("expected line number in error: %s", val.Error())
+	}
+}
+
+func TestValidationErrorUnwrap(t *testing.T) {
+	inner := fmt.Errorf("inner error")
+	val := &ValidationError{Err: inner, Pos: Position{Line: 1}}
+	if errors.Unwrap(val) != inner {
+		t.Error("expected Unwrap to return inner error")
 	}
 }
 
@@ -178,6 +202,34 @@ func TestRepeatByte(t *testing.T) {
 	}
 	if repeatByte(' ', -1) != "" {
 		t.Errorf("expected empty string for n=-1")
+	}
+}
+
+func TestFormatErrorColor(t *testing.T) {
+	data := []byte("key: value\nbad: [unclosed")
+	err := &SyntaxError{
+		Message: "unterminated flow sequence",
+		Pos:     Position{Line: 2, Column: 6},
+	}
+	formatted := FormatError(data, err, true)
+	if !strings.Contains(formatted, "\x1b[1;31m") {
+		t.Error("expected ANSI color escape in color mode")
+	}
+	if !strings.Contains(formatted, "unterminated") {
+		t.Error("expected error message in color output")
+	}
+	if !strings.Contains(formatted, "^") {
+		t.Error("expected caret in color output")
+	}
+
+	plain := FormatError(data, err, false)
+	if strings.Contains(plain, "\x1b[") {
+		t.Error("expected no ANSI escapes in non-color mode")
+	}
+
+	defaultOut := FormatError(data, err)
+	if strings.Contains(defaultOut, "\x1b[") {
+		t.Error("expected no ANSI escapes in default mode")
 	}
 }
 

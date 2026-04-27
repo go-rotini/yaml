@@ -5202,11 +5202,35 @@ age: 30`
 		t.Errorf("expected 'name is required', got: %v", err)
 	}
 
+	var valErr *ValidationError
+	if !errors.As(err, &valErr) {
+		t.Fatalf("expected *ValidationError, got %T", err)
+	}
+	if valErr.Pos.Line == 0 {
+		t.Error("expected non-zero line in ValidationError position")
+	}
+
 	input2 := `name: alice
 age: 30`
 	err = UnmarshalWithOptions([]byte(input2), &out, Validator(testValidator{}))
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestValidatorFormatError(t *testing.T) {
+	input := []byte("name: \"\"\nage: 30")
+	var out validatedStruct
+	err := UnmarshalWithOptions(input, &out, Validator(testValidator{}))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	formatted := FormatError(input, err)
+	if !strings.Contains(formatted, "validation") {
+		t.Error("expected 'validation' in formatted output")
+	}
+	if !strings.Contains(formatted, "^") {
+		t.Error("expected caret pointer in formatted output")
 	}
 }
 
@@ -5663,6 +5687,89 @@ func TestSchemaTypes(t *testing.T) {
 			t.Fatalf("expected '42', got %q", v["b"])
 		}
 	})
+}
+
+func TestWithSchemaCore(t *testing.T) {
+	data := []byte("n: null\nN: Null\nbig: NULL\ntilde: ~\nb: True\ni: 0o77\nhex: 0xFF")
+	var v map[string]any
+	if err := UnmarshalWithOptions(data, &v, WithSchema(CoreSchema)); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"n", "N", "big", "tilde"} {
+		if v[key] != nil {
+			t.Errorf("CoreSchema: expected nil for %q, got %v", key, v[key])
+		}
+	}
+	if v["b"] != true {
+		t.Errorf("CoreSchema: expected true for 'True', got %v", v["b"])
+	}
+	if v["i"] != int64(63) {
+		t.Errorf("CoreSchema: expected 63 for 0o77, got %v", v["i"])
+	}
+	if v["hex"] != int64(255) {
+		t.Errorf("CoreSchema: expected 255 for 0xFF, got %v", v["hex"])
+	}
+}
+
+func TestWithSchemaJSON(t *testing.T) {
+	data := []byte("n: null\nN: Null\nbig: NULL\ntilde: ~\nbt: true\nbf: false\nbT: True\ni: 42\nf: 3.14")
+	var v map[string]any
+	if err := UnmarshalWithOptions(data, &v, WithSchema(JSONSchema)); err != nil {
+		t.Fatal(err)
+	}
+	if v["n"] != nil {
+		t.Errorf("JSONSchema: expected nil for 'null', got %v", v["n"])
+	}
+	if v["N"] != "Null" {
+		t.Errorf("JSONSchema: expected string 'Null', got %v (%T)", v["N"], v["N"])
+	}
+	if v["big"] != "NULL" {
+		t.Errorf("JSONSchema: expected string 'NULL', got %v (%T)", v["big"], v["big"])
+	}
+	if v["tilde"] != "~" {
+		t.Errorf("JSONSchema: expected string '~', got %v (%T)", v["tilde"], v["tilde"])
+	}
+	if v["bt"] != true {
+		t.Errorf("JSONSchema: expected true, got %v", v["bt"])
+	}
+	if v["bf"] != false {
+		t.Errorf("JSONSchema: expected false, got %v", v["bf"])
+	}
+	if v["bT"] != "True" {
+		t.Errorf("JSONSchema: expected string 'True', got %v (%T)", v["bT"], v["bT"])
+	}
+	if v["i"] != int64(42) {
+		t.Errorf("JSONSchema: expected 42, got %v", v["i"])
+	}
+}
+
+func TestWithSchemaFailsafe(t *testing.T) {
+	data := []byte("n: null\nb: true\ni: 42\nf: 3.14")
+	var v map[string]any
+	if err := UnmarshalWithOptions(data, &v, WithSchema(FailsafeSchema)); err != nil {
+		t.Fatal(err)
+	}
+	for key, expected := range map[string]string{"n": "null", "b": "true", "i": "42", "f": "3.14"} {
+		s, ok := v[key].(string)
+		if !ok {
+			t.Errorf("FailsafeSchema: expected string for %q, got %T (%v)", key, v[key], v[key])
+			continue
+		}
+		if s != expected {
+			t.Errorf("FailsafeSchema: expected %q for %q, got %q", expected, key, s)
+		}
+	}
+}
+
+func TestWithSchemaFailsafeExplicitTags(t *testing.T) {
+	data := []byte("s: !!str 42\nn: !!null ''")
+	var v map[string]any
+	if err := UnmarshalWithOptions(data, &v, WithSchema(FailsafeSchema)); err != nil {
+		t.Fatal(err)
+	}
+	if v["s"] != "42" {
+		t.Errorf("expected string '42', got %v (%T)", v["s"], v["s"])
+	}
 }
 
 func TestUnterminatedFlowMapping(t *testing.T) {

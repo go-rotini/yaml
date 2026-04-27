@@ -13,6 +13,7 @@ type parser struct {
 	maxNodes          int
 	nodeCount         int
 	seenYAMLDirective bool
+	warnings          []string
 }
 
 func newParser(tokens []token) *parser {
@@ -127,6 +128,9 @@ func (p *parser) parseDirective() error {
 			}
 		}
 		p.seenYAMLDirective = true
+	} else {
+		name := strings.Fields(text)[0]
+		p.warnings = append(p.warnings, fmt.Sprintf("line %d: unknown directive %q", t.pos.Line, name))
 	}
 	return nil
 }

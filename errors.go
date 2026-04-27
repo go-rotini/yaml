@@ -100,6 +100,28 @@ func (e *DuplicateKeyError) Is(target error) bool {
 	return ok
 }
 
+// ValidationError wraps an error returned by a [StructValidator] with the
+// [Position] of the YAML node that was decoded into the struct. This allows
+// validation errors to be pretty-printed with [FormatError] just like syntax
+// errors.
+type ValidationError struct {
+	Err error
+	Pos Position
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("yaml: line %d: validation: %s", e.Pos.Line, e.Err.Error())
+}
+
+func (e *ValidationError) Unwrap() error {
+	return e.Err
+}
+
+func (e *ValidationError) Is(target error) bool {
+	_, ok := target.(*ValidationError)
+	return ok
+}
+
 // Sentinel errors for use with [errors.Is].
 var (
 	ErrSyntax       = &SyntaxError{}
@@ -107,27 +129,42 @@ var (
 	ErrUnknownField = &UnknownFieldError{}
 	ErrCycle        = &CycleError{}
 	ErrDuplicateKey = &DuplicateKeyError{}
+	ErrValidation  = &ValidationError{}
 )
 
-// FormatError returns a human-readable string for a [SyntaxError] that includes
-// the offending source line and a column pointer. For non-syntax errors it
-// returns err.Error().
-func FormatError(data []byte, err error) string {
-	synErr, ok := err.(*SyntaxError)
-	if !ok {
+// FormatError returns a human-readable string for a [SyntaxError] or
+// [ValidationError] that includes the offending source line and a column
+// pointer. For other error types it returns err.Error(). Set color to true
+// to include ANSI color escape sequences.
+func FormatError(data []byte, err error, color ...bool) string {
+	var pos Position
+	switch e := err.(type) {
+	case *SyntaxError:
+		pos = e.Pos
+	case *ValidationError:
+		pos = e.Pos
+	default:
 		return err.Error()
 	}
 
 	lines := bytes.Split(data, []byte("\n"))
-	lineIdx := synErr.Pos.Line - 1
+	lineIdx := pos.Line - 1
 	if lineIdx < 0 || lineIdx >= len(lines) {
-		return synErr.Error()
+		return err.Error()
 	}
 
+	useColor := len(color) > 0 && color[0]
+
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "%s\n", synErr.Error())
-	fmt.Fprintf(&buf, "  %s\n", string(lines[lineIdx]))
-	fmt.Fprintf(&buf, "  %s^\n", repeatByte(' ', synErr.Pos.Column-1))
+	if useColor {
+		fmt.Fprintf(&buf, "\x1b[1;31m%s\x1b[0m\n", err.Error())
+		fmt.Fprintf(&buf, "  %s\n", string(lines[lineIdx]))
+		fmt.Fprintf(&buf, "  %s\x1b[1;31m^\x1b[0m\n", repeatByte(' ', pos.Column-1))
+	} else {
+		fmt.Fprintf(&buf, "%s\n", err.Error())
+		fmt.Fprintf(&buf, "  %s\n", string(lines[lineIdx]))
+		fmt.Fprintf(&buf, "  %s^\n", repeatByte(' ', pos.Column-1))
+	}
 	return buf.String()
 }
 

@@ -207,6 +207,20 @@ func (p *Path) ReadString(data []byte) (string, error) {
 	return nodes[0].Value, nil
 }
 
+// ReadPositions evaluates the path against the [Node] tree and returns the
+// [Position] of every matching node.
+func (p *Path) ReadPositions(n *Node) ([]Position, error) {
+	nodes, err := p.Read(n)
+	if err != nil {
+		return nil, err
+	}
+	positions := make([]Position, len(nodes))
+	for i, node := range nodes {
+		positions[i] = node.Pos
+	}
+	return positions, nil
+}
+
 // Replace finds all nodes matching the path within the tree rooted at n and
 // replaces each with replacement. The path must have at least two segments
 // (root + child).

@@ -78,7 +78,8 @@ type Node struct {
 // File is the result of parsing a YAML byte stream. It contains one [Node]
 // per document in the stream.
 type File struct {
-	Docs []*Node
+	Docs     []*Node
+	Warnings []string
 }
 
 // Parse tokenizes and parses data into an AST. The returned [File] provides
@@ -100,7 +101,7 @@ func Parse(data []byte) (*File, error) {
 		return nil, err
 	}
 
-	file := &File{}
+	file := &File{Warnings: p.warnings}
 	for _, doc := range docs {
 		file.Docs = append(file.Docs, exportNode(doc))
 	}
@@ -243,6 +244,32 @@ func (n *Node) String() string {
 		return "*" + n.Alias
 	}
 	return ""
+}
+
+// Validate checks the structural consistency of the node tree rooted at n.
+// It returns an error if a mapping has an odd number of children (missing value),
+// or if an alias node references an empty name.
+func (n *Node) Validate() error {
+	var err error
+	Walk(n, func(node *Node) bool {
+		if err != nil {
+			return false
+		}
+		switch node.Kind {
+		case MappingNode:
+			if len(node.Children)%2 != 0 {
+				err = fmt.Errorf("yaml: mapping at %s has odd number of children (%d)", node.Pos, len(node.Children))
+				return false
+			}
+		case AliasNode:
+			if node.Alias == "" {
+				err = fmt.Errorf("yaml: alias at %s has empty name", node.Pos)
+				return false
+			}
+		}
+		return true
+	})
+	return err
 }
 
 // WalkFunc is the callback for [Walk]. Return true to recurse into the

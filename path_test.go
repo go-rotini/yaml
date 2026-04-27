@@ -699,3 +699,22 @@ func TestPathStringEmptyFieldName(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestReadPositions(t *testing.T) {
+	input := "items:\n  - name: a\n  - name: b\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := PathString("$.items[*].name")
+	positions, err := p.ReadPositions(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(positions) != 2 {
+		t.Fatalf("expected 2 positions, got %d", len(positions))
+	}
+	if positions[0].Line == 0 || positions[1].Line == 0 {
+		t.Error("expected non-zero line numbers")
+	}
+}

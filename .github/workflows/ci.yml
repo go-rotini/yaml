@@ -77,3 +77,47 @@ jobs:
 
       - name: YAML test suite conformance
         run: make test-verbose
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Benchmarks
+        run: make bench
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: bench.out
+
+  commitlint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check conventional commits
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+'
+          FAILED=0
+          for SHA in $(git rev-list "$BASE".."$HEAD"); do
+            MSG=$(git log --format=%s -n1 "$SHA")
+            if ! echo "$MSG" | grep -qE "$PATTERN"; then
+              echo "BAD: $MSG"
+              FAILED=1
+            fi
+          done
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::Some commits do not follow Conventional Commits (https://www.conventionalcommits.org)"
+            exit 1
+          fi

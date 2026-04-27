@@ -351,3 +351,24 @@ func TestTagParsingAnchorAlias(t *testing.T) {
 		t.Errorf("expected alias=bar, got %q", fi2.alias)
 	}
 }
+
+func TestConflictingFieldNamesTag(t *testing.T) {
+	type S struct {
+		A string `yaml:"name"`
+		B string `yaml:"name"`
+	}
+	sf := getStructFields(reflect.TypeOf(S{}))
+	if len(sf.conflicts) == 0 {
+		t.Fatal("expected conflict detected for duplicate yaml name")
+	}
+
+	err := Unmarshal([]byte("name: x"), &S{})
+	if err == nil {
+		t.Fatal("expected error for conflicting field names")
+	}
+
+	_, err = Marshal(S{A: "a", B: "b"})
+	if err == nil {
+		t.Fatal("expected error for conflicting field names on marshal")
+	}
+}

@@ -369,6 +369,12 @@ func (d *decoder) decodeMappingToMap(n *node, v reflect.Value) error {
 
 func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 	sf := getStructFields(v.Type())
+	if len(sf.conflicts) > 0 {
+		return &SyntaxError{
+			Message: fmt.Sprintf("struct has conflicting yaml field names: %s", strings.Join(sf.conflicts, ", ")),
+			Pos:     n.pos,
+		}
+	}
 
 	for i := 0; i < len(n.children)-1; i += 2 {
 		keyNode := n.children[i]
@@ -414,6 +420,13 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 				Message: fmt.Sprintf("required field %q is missing", fi.name),
 				Pos:     n.pos,
 			}
+		}
+	}
+
+	if d.opts.validator != nil && v.Kind() == reflect.Struct {
+		iface := v.Addr().Interface()
+		if err := d.opts.validator.Struct(iface); err != nil {
+			return &ValidationError{Err: err, Pos: n.pos}
 		}
 	}
 
@@ -702,12 +715,49 @@ func (d *decoder) scalarToAny(n *node) any {
 		return val
 	}
 
+	switch d.opts.schema {
+	case FailsafeSchema:
+		return val
+	case JSONSchema:
+		return scalarToAnyJSON(val)
+	default:
+		return scalarToAnyCore(val)
+	}
+}
+
+func scalarToAnyCore(val string) any {
 	if isNullValue(val) {
 		return nil
 	}
 
 	if b, err := parseBool(val); err == nil {
 		return b
+	}
+
+	if i, err := parseInt(val); err == nil {
+		if i >= math.MinInt && i <= math.MaxInt {
+			return int64(i)
+		}
+		return i
+	}
+
+	if f, err := parseFloat(val); err == nil {
+		return f
+	}
+
+	return val
+}
+
+func scalarToAnyJSON(val string) any {
+	if val == "null" {
+		return nil
+	}
+
+	if val == "true" {
+		return true
+	}
+	if val == "false" {
+		return false
 	}
 
 	if i, err := parseInt(val); err == nil {

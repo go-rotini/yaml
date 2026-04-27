@@ -407,6 +407,9 @@ func (e *encoder) marshalFlowMapping(v reflect.Value, indent int) error {
 
 func (e *encoder) marshalStruct(v reflect.Value, indent int, inline bool) error {
 	sf := getStructFields(v.Type())
+	if len(sf.conflicts) > 0 {
+		return fmt.Errorf("yaml: struct %s has conflicting field names: %s", v.Type(), strings.Join(sf.conflicts, ", "))
+	}
 
 	if e.opts.flow || inline {
 		return e.marshalFlowStruct(v, sf, indent)
