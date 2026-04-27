@@ -38,11 +38,11 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 	}
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return fmt.Errorf("yaml: unmarshal requires a non-nil pointer, got %T", v)
+		return fmt.Errorf("yaml: unmarshal requires a non-nil pointer, got %T: %w", v, ErrNilPointer)
 	}
 
 	if o.maxDocumentSize > 0 && len(data) > o.maxDocumentSize {
-		return fmt.Errorf("yaml: document size %d exceeds maximum %d", len(data), o.maxDocumentSize)
+		return fmt.Errorf("yaml: document size %d exceeds maximum %d: %w", len(data), o.maxDocumentSize, ErrDocumentSize)
 	}
 
 	data, err := detectAndConvertEncoding(data)
@@ -89,7 +89,7 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 // stream; it returns [io.EOF] when no more documents remain.
 //
 // A Decoder is not safe for concurrent use. Callers that need to decode
-// from multiple goroutines must provide their own synchronisation.
+// from multiple goroutines must provide their own synchronization.
 type Decoder struct {
 	r    io.Reader
 	opts *decoderOptions
@@ -120,11 +120,11 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 	if !dec.init {
 		data, err := io.ReadAll(dec.r)
 		if err != nil {
-			return err
+			return fmt.Errorf("yaml: read input: %w", err)
 		}
 
 		if dec.opts.maxDocumentSize > 0 && len(data) > dec.opts.maxDocumentSize {
-			return fmt.Errorf("yaml: document size %d exceeds maximum %d", len(data), dec.opts.maxDocumentSize)
+			return fmt.Errorf("yaml: document size %d exceeds maximum %d: %w", len(data), dec.opts.maxDocumentSize, ErrDocumentSize)
 		}
 
 		data, err = detectAndConvertEncoding(data)
@@ -153,7 +153,7 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return fmt.Errorf("yaml: decode requires a non-nil pointer, got %T", v)
+		return fmt.Errorf("yaml: decode requires a non-nil pointer, got %T: %w", v, ErrNilPointer)
 	}
 
 	d := newDecoder(dec.opts)
@@ -193,19 +193,19 @@ func loadReferences(d *decoder, o *decoderOptions) error {
 				}
 				name := d.Name()
 				if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-					real, err := filepath.EvalSymlinks(path)
+					resolved, err := filepath.EvalSymlinks(path)
 					if err != nil {
 						return fmt.Errorf("yaml: cannot resolve symlink %q: %w", path, err)
 					}
-					if !strings.HasPrefix(real, realClean) {
-						return fmt.Errorf("yaml: reference file %q escapes directory %q", real, realClean)
+					if !strings.HasPrefix(resolved, realClean) {
+						return fmt.Errorf("yaml: reference file %q escapes directory %q: %w", resolved, realClean, ErrPathEscape)
 					}
 					files = append(files, path)
 				}
 				return nil
 			})
 			if err != nil {
-				return err
+				return fmt.Errorf("yaml: walk reference dir: %w", err)
 			}
 		} else {
 			entries, err := os.ReadDir(realClean)
@@ -219,12 +219,12 @@ func loadReferences(d *decoder, o *decoderOptions) error {
 				name := e.Name()
 				if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
 					full := filepath.Join(realClean, name)
-					real, err := filepath.EvalSymlinks(full)
+					resolved, err := filepath.EvalSymlinks(full)
 					if err != nil {
 						return fmt.Errorf("yaml: cannot resolve symlink %q: %w", full, err)
 					}
-					if !strings.HasPrefix(real, realClean) {
-						return fmt.Errorf("yaml: reference file %q escapes directory %q", real, realClean)
+					if !strings.HasPrefix(resolved, realClean) {
+						return fmt.Errorf("yaml: reference file %q escapes directory %q: %w", resolved, realClean, ErrPathEscape)
 					}
 					files = append(files, full)
 				}

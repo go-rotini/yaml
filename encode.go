@@ -54,7 +54,7 @@ func applyComments(buf []byte, comments map[string][]Comment) []byte {
 	return buf
 }
 
-func insertHeadComment(buf []byte, path string, text string) []byte {
+func insertHeadComment(buf []byte, path, text string) []byte {
 	key := pathToKey(path)
 	if key == "" {
 		return buf
@@ -75,7 +75,7 @@ func insertHeadComment(buf []byte, path string, text string) []byte {
 	return buf
 }
 
-func insertLineComment(buf []byte, path string, text string) []byte {
+func insertLineComment(buf []byte, path, text string) []byte {
 	key := pathToKey(path)
 	if key == "" {
 		return buf
@@ -91,7 +91,7 @@ func insertLineComment(buf []byte, path string, text string) []byte {
 	return buf
 }
 
-func insertFootComment(buf []byte, path string, text string) []byte {
+func insertFootComment(buf []byte, path, text string) []byte {
 	key := pathToKey(path)
 	if key == "" {
 		return buf
@@ -148,7 +148,8 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		if fn, ok := e.opts.customMarshalers[t]; ok {
 			out := reflect.ValueOf(fn).Call([]reflect.Value{v})
 			if !out[1].IsNil() {
-				return out[1].Interface().(error)
+				err, _ := out[1].Interface().(error)
+				return err
 			}
 			e.buf = append(e.buf, out[0].Bytes()...)
 			return nil
@@ -227,7 +228,8 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if v.Type() == reflect.TypeFor[time.Duration]() {
-			e.buf = append(e.buf, v.Interface().(time.Duration).String()...)
+			d, _ := v.Interface().(time.Duration)
+			e.buf = append(e.buf, d.String()...)
 		} else {
 			e.buf = strconv.AppendInt(e.buf, v.Int(), 10)
 		}
@@ -235,13 +237,14 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		e.buf = strconv.AppendUint(e.buf, v.Uint(), 10)
 	case reflect.Float32, reflect.Float64:
 		f := v.Float()
-		if math.IsInf(f, 1) {
+		switch {
+		case math.IsInf(f, 1):
 			e.buf = append(e.buf, ".inf"...)
-		} else if math.IsInf(f, -1) {
+		case math.IsInf(f, -1):
 			e.buf = append(e.buf, "-.inf"...)
-		} else if math.IsNaN(f) {
+		case math.IsNaN(f):
 			e.buf = append(e.buf, ".nan"...)
-		} else {
+		default:
 			e.buf = strconv.AppendFloat(e.buf, f, 'g', -1, 64)
 		}
 	case reflect.Slice:
@@ -266,15 +269,15 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 	case reflect.Struct:
 		switch v.Type() {
 		case reflect.TypeFor[big.Int]():
-			bi := v.Interface().(big.Int)
+			bi, _ := v.Interface().(big.Int)
 			e.buf = append(e.buf, bi.String()...)
 			return nil
 		case reflect.TypeFor[big.Float]():
-			bf := v.Interface().(big.Float)
+			bf, _ := v.Interface().(big.Float)
 			e.buf = append(e.buf, bf.Text('g', -1)...)
 			return nil
 		case reflect.TypeFor[big.Rat]():
-			br := v.Interface().(big.Rat)
+			br, _ := v.Interface().(big.Rat)
 			e.buf = append(e.buf, br.RatString()...)
 			return nil
 		}
@@ -301,7 +304,7 @@ func (e *encoder) marshalSlice(v reflect.Value, indent int, inline bool) error {
 		seqIndent = indent + e.opts.indent
 	}
 
-	for i := 0; i < v.Len(); i++ {
+	for i := range v.Len() {
 		if i > 0 || needsNewlineBefore(e.buf) {
 			e.buf = append(e.buf, '\n')
 			e.writeIndent(seqIndent)
@@ -309,14 +312,8 @@ func (e *encoder) marshalSlice(v reflect.Value, indent int, inline bool) error {
 		e.buf = append(e.buf, "- "...)
 
 		elem := v.Index(i)
-		if isCompound(elem) {
-			if err := e.marshalValue(elem, seqIndent+e.opts.indent, false); err != nil {
-				return err
-			}
-		} else {
-			if err := e.marshalValue(elem, seqIndent+e.opts.indent, false); err != nil {
-				return err
-			}
+		if err := e.marshalValue(elem, seqIndent+e.opts.indent, false); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -324,7 +321,7 @@ func (e *encoder) marshalSlice(v reflect.Value, indent int, inline bool) error {
 
 func (e *encoder) marshalFlowSequence(v reflect.Value, indent int) error {
 	e.buf = append(e.buf, '[')
-	for i := 0; i < v.Len(); i++ {
+	for i := range v.Len() {
 		if i > 0 {
 			e.buf = append(e.buf, ", "...)
 		}
@@ -408,7 +405,7 @@ func (e *encoder) marshalFlowMapping(v reflect.Value, indent int) error {
 func (e *encoder) marshalStruct(v reflect.Value, indent int, inline bool) error {
 	sf := getStructFields(v.Type())
 	if len(sf.conflicts) > 0 {
-		return fmt.Errorf("yaml: struct %s has conflicting field names: %s", v.Type(), strings.Join(sf.conflicts, ", "))
+		return fmt.Errorf("yaml: struct %s has conflicting field names: %s: %w", v.Type(), strings.Join(sf.conflicts, ", "), errConflictingFields)
 	}
 
 	if e.opts.flow || inline {
@@ -730,15 +727,16 @@ func isEmpty(v reflect.Value) bool {
 	case reflect.Struct:
 		switch v.Type() {
 		case reflect.TypeFor[time.Time]():
-			return v.Interface().(time.Time).IsZero()
+			t, _ := v.Interface().(time.Time)
+			return t.IsZero()
 		case reflect.TypeFor[big.Int]():
-			bi := v.Interface().(big.Int)
+			bi, _ := v.Interface().(big.Int)
 			return bi.Sign() == 0
 		case reflect.TypeFor[big.Float]():
-			bf := v.Interface().(big.Float)
+			bf, _ := v.Interface().(big.Float)
 			return bf.Sign() == 0
 		case reflect.TypeFor[big.Rat]():
-			br := v.Interface().(big.Rat)
+			br, _ := v.Interface().(big.Rat)
 			return br.Sign() == 0
 		}
 		return false

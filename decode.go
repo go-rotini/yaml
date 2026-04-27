@@ -90,7 +90,9 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 			ptr.Elem().Set(v)
 			out := reflect.ValueOf(fn).Call([]reflect.Value{ptr, reflect.ValueOf(raw)})
 			if !out[0].IsNil() {
-				return out[0].Interface().(error)
+				if e, ok := out[0].Interface().(error); ok {
+					return e
+				}
 			}
 			v.Set(ptr.Elem())
 			return nil
@@ -189,11 +191,12 @@ func (d *decoder) decodeScalar(n *node, v reflect.Value) error {
 				return &SyntaxError{Message: fmt.Sprintf("tag resolver %q: %v", n.tag, err), Pos: n.pos}
 			}
 			rv := reflect.ValueOf(result)
-			if rv.Type().AssignableTo(v.Type()) {
+			switch {
+			case rv.Type().AssignableTo(v.Type()):
 				v.Set(rv)
-			} else if rv.Type().ConvertibleTo(v.Type()) {
+			case rv.Type().ConvertibleTo(v.Type()):
 				v.Set(rv.Convert(v.Type()))
-			} else {
+			default:
 				d.addTypeError(n, v.Type())
 			}
 			return nil
@@ -637,7 +640,7 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 				}
 				keyStr = fmt.Sprintf("%v", resolved)
 			default:
-				keyStr = fmt.Sprintf("%v", keyNode.value)
+				keyStr = keyNode.value
 			}
 
 			val, err := d.decodeToAny(valNode)
@@ -680,7 +683,7 @@ func (d *decoder) decodeMappingToOrderedMap(n *node) (MapSlice, error) {
 			}
 			keyStr = fmt.Sprintf("%v", resolved)
 		default:
-			keyStr = fmt.Sprintf("%v", keyNode.value)
+			keyStr = keyNode.value
 		}
 
 		val, err := d.decodeToAny(valNode)
@@ -736,7 +739,7 @@ func scalarToAnyCore(val string) any {
 
 	if i, err := parseInt(val); err == nil {
 		if i >= math.MinInt && i <= math.MaxInt {
-			return int64(i)
+			return i
 		}
 		return i
 	}
@@ -762,7 +765,7 @@ func scalarToAnyJSON(val string) any {
 
 	if i, err := parseInt(val); err == nil {
 		if i >= math.MinInt && i <= math.MaxInt {
-			return int64(i)
+			return i
 		}
 		return i
 	}
@@ -807,7 +810,7 @@ func parseBool(s string) (bool, error) {
 	case "false", "False", "FALSE":
 		return false, nil
 	}
-	return false, fmt.Errorf("not a bool: %q", s)
+	return false, fmt.Errorf("not a bool %q: %w", s, errNotBool)
 }
 
 func parseInt(s string) (int64, error) {
@@ -859,7 +862,7 @@ func parseTime(s string) (time.Time, error) {
 			return t, nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("cannot parse %q as time", s)
+	return time.Time{}, fmt.Errorf("cannot parse %q as time: %w", s, errNotTime)
 }
 
 func fieldByIndex(v reflect.Value, index []int) reflect.Value {
@@ -890,7 +893,7 @@ type Unmarshaler interface {
 // BytesUnmarshaler is implemented by types that can decode themselves from
 // raw YAML bytes.
 type BytesUnmarshaler interface {
-	UnmarshalYAML([]byte) error
+	UnmarshalYAML(data []byte) error
 }
 
 // Marshaler is implemented by types that can encode themselves into a YAML-
@@ -918,7 +921,7 @@ type UnmarshalerContext interface {
 }
 
 type jsonUnmarshaler interface {
-	UnmarshalJSON([]byte) error
+	UnmarshalJSON(data []byte) error
 }
 
 func decodeBase64(s string) ([]byte, error) {
@@ -936,5 +939,9 @@ func jsonEncodeYAML(yamlData []byte) ([]byte, error) {
 	if err := Unmarshal(yamlData, &v); err != nil {
 		return nil, err
 	}
-	return json.Marshal(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("yaml: json encode: %w", err)
+	}
+	return b, nil
 }

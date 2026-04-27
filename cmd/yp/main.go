@@ -84,7 +84,9 @@ func printNode(n *yaml.Node) error {
 		if err != nil {
 			return err
 		}
-		os.Stdout.Write(out)
+		if _, err := os.Stdout.Write(out); err != nil {
+			return err
+		}
 	case yaml.AliasNode:
 		fmt.Printf("*%s\n", n.Alias)
 	}

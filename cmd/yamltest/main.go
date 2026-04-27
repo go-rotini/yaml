@@ -146,7 +146,7 @@ func readTags(testDir string) []string {
 		return nil
 	}
 	var tags []string
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		t := strings.TrimSpace(line)
 		if t != "" {
 			tags = append(tags, t)
@@ -339,10 +339,7 @@ func eventsEqual(expected, got []string) bool {
 
 func eventDiff(expected, got []string) string {
 	var sb strings.Builder
-	maxLen := len(expected)
-	if len(got) > maxLen {
-		maxLen = len(got)
-	}
+	maxLen := max(len(expected), len(got))
 	for i := range maxLen {
 		var e, g string
 		if i < len(expected) {

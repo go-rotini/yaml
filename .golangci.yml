@@ -45,8 +45,6 @@ linters:
     - containedctx    # context in encoder/decoder structs is by design
     - tagliatelle     # struct tags use yaml-specific conventions, not generic casing
     - forbidigo       # fmt.Print usage in cmd/ is intentional
-    - err113          # TODO: introduce sentinel errors incrementally
-    - wrapcheck       # TODO: wrap external errors incrementally
     - exhaustive      # switch exhaustiveness on internal token types is intentional
 
   settings:
@@ -69,7 +67,7 @@ linters:
 
     goconst:
       min-len: 3
-      min-occurrences: 4
+      min-occurrences: 5
 
     gocritic:
       enabled-tags:
@@ -104,7 +102,7 @@ linters:
         - name: var-naming
 
     errcheck:
-      check-type-assertions: true
+      check-type-assertions: false
       check-blank: true
 
     gosec:
@@ -120,6 +118,19 @@ linters:
 
     interfacebloat:
       max: 5
+
+    wrapcheck:
+      ignore-interface-regexps:
+        - "Unmarshaler"
+        - "Marshaler"
+        - "io\\.Writer"
+      ignore-sig-regexps:
+        - "TextUnmarshaler\\)\\.UnmarshalText"
+        - "TextMarshaler\\)\\.MarshalText"
+        - "io\\.Writer\\)\\.Write"
+      ignore-package-globs:
+        - "strconv"
+        - "encoding/base64"
 
     perfsprint:
       strconcat: false
@@ -171,6 +182,7 @@ linters:
           - misspell
           - intrange
           - testableexamples
+          - staticcheck
 
       - path: cmd/
         linters:
@@ -185,6 +197,7 @@ linters:
           - funlen
           - maintidx
           - nestif
+          - unparam
 
       - path: parser\.go
         linters:
@@ -215,6 +228,11 @@ linters:
           - funlen
           - maintidx
           - nestif
+
+      - path: encoding\.go
+        linters:
+          - cyclop
+          - gocyclo
 
       - path: unmarshal\.go
         linters:

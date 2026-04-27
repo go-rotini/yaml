@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -130,6 +131,24 @@ var (
 	ErrCycle        = &CycleError{}
 	ErrDuplicateKey = &DuplicateKeyError{}
 	ErrValidation   = &ValidationError{}
+
+	ErrPathSyntax   = errors.New("yaml: invalid path syntax")
+	ErrPathNotFound = errors.New("yaml: path not found")
+	ErrNilPointer   = errors.New("yaml: non-nil pointer required")
+	ErrDocumentSize = errors.New("yaml: document size exceeds limit")
+	ErrPathEscape   = errors.New("yaml: reference path escapes allowed directory")
+)
+
+var (
+	errConflictingFields   = errors.New("conflicting field names")
+	errUndefinedTag        = errors.New("undefined tag handle")
+	errNotBool             = errors.New("invalid boolean value")
+	errNotTime             = errors.New("invalid time value")
+	errOddChildren         = errors.New("odd number of mapping children")
+	errEmptyAlias          = errors.New("empty alias name")
+	errNoDocuments         = errors.New("no documents in file")
+	errPathTooShortReplace = errors.New("path too short for replace")
+	errPathTooShortDelete  = errors.New("path too short for delete")
 )
 
 // FormatError returns a human-readable string for a [SyntaxError] or
@@ -138,11 +157,13 @@ var (
 // to include ANSI color escape sequences.
 func FormatError(data []byte, err error, color ...bool) string {
 	var pos Position
-	switch e := err.(type) {
-	case *SyntaxError:
-		pos = e.Pos
-	case *ValidationError:
-		pos = e.Pos
+	var synErr *SyntaxError
+	var valErr *ValidationError
+	switch {
+	case errors.As(err, &synErr):
+		pos = synErr.Pos
+	case errors.As(err, &valErr):
+		pos = valErr.Pos
 	default:
 		return err.Error()
 	}

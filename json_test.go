@@ -8,7 +8,7 @@ import (
 
 func TestYAMLToJSON(t *testing.T) {
 	yamlData := []byte("name: test\ncount: 42")
-	jsonData, err := YAMLToJSON(yamlData)
+	jsonData, err := ToJSON(yamlData)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestYAMLToJSON(t *testing.T) {
 
 func TestJSONToYAML(t *testing.T) {
 	jsonData := []byte(`{"name":"test","count":42}`)
-	yamlData, err := JSONToYAML(jsonData)
+	yamlData, err := FromJSON(jsonData)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,14 +38,14 @@ func TestJSONToYAML(t *testing.T) {
 }
 
 func TestYAMLToJSONError(t *testing.T) {
-	_, err := YAMLToJSON([]byte(`[invalid`))
+	_, err := ToJSON([]byte(`[invalid`))
 	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestJSONToYAMLError(t *testing.T) {
-	_, err := JSONToYAML([]byte(`{invalid`))
+	_, err := FromJSON([]byte(`{invalid`))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -64,7 +64,7 @@ list:
 nested:
   key: value
 `
-	jsonData, err := YAMLToJSON([]byte(input))
+	jsonData, err := ToJSON([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ nested:
 
 func TestJSONToYAMLTypes(t *testing.T) {
 	input := `{"s":"hello","n":42,"f":3.14,"b":true,"nil":null,"arr":[1,2],"obj":{"k":"v"}}`
-	yamlData, err := JSONToYAML([]byte(input))
+	yamlData, err := FromJSON([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestJSONToYAMLTypes(t *testing.T) {
 }
 
 func TestYAMLToJSONEmpty(t *testing.T) {
-	jsonData, err := YAMLToJSON([]byte(""))
+	jsonData, err := ToJSON([]byte(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestYAMLToJSONEmpty(t *testing.T) {
 }
 
 func TestJSONToYAMLEmpty(t *testing.T) {
-	yamlData, err := JSONToYAML([]byte("null"))
+	yamlData, err := FromJSON([]byte("null"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,11 +135,11 @@ items:
   - b
 count: 99
 `
-	jsonData, err := YAMLToJSON([]byte(original))
+	jsonData, err := ToJSON([]byte(original))
 	if err != nil {
 		t.Fatal(err)
 	}
-	yamlData, err := JSONToYAML(jsonData)
+	yamlData, err := FromJSON(jsonData)
 	if err != nil {
 		t.Fatal(err)
 	}

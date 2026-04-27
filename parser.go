@@ -102,7 +102,8 @@ func (p *parser) parseDirective() error {
 	if idx := strings.Index(text, " #"); idx >= 0 {
 		text = strings.TrimRight(text[:idx], " \t")
 	}
-	if strings.HasPrefix(text, "%TAG") {
+	switch {
+	case strings.HasPrefix(text, "%TAG"):
 		parts := strings.Fields(text)
 		if len(parts) != 3 {
 			return &SyntaxError{
@@ -113,7 +114,7 @@ func (p *parser) parseDirective() error {
 		handle := parts[1]
 		prefix := parts[2]
 		p.tagHandles[handle] = prefix
-	} else if strings.HasPrefix(text, "%YAML") {
+	case strings.HasPrefix(text, "%YAML"):
 		parts := strings.Fields(text)
 		if len(parts) != 2 {
 			return &SyntaxError{
@@ -128,7 +129,7 @@ func (p *parser) parseDirective() error {
 			}
 		}
 		p.seenYAMLDirective = true
-	} else {
+	default:
 		name := strings.Fields(text)[0]
 		p.warnings = append(p.warnings, fmt.Sprintf("line %d: unknown directive %q", t.pos.Line, name))
 	}
@@ -159,7 +160,7 @@ func (p *parser) resolveTag(raw string) (string, error) {
 	if strings.HasPrefix(raw, "!") {
 		if idx := strings.Index(raw[1:], "!"); idx >= 0 {
 			handle := raw[:idx+2]
-			return "", fmt.Errorf("undefined tag handle: %s", handle)
+			return "", fmt.Errorf("%w: %s", errUndefinedTag, handle)
 		}
 		if prefix, ok := p.tagHandles["!"]; ok && prefix != "!" {
 			return prefix + decodeTagURI(raw[1:]), nil
@@ -607,18 +608,20 @@ func (p *parser) parseBlockSequence() (*node, error) {
 
 		savedPos := p.pos
 		var peekAnchor, peekTag string
+	peekLoop:
 		for {
 			pk := p.peek()
-			if pk.kind == tokenAnchor {
+			switch pk.kind {
+			case tokenAnchor:
 				peekAnchor = pk.value
 				p.advance()
 				p.skipComments()
-			} else if pk.kind == tokenTag {
+			case tokenTag:
 				peekTag = pk.value
 				p.advance()
 				p.skipComments()
-			} else {
-				break
+			default:
+				break peekLoop
 			}
 		}
 		if (peekAnchor != "" || peekTag != "") && (p.peek().kind == tokenBlockEntry || p.peek().kind == tokenBlockEnd ||

@@ -67,7 +67,7 @@ func main() {
 
 		if *write {
 			if !bytes.Equal(data, formatted) {
-				if err := os.WriteFile(path, formatted, 0o644); err != nil {
+				if err := os.WriteFile(path, formatted, 0o600); err != nil {
 					fmt.Fprintf(os.Stderr, "yfmt: %v\n", err)
 					os.Exit(1)
 				}
@@ -75,7 +75,10 @@ func main() {
 			continue
 		}
 
-		os.Stdout.Write(formatted)
+		if _, err := os.Stdout.Write(formatted); err != nil {
+			fmt.Fprintf(os.Stderr, "yfmt: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	if *check && unformatted > 0 {

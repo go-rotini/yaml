@@ -26,7 +26,7 @@ func MarshalWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
 // encoded, each is separated by a "---" document marker.
 //
 // An Encoder is not safe for concurrent use. Callers that need to encode
-// from multiple goroutines must provide their own synchronisation.
+// from multiple goroutines must provide their own synchronization.
 type Encoder struct {
 	w    io.Writer
 	opts *encoderOptions

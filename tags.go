@@ -62,7 +62,8 @@ var structFieldCache sync.Map
 
 func getStructFields(t reflect.Type) *structFields {
 	if cached, ok := structFieldCache.Load(t); ok {
-		return cached.(*structFields)
+		sf, _ := cached.(*structFields)
+		return sf
 	}
 	sf := &structFields{
 		byName: make(map[string]int),
@@ -73,7 +74,7 @@ func getStructFields(t reflect.Type) *structFields {
 }
 
 func collectFields(t reflect.Type, index []int, sf *structFields) {
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		f := t.Field(i)
 		if !f.IsExported() && !f.Anonymous {
 			continue

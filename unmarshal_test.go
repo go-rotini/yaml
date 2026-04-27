@@ -286,7 +286,7 @@ func TestDecoderReadError(t *testing.T) {
 	dec := NewDecoder(r)
 	var v any
 	err := dec.Decode(&v)
-	if err != io.ErrUnexpectedEOF {
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Errorf("expected ErrUnexpectedEOF, got %v", err)
 	}
 }

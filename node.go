@@ -258,12 +258,12 @@ func (n *Node) Validate() error {
 		switch node.Kind {
 		case MappingNode:
 			if len(node.Children)%2 != 0 {
-				err = fmt.Errorf("yaml: mapping at %s has odd number of children (%d)", node.Pos, len(node.Children))
+				err = fmt.Errorf("yaml: mapping at %s has odd number of children (%d): %w", node.Pos, len(node.Children), errOddChildren)
 				return false
 			}
 		case AliasNode:
 			if node.Alias == "" {
-				err = fmt.Errorf("yaml: alias at %s has empty name", node.Pos)
+				err = fmt.Errorf("yaml: alias at %s has %w", node.Pos, errEmptyAlias)
 				return false
 			}
 		}

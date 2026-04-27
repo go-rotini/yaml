@@ -53,7 +53,7 @@ func (s indexSegment) match(n *Node) []*Node {
 func (wildcardSegment) match(n *Node) []*Node {
 	switch n.Kind {
 	case MappingNode:
-		var result []*Node
+		result := make([]*Node, 0, (len(n.Children)-1)/2+1)
 		for i := 1; i < len(n.Children); i += 2 {
 			result = append(result, n.Children[i])
 		}
@@ -85,19 +85,19 @@ func (recursiveSegment) match(n *Node) []*Node {
 // Example: "$.servers[0].host" selects the host field of the first server.
 func PathString(expr string) (*Path, error) {
 	if expr == "" {
-		return nil, fmt.Errorf("yaml: empty path expression")
+		return nil, fmt.Errorf("empty path expression: %w", ErrPathSyntax)
 	}
 
 	p := &Path{}
 	expr = strings.TrimSpace(expr)
 
 	if !strings.HasPrefix(expr, "$") {
-		return nil, fmt.Errorf("yaml: path must start with $")
+		return nil, fmt.Errorf("path must start with $: %w", ErrPathSyntax)
 	}
 	p.segments = append(p.segments, rootSegment{})
 	expr = expr[1:]
 
-	for len(expr) > 0 {
+	for expr != "" {
 		switch {
 		case strings.HasPrefix(expr, ".."):
 			p.segments = append(p.segments, recursiveSegment{})
@@ -105,8 +105,8 @@ func PathString(expr string) (*Path, error) {
 
 		case expr[0] == '.':
 			expr = expr[1:]
-			if len(expr) == 0 {
-				return nil, fmt.Errorf("yaml: trailing dot in path")
+			if expr == "" {
+				return nil, fmt.Errorf("trailing dot in path: %w", ErrPathSyntax)
 			}
 			if expr[0] == '*' {
 				p.segments = append(p.segments, wildcardSegment{})
@@ -118,7 +118,7 @@ func PathString(expr string) (*Path, error) {
 				}
 				name := expr[:end]
 				if name == "" {
-					return nil, fmt.Errorf("yaml: empty field name in path")
+					return nil, fmt.Errorf("empty field name in path: %w", ErrPathSyntax)
 				}
 				p.segments = append(p.segments, childSegment{name: name})
 				expr = expr[end:]
@@ -127,7 +127,7 @@ func PathString(expr string) (*Path, error) {
 		case expr[0] == '[':
 			end := strings.IndexByte(expr, ']')
 			if end == -1 {
-				return nil, fmt.Errorf("yaml: unclosed bracket in path")
+				return nil, fmt.Errorf("unclosed bracket in path: %w", ErrPathSyntax)
 			}
 			inner := expr[1:end]
 			if inner == "*" {
@@ -135,14 +135,14 @@ func PathString(expr string) (*Path, error) {
 			} else {
 				idx, err := strconv.Atoi(inner)
 				if err != nil {
-					return nil, fmt.Errorf("yaml: invalid index %q in path", inner)
+					return nil, fmt.Errorf("yaml: invalid index %q in path: %w", inner, ErrPathSyntax)
 				}
 				p.segments = append(p.segments, indexSegment{idx: idx})
 			}
 			expr = expr[end+1:]
 
 		default:
-			return nil, fmt.Errorf("yaml: unexpected character %q in path", expr[0])
+			return nil, fmt.Errorf("yaml: unexpected character %q in path: %w", expr[0], ErrPathSyntax)
 		}
 	}
 
@@ -195,14 +195,14 @@ func (p *Path) ReadString(data []byte) (string, error) {
 		return "", err
 	}
 	if len(file.Docs) == 0 {
-		return "", fmt.Errorf("yaml: no documents")
+		return "", fmt.Errorf("yaml: %w", errNoDocuments)
 	}
 	nodes, err := p.Read(file.Docs[0])
 	if err != nil {
 		return "", err
 	}
 	if len(nodes) == 0 {
-		return "", fmt.Errorf("yaml: path not found")
+		return "", ErrPathNotFound
 	}
 	return nodes[0].Value, nil
 }
@@ -224,9 +224,9 @@ func (p *Path) ReadPositions(n *Node) ([]Position, error) {
 // Replace finds all nodes matching the path within the tree rooted at n and
 // replaces each with replacement. The path must have at least two segments
 // (root + child).
-func (p *Path) Replace(n *Node, replacement *Node) error {
+func (p *Path) Replace(n, replacement *Node) error {
 	if len(p.segments) < 2 {
-		return fmt.Errorf("yaml: path too short for replace")
+		return errPathTooShortReplace
 	}
 
 	parentSegs := p.segments[:len(p.segments)-1]
@@ -266,7 +266,7 @@ func (p *Path) Replace(n *Node, replacement *Node) error {
 
 // Append adds value as a new child to each [SequenceNode] matched by the
 // path within the tree rooted at n. Non-sequence matches are ignored.
-func (p *Path) Append(n *Node, value *Node) error {
+func (p *Path) Append(n, value *Node) error {
 	nodes, err := p.Read(n)
 	if err != nil {
 		return err
@@ -284,7 +284,7 @@ func (p *Path) Append(n *Node, value *Node) error {
 // least two segments (root + child).
 func (p *Path) Delete(n *Node) error {
 	if len(p.segments) < 2 {
-		return fmt.Errorf("yaml: path too short for delete")
+		return errPathTooShortDelete
 	}
 
 	parentSegs := p.segments[:len(p.segments)-1]

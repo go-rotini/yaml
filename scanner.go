@@ -3,6 +3,7 @@ package yaml
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -63,9 +64,7 @@ func normalizeLineBreaks(src []byte) []byte {
 
 func (s *scanner) scan() ([]token, error) {
 	s.emit(tokenStreamStart, "", s.position())
-	if err := s.skipBOM(); err != nil {
-		return nil, err
-	}
+	s.skipBOM()
 
 	for !s.atEnd() {
 		prevPos := s.pos
@@ -166,10 +165,7 @@ func (s *scanner) scanNext() error {
 func (s *scanner) scanBlockToken() error {
 	ch := s.peek()
 	if s.col-1 > s.indent && ch != '{' && ch != '[' && ch != '}' && ch != ']' {
-		lineStart := s.pos - (s.col - 1)
-		if lineStart < 0 {
-			lineStart = 0
-		}
+		lineStart := max(s.pos-(s.col-1), 0)
 		for i := lineStart; i < s.pos; i++ {
 			if s.src[i] == '\t' {
 				return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
@@ -204,8 +200,7 @@ func (s *scanner) scanBlockToken() error {
 	}
 
 	if (ch == '&' || ch == '*' || ch == '!') && s.col-1 <= s.indent {
-		for i := len(s.tokens) - 1; i >= 0; i-- {
-			tk := s.tokens[i]
+		for _, tk := range slices.Backward(s.tokens) {
 			if tk.kind == tokenComment || tk.kind == tokenAnchor || tk.kind == tokenTag || tk.kind == tokenAlias {
 				continue
 			}
@@ -266,8 +261,8 @@ func (s *scanner) scanFlowToken() error {
 		if s.isBlankOrEnd(1) {
 			if s.flow > 0 {
 				prevIsScalar := false
-				for pi := len(s.tokens) - 1; pi >= 0; pi-- {
-					pk := s.tokens[pi].kind
+				for _, tk := range slices.Backward(s.tokens) {
+					pk := tk.kind
 					if pk == tokenComment {
 						continue
 					}
@@ -287,8 +282,8 @@ func (s *scanner) scanFlowToken() error {
 		}
 		if s.flow > 0 {
 			prevIsScalar := false
-			for pi := len(s.tokens) - 1; pi >= 0; pi-- {
-				pk := s.tokens[pi].kind
+			for _, tk := range slices.Backward(s.tokens) {
+				pk := tk.kind
 				if pk == tokenComment {
 					continue
 				}
@@ -360,24 +355,26 @@ func (s *scanner) scanBlockValue() error {
 	col := s.col - 1
 	hasKey := false
 	depth := 0
-	for i := len(s.tokens) - 1; i >= 0; i-- {
-		tk := s.tokens[i].kind
-		if tk == tokenBlockEnd || tk == tokenFlowMappingEnd || tk == tokenFlowSequenceEnd {
+blockValueLoop:
+	for _, t := range slices.Backward(s.tokens) {
+		tk := t.kind
+		switch {
+		case tk == tokenBlockEnd || tk == tokenFlowMappingEnd || tk == tokenFlowSequenceEnd:
 			depth++
-		} else if tk == tokenBlockMappingStart || tk == tokenBlockSequenceStart ||
-			tk == tokenFlowMappingStart || tk == tokenFlowSequenceStart {
+		case tk == tokenBlockMappingStart || tk == tokenBlockSequenceStart ||
+			tk == tokenFlowMappingStart || tk == tokenFlowSequenceStart:
 			if depth > 0 {
 				depth--
 			} else {
-				break
+				break blockValueLoop
 			}
-		} else if depth == 0 {
+		case depth == 0:
 			if tk == tokenKey {
 				hasKey = true
-				break
+				break blockValueLoop
 			}
 			if tk == tokenValue || tk == tokenDocumentStart || tk == tokenDocumentEnd || tk == tokenStreamStart {
-				break
+				break blockValueLoop
 			}
 		}
 	}
@@ -401,9 +398,10 @@ func (s *scanner) scanBlockValue() error {
 				insertIdx--
 				for insertIdx > 0 && flowDepth > 0 {
 					tk := s.tokens[insertIdx-1].kind
-					if tk == prev.kind {
+					switch tk {
+					case prev.kind:
 						flowDepth++
-					} else if tk == startKind {
+					case startKind:
 						flowDepth--
 					}
 					insertIdx--
@@ -472,9 +470,10 @@ func (s *scanner) scanFlowEnd(kind tokenKind) error {
 			}
 			for insertIdx > 0 && flowDepth > 0 {
 				tk := s.tokens[insertIdx-1].kind
-				if tk == kind {
+				switch tk {
+				case kind:
 					flowDepth++
-				} else if tk == startKind {
+				case startKind:
 					flowDepth--
 				}
 				insertIdx--
@@ -506,7 +505,8 @@ func (s *scanner) scanFlowEnd(kind tokenKind) error {
 				s.tokens[insertIdx].pos.Line < pos.Line {
 				return &SyntaxError{Message: "multiline flow key is not allowed", Pos: pos}
 			}
-			if s.flow == 0 && col > s.indent {
+			switch {
+			case s.flow == 0 && col > s.indent:
 				s.indents = append(s.indents, s.indent)
 				s.indent = col
 				mapToken := token{kind: tokenBlockMappingStart, pos: pos}
@@ -517,10 +517,7 @@ func (s *scanner) scanFlowEnd(kind tokenKind) error {
 					s.tokens = append(s.tokens[:keyInsertIdx], append([]token{keyToken}, s.tokens[keyInsertIdx:]...)...)
 					s.tokens = append(s.tokens[:mapInsertIdx], append([]token{mapToken}, s.tokens[mapInsertIdx:]...)...)
 				}
-			} else if s.flow == 0 {
-				keyToken := token{kind: tokenKey, pos: pos}
-				s.tokens = append(s.tokens[:keyInsertIdx], append([]token{keyToken}, s.tokens[keyInsertIdx:]...)...)
-			} else {
+			default:
 				keyToken := token{kind: tokenKey, pos: pos}
 				s.tokens = append(s.tokens[:keyInsertIdx], append([]token{keyToken}, s.tokens[keyInsertIdx:]...)...)
 			}
@@ -567,14 +564,15 @@ func (s *scanner) scanTag() error {
 	s.advance(1)
 	start := s.pos - 1
 
-	if !s.atEnd() && s.peek() == '<' {
+	switch {
+	case !s.atEnd() && s.peek() == '<':
 		for !s.atEnd() && s.peek() != '>' {
 			s.advance(1)
 		}
 		if !s.atEnd() {
 			s.advance(1)
 		}
-	} else if !s.atEnd() && s.peek() == '!' {
+	case !s.atEnd() && s.peek() == '!':
 		s.advance(1)
 		for !s.atEnd() && !isBlank(s.peek()) && s.peek() != '\n' && s.peek() != '\r' {
 			ch := s.peek()
@@ -586,7 +584,7 @@ func (s *scanner) scanTag() error {
 			}
 			s.advance(1)
 		}
-	} else {
+	default:
 		for !s.atEnd() && !isBlank(s.peek()) && s.peek() != '\n' && s.peek() != '\r' {
 			ch := s.peek()
 			if ch == ',' || ch == '}' || ch == ']' || ch == '{' || ch == '[' {
@@ -616,26 +614,28 @@ func (s *scanner) scanBlockScalar() error {
 	chomp := 0
 	explicitIndent := 0
 
+headerLoop:
 	for !s.atEnd() && s.peek() != '\n' && s.peek() != '\r' {
 		c := s.peek()
-		if c == '-' {
+		switch {
+		case c == '-':
 			chomp = -1
 			s.advance(1)
-		} else if c == '+' {
+		case c == '+':
 			chomp = 1
 			s.advance(1)
-		} else if c >= '1' && c <= '9' {
+		case c >= '1' && c <= '9':
 			explicitIndent = int(c - '0')
 			s.advance(1)
-		} else if c == '#' {
+		case c == '#':
 			if s.pos > 0 && isBlank(s.src[s.pos-1]) {
 				s.scanComment()
-				break
+				break headerLoop
 			}
 			return &SyntaxError{Message: "comment must be preceded by whitespace", Pos: s.position()}
-		} else if c == ' ' || c == '\t' {
+		case c == ' ' || c == '\t':
 			s.advance(1)
-		} else {
+		default:
 			return &SyntaxError{Message: "invalid content after block scalar indicator", Pos: s.position()}
 		}
 	}
@@ -691,7 +691,7 @@ func (s *scanner) scanBlockScalar() error {
 
 		if s.atEnd() || s.peek() == '\n' || s.peek() == '\r' {
 			if lineCol > blockIndent {
-				for i := 0; i < trailingNewlines; i++ {
+				for range trailingNewlines {
 					lines = append(lines, "")
 				}
 				trailingNewlines = 0
@@ -707,7 +707,7 @@ func (s *scanner) scanBlockScalar() error {
 
 		if lineCol < blockIndent {
 			s.pos = lineStart
-			s.col = s.col - lineCol
+			s.col -= lineCol
 			break
 		}
 
@@ -715,12 +715,12 @@ func (s *scanner) scanBlockScalar() error {
 			marker := string(s.src[s.pos : s.pos+3])
 			if (marker == "---" || marker == "...") && (s.pos+3 >= len(s.src) || isBlank(s.src[s.pos+3]) || s.src[s.pos+3] == '\n' || s.src[s.pos+3] == '\r') {
 				s.pos = lineStart
-				s.col = s.col - lineCol
+				s.col -= lineCol
 				break
 			}
 		}
 
-		for i := 0; i < trailingNewlines; i++ {
+		for range trailingNewlines {
 			lines = append(lines, "")
 		}
 		trailingNewlines = 0
@@ -775,8 +775,8 @@ func (s *scanner) scanBlockScalar() error {
 				}
 				if emptyCount > 0 {
 					n := emptyCount
-					moreIndented := (len(line) > 0 && (line[0] == ' ' || line[0] == '\t')) ||
-						(len(lastContentLine) > 0 && (lastContentLine[0] == ' ' || lastContentLine[0] == '\t'))
+					moreIndented := (line != "" && (line[0] == ' ' || line[0] == '\t')) ||
+						(lastContentLine != "" && (lastContentLine[0] == ' ' || lastContentLine[0] == '\t'))
 					if moreIndented {
 						n++
 					}
@@ -786,8 +786,8 @@ func (s *scanner) scanBlockScalar() error {
 					buf.WriteString(line)
 					emptyCount = 0
 				} else {
-					moreIndentPrev := len(lastContentLine) > 0 && (lastContentLine[0] == ' ' || lastContentLine[0] == '\t')
-					moreIndentCurr := len(line) > 0 && (line[0] == ' ' || line[0] == '\t')
+					moreIndentPrev := lastContentLine != "" && (lastContentLine[0] == ' ' || lastContentLine[0] == '\t')
+					moreIndentCurr := line != "" && (line[0] == ' ' || line[0] == '\t')
 					if moreIndentPrev || moreIndentCurr {
 						buf.WriteByte('\n')
 					} else {
@@ -1296,11 +1296,12 @@ func (s *scanner) emitScalar(value string, pos Position) {
 			next = s.src[tmpPos+1]
 		}
 		isValueIndicator := false
-		if next == 0 || isBlank(next) || next == '\n' || next == '\r' {
+		switch {
+		case next == 0 || isBlank(next) || next == '\n' || next == '\r':
 			isValueIndicator = true
-		} else if s.flow > 0 && (next == ',' || next == '}' || next == ']' || next == '{' || next == '[') {
+		case s.flow > 0 && (next == ',' || next == '}' || next == ']' || next == '{' || next == '['):
 			isValueIndicator = true
-		} else if s.flow > 0 && tmpPos == s.pos {
+		case s.flow > 0 && tmpPos == s.pos:
 			isValueIndicator = true
 		}
 		if isValueIndicator && multiline && s.flow == 0 {
@@ -1319,8 +1320,7 @@ func (s *scanner) emitScalar(value string, pos Position) {
 		if s.flow == 0 {
 			hasValueOnLine := false
 			hasContentAfterValue := false
-			for i := len(s.tokens) - 1; i >= 0; i-- {
-				tk := s.tokens[i]
+			for _, tk := range slices.Backward(s.tokens) {
 				if tk.pos.Line < pos.Line {
 					break
 				}
@@ -1369,22 +1369,6 @@ func (s *scanner) emitScalar(value string, pos Position) {
 			keyToken := token{kind: tokenKey, pos: pos}
 			s.tokens = append(s.tokens[:insertIdx], append([]token{keyToken}, s.tokens[insertIdx:]...)...)
 		}
-	} else if s.flow == 0 {
-		if col > s.indent {
-			isSeqCtx := false
-			for i := len(s.tokens) - 1; i >= 0; i-- {
-				tk := s.tokens[i].kind
-				if tk == tokenBlockEntry {
-					isSeqCtx = true
-					break
-				}
-				if tk == tokenValue || tk == tokenKey || tk == tokenBlockMappingStart || tk == tokenBlockSequenceStart || tk == tokenBlockEnd {
-					break
-				}
-			}
-			if !isSeqCtx {
-			}
-		}
 	}
 
 	s.emit(tokenScalar, value, pos)
@@ -1422,12 +1406,13 @@ func (s *scanner) advance(n int) {
 
 func (s *scanner) advanceLine() {
 	if s.pos < len(s.src) {
-		if s.src[s.pos] == '\r' {
+		switch s.src[s.pos] {
+		case '\r':
 			s.pos++
 			if s.pos < len(s.src) && s.src[s.pos] == '\n' {
 				s.pos++
 			}
-		} else if s.src[s.pos] == '\n' {
+		case '\n':
 			s.pos++
 		}
 		s.line++
@@ -1490,11 +1475,10 @@ func (s *scanner) skipSpacesAndComments() {
 	}
 }
 
-func (s *scanner) skipBOM() error {
+func (s *scanner) skipBOM() {
 	if len(s.src) >= 3 && s.src[0] == 0xEF && s.src[1] == 0xBB && s.src[2] == 0xBF {
 		s.pos += 3
 	}
-	return nil
 }
 
 func isBlank(ch byte) bool {

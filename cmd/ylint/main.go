@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -178,7 +179,8 @@ func checkIndentation(filename string, n *yaml.Node, diags []diagnostic) []diagn
 }
 
 func posFromError(err error) yaml.Position {
-	if synErr, ok := err.(*yaml.SyntaxError); ok {
+	var synErr *yaml.SyntaxError
+	if errors.As(err, &synErr) {
 		return synErr.Pos
 	}
 	return yaml.Position{Line: 1, Column: 1}

@@ -89,8 +89,8 @@ func ExampleValid() {
 	// false
 }
 
-func ExampleYAMLToJSON() {
-	data, err := yaml.YAMLToJSON([]byte("name: test\ncount: 42\n"))
+func ExampleToJSON() {
+	data, err := yaml.ToJSON([]byte("name: test\ncount: 42\n"))
 	if err != nil {
 		panic(err)
 	}
@@ -99,8 +99,8 @@ func ExampleYAMLToJSON() {
 	// {"count":42,"name":"test"}
 }
 
-func ExampleJSONToYAML() {
-	data, err := yaml.JSONToYAML([]byte(`{"name":"test","port":8080}`))
+func ExampleFromJSON() {
+	data, err := yaml.FromJSON([]byte(`{"name":"test","port":8080}`))
 	if err != nil {
 		panic(err)
 	}

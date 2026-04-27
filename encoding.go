@@ -47,12 +47,12 @@ func decodeUTF16(data []byte, order binary.ByteOrder) ([]byte, error) {
 	}
 	var buf []byte
 	for i := 0; i+1 < len(data); i += 2 {
-		code := uint16(order.Uint16(data[i : i+2]))
+		code := order.Uint16(data[i : i+2])
 		if code >= 0xD800 && code <= 0xDBFF {
 			if i+3 < len(data) {
-				low := uint16(order.Uint16(data[i+2 : i+4]))
+				low := order.Uint16(data[i+2 : i+4])
 				if low >= 0xDC00 && low <= 0xDFFF {
-					r := rune(0x10000 + (rune(code-0xD800)<<10 | rune(low-0xDC00)))
+					r := 0x10000 + (rune(code-0xD800)<<10 | rune(low-0xDC00))
 					buf = utf8.AppendRune(buf, r)
 					i += 2
 					continue

@@ -339,7 +339,7 @@ func TestYAMLTestSuiteJSON(t *testing.T) {
 			}
 			ch := make(chan jsonResult, 1)
 			go func() {
-				d, e := YAMLToJSON(inYAML)
+				d, e := ToJSON(inYAML)
 				ch <- jsonResult{d, e}
 			}()
 
@@ -351,7 +351,7 @@ func TestYAMLTestSuiteJSON(t *testing.T) {
 				return
 			case res := <-ch:
 				if res.err != nil {
-					t.Errorf("YAMLToJSON failed: %v", res.err)
+					t.Errorf("ToJSON failed: %v", res.err)
 					failed++
 					return
 				}
