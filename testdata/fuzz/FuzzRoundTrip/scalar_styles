@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("plain: hello\nquoted: \"world\"\nsingle: 'test'\n")

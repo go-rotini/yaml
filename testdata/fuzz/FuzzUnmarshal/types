@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("i: 42\nf: 3.14\nb: true\nn: null\n")

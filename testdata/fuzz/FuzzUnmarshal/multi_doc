@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("---\na: 1\n---\nb: 2\n")

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("text: |\n  line one\n  line two\n")
