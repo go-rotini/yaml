@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"sort"
 	"strconv"
@@ -263,6 +264,20 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		}
 		return e.marshalMap(v, indent, inline)
 	case reflect.Struct:
+		switch v.Type() {
+		case reflect.TypeFor[big.Int]():
+			bi := v.Interface().(big.Int)
+			e.buf = append(e.buf, bi.String()...)
+			return nil
+		case reflect.TypeFor[big.Float]():
+			bf := v.Interface().(big.Float)
+			e.buf = append(e.buf, bf.Text('g', -1)...)
+			return nil
+		case reflect.TypeFor[big.Rat]():
+			br := v.Interface().(big.Rat)
+			e.buf = append(e.buf, br.RatString()...)
+			return nil
+		}
 		return e.marshalStruct(v, indent, inline)
 	default:
 		e.buf = append(e.buf, fmt.Sprintf("%v", v.Interface())...)
@@ -679,7 +694,11 @@ func isCompound(v reflect.Value) bool {
 	case reflect.Slice:
 		return !v.IsNil() && v.Len() > 0
 	case reflect.Struct:
-		if v.Type() == reflect.TypeFor[time.Time]() {
+		switch v.Type() {
+		case reflect.TypeFor[time.Time](),
+			reflect.TypeFor[big.Int](),
+			reflect.TypeFor[big.Float](),
+			reflect.TypeFor[big.Rat]():
 			return false
 		}
 		return true
@@ -706,8 +725,18 @@ func isEmpty(v reflect.Value) bool {
 	case reflect.Pointer, reflect.Interface:
 		return v.IsNil()
 	case reflect.Struct:
-		if v.Type() == reflect.TypeFor[time.Time]() {
+		switch v.Type() {
+		case reflect.TypeFor[time.Time]():
 			return v.Interface().(time.Time).IsZero()
+		case reflect.TypeFor[big.Int]():
+			bi := v.Interface().(big.Int)
+			return bi.Sign() == 0
+		case reflect.TypeFor[big.Float]():
+			bf := v.Interface().(big.Float)
+			return bf.Sign() == 0
+		case reflect.TypeFor[big.Rat]():
+			br := v.Interface().(big.Rat)
+			return br.Sign() == 0
 		}
 		return false
 	}

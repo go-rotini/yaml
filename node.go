@@ -58,17 +58,21 @@ const (
 // (children[0] is the first key, children[1] its value, etc.). For sequences,
 // each child is a list element. For documents, Children holds the root node.
 type Node struct {
-	Kind        NodeKind
-	Tag         string
-	Anchor      string
-	Alias       string
-	Value       string
-	Style       ScalarStyle
-	Children    []*Node
-	Pos         Position
-	Comment     string
-	HeadComment string
-	FootComment string
+	Kind          NodeKind
+	Tag           string
+	Anchor        string
+	Alias         string
+	Value         string
+	Style         ScalarStyle
+	Flow          bool // flow style ({} or []) for mappings and sequences
+	ExplicitStart bool // explicit document start marker (---)
+	ExplicitEnd   bool // explicit document end marker (...)
+	MergeKey      bool // node represents a merge key (<<)
+	Children      []*Node
+	Pos           Position
+	Comment       string
+	HeadComment   string
+	FootComment   string
 }
 
 // File is the result of parsing a YAML byte stream. It contains one [Node]
@@ -108,16 +112,20 @@ func exportNode(n *node) *Node {
 		return nil
 	}
 	pub := &Node{
-		Kind:        exportKind(n.kind),
-		Tag:         n.tag,
-		Anchor:      n.anchor,
-		Alias:       n.alias,
-		Value:       n.value,
-		Style:       exportStyle(n.style),
-		Pos:         n.pos,
-		HeadComment: n.headComment,
-		Comment:     n.lineComment,
-		FootComment: n.footComment,
+		Kind:          exportKind(n.kind),
+		Tag:           n.tag,
+		Anchor:        n.anchor,
+		Alias:         n.alias,
+		Value:         n.value,
+		Style:         exportStyle(n.style),
+		Flow:          n.flow,
+		ExplicitStart: n.docStartExplicit,
+		ExplicitEnd:   n.docEndExplicit,
+		MergeKey:      n.kind == nodeMergeKey,
+		Pos:           n.pos,
+		HeadComment:   n.headComment,
+		Comment:       n.lineComment,
+		FootComment:   n.footComment,
 	}
 	for _, child := range n.children {
 		pub.Children = append(pub.Children, exportNode(child))
@@ -163,14 +171,21 @@ func importNode(n *Node) *node {
 	if n == nil {
 		return nil
 	}
+	k := importKind(n.Kind)
+	if n.MergeKey {
+		k = nodeMergeKey
+	}
 	internal := &node{
-		kind:   importKind(n.Kind),
-		tag:    n.Tag,
-		anchor: n.Anchor,
-		alias:  n.Alias,
-		value:  n.Value,
-		style:  importStyle(n.Style),
-		pos:    n.Pos,
+		kind:             k,
+		tag:              n.Tag,
+		anchor:           n.Anchor,
+		alias:            n.Alias,
+		value:            n.Value,
+		style:            importStyle(n.Style),
+		flow:             n.Flow,
+		docStartExplicit: n.ExplicitStart,
+		docEndExplicit:   n.ExplicitEnd,
+		pos:              n.Pos,
 	}
 	for _, child := range n.Children {
 		internal.children = append(internal.children, importNode(child))
@@ -266,5 +281,17 @@ func Filter(n *Node, fn func(*Node) bool) []*Node {
 func NodeToBytes(n *Node) ([]byte, error) {
 	internal := importNode(n)
 	enc := newEncoder(defaultEncodeOptions())
+	return enc.encodeNode(internal)
+}
+
+// NodeToBytesWithOptions serializes a [Node] tree back into YAML bytes using
+// the provided encoding options.
+func NodeToBytesWithOptions(n *Node, opts ...EncodeOption) ([]byte, error) {
+	o := defaultEncodeOptions()
+	for _, opt := range opts {
+		opt(o)
+	}
+	internal := importNode(n)
+	enc := newEncoder(o)
 	return enc.encodeNode(internal)
 }

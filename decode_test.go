@@ -6426,3 +6426,195 @@ func TestDecodeMappingMergeStructWithNestedMergeKeyInternal(t *testing.T) {
 		t.Error("expected error for nested merge with unknown alias")
 	}
 }
+
+func TestBigIntRoundTrip(t *testing.T) {
+	type S struct {
+		N *big.Int `yaml:"n"`
+	}
+
+	large := new(big.Int)
+	large.SetString("123456789012345678901234567890", 10)
+
+	tests := []struct {
+		name  string
+		input string
+		want  *big.Int
+	}{
+		{"small", "n: 42", big.NewInt(42)},
+		{"negative", "n: -99", big.NewInt(-99)},
+		{"zero", "n: 0", big.NewInt(0)},
+		{"large", "n: 123456789012345678901234567890", large},
+		{"hex", "n: 0xff", big.NewInt(255)},
+		{"octal", "n: 0o77", big.NewInt(63)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s S
+			if err := Unmarshal([]byte(tt.input), &s); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if s.N.Cmp(tt.want) != 0 {
+				t.Errorf("got %s, want %s", s.N, tt.want)
+			}
+
+			data, err := Marshal(s)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+
+			var s2 S
+			if err := Unmarshal(data, &s2); err != nil {
+				t.Fatalf("round-trip unmarshal: %v", err)
+			}
+			if s2.N.Cmp(tt.want) != 0 {
+				t.Errorf("round-trip got %s, want %s", s2.N, tt.want)
+			}
+		})
+	}
+}
+
+func TestBigFloatRoundTrip(t *testing.T) {
+	type S struct {
+		F *big.Float `yaml:"f"`
+	}
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"integer", "f: 42", "42"},
+		{"decimal", "f: 3.14159", "3.14159"},
+		{"negative", "f: -1.5", "-1.5"},
+		{"zero", "f: 0", "0"},
+		{"large", "f: 1e100", "1e+100"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s S
+			if err := Unmarshal([]byte(tt.input), &s); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+
+			got := s.F.Text('g', -1)
+			if got != tt.want {
+				t.Errorf("got %s, want %s", got, tt.want)
+			}
+
+			data, err := Marshal(s)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+
+			var s2 S
+			if err := Unmarshal(data, &s2); err != nil {
+				t.Fatalf("round-trip unmarshal: %v", err)
+			}
+			got2 := s2.F.Text('g', -1)
+			if got2 != tt.want {
+				t.Errorf("round-trip got %s, want %s", got2, tt.want)
+			}
+		})
+	}
+}
+
+func TestBigRatRoundTrip(t *testing.T) {
+	type S struct {
+		R *big.Rat `yaml:"r"`
+	}
+
+	tests := []struct {
+		name  string
+		input string
+		want  *big.Rat
+	}{
+		{"fraction", "r: 3/4", big.NewRat(3, 4)},
+		{"whole", "r: 5", big.NewRat(5, 1)},
+		{"negative", "r: -1/3", big.NewRat(-1, 3)},
+		{"decimal", "r: 0.5", big.NewRat(1, 2)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var s S
+			if err := Unmarshal([]byte(tt.input), &s); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if s.R.Cmp(tt.want) != 0 {
+				t.Errorf("got %s, want %s", s.R.RatString(), tt.want.RatString())
+			}
+
+			data, err := Marshal(s)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+
+			var s2 S
+			if err := Unmarshal(data, &s2); err != nil {
+				t.Fatalf("round-trip unmarshal: %v", err)
+			}
+			if s2.R.Cmp(tt.want) != 0 {
+				t.Errorf("round-trip got %s, want %s", s2.R.RatString(), tt.want.RatString())
+			}
+		})
+	}
+}
+
+func TestBigNilPointer(t *testing.T) {
+	type S struct {
+		N *big.Int   `yaml:"n,omitempty"`
+		F *big.Float `yaml:"f,omitempty"`
+		R *big.Rat   `yaml:"r,omitempty"`
+	}
+
+	data, err := Marshal(S{})
+	if err != nil {
+		t.Fatalf("marshal nil pointers: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("expected empty output for all-nil omitempty, got: %q", data)
+	}
+
+	var s S
+	if err := Unmarshal([]byte("n: null\nf: null\nr: null"), &s); err != nil {
+		t.Fatalf("unmarshal null: %v", err)
+	}
+	if s.N != nil || s.F != nil || s.R != nil {
+		t.Errorf("expected nil pointers, got n=%v f=%v r=%v", s.N, s.F, s.R)
+	}
+}
+
+func TestBigIntInvalidInput(t *testing.T) {
+	type S struct {
+		N *big.Int `yaml:"n"`
+	}
+	var s S
+	err := Unmarshal([]byte("n: not_a_number"), &s)
+	if err == nil {
+		t.Error("expected error for invalid big.Int input")
+	}
+}
+
+func TestBigFloatInvalidInput(t *testing.T) {
+	type S struct {
+		F *big.Float `yaml:"f"`
+	}
+	var s S
+	err := Unmarshal([]byte("f: not_a_number"), &s)
+	if err == nil {
+		t.Error("expected error for invalid big.Float input")
+	}
+}
+
+func TestBigRatInvalidInput(t *testing.T) {
+	type S struct {
+		R *big.Rat `yaml:"r"`
+	}
+	var s S
+	err := Unmarshal([]byte("r: not/valid/rat"), &s)
+	if err == nil {
+		t.Error("expected error for invalid big.Rat input")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"strconv"
 	"strings"
@@ -57,6 +58,10 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 	}
 
 	if v.Kind() == reflect.Pointer {
+		if n.kind == nodeScalar && n.style == scalarPlain && isNullValue(n.value) {
+			v.Set(reflect.Zero(v.Type()))
+			return nil
+		}
 		if v.IsNil() {
 			v.Set(reflect.New(v.Type().Elem()))
 		}
@@ -263,6 +268,32 @@ func (d *decoder) decodeScalar(n *node, v reflect.Value) error {
 				return nil
 			}
 			v.Set(reflect.ValueOf(t))
+			return nil
+		}
+		switch v.Type() {
+		case reflect.TypeFor[big.Int]():
+			bi := new(big.Int)
+			if _, ok := bi.SetString(val, 0); !ok {
+				d.addTypeError(n, v.Type())
+				return nil
+			}
+			v.Set(reflect.ValueOf(*bi))
+			return nil
+		case reflect.TypeFor[big.Float]():
+			bf, _, err := big.ParseFloat(val, 10, 256, big.ToNearestEven)
+			if err != nil {
+				d.addTypeError(n, v.Type())
+				return nil
+			}
+			v.Set(reflect.ValueOf(*bf))
+			return nil
+		case reflect.TypeFor[big.Rat]():
+			br := new(big.Rat)
+			if _, ok := br.SetString(val); !ok {
+				d.addTypeError(n, v.Type())
+				return nil
+			}
+			v.Set(reflect.ValueOf(*br))
 			return nil
 		}
 		d.addTypeError(n, v.Type())
