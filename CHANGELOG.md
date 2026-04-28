@@ -18,3 +18,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merge key support
 - Fuzz testing corpus
 - YAML test suite conformance tests
+- DoS protection defaults; max nesting depth 100, max alias expansion 1000
