@@ -66,8 +66,8 @@ func (enc *Encoder) EncodeContext(ctx context.Context, v any) error {
 	return err
 }
 
-// Close flushes the encoder. It is a no-op but is provided so [Encoder]
-// can satisfy io.Closer.
+// Close is a no-op. It is provided for symmetry with [NewEncoder] so
+// callers can use a defer pattern without harm.
 func (enc *Encoder) Close() error {
 	return nil
 }
