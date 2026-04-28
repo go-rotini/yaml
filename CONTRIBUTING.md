@@ -20,10 +20,10 @@ make all   # run all project processes
 ## Running Tests
 
 ```bash
-make test           # run all tests
-make test-verbose   # run YAML test suite with verbose output
-make bench          # run benchmarks
-make fuzz           # run fuzz tests (30s per fuzzer)
+make test              # run all tests
+make test-conformance  # run YAML test suite conformance tests
+make test-bench        # run benchmarks
+make test-fuzz         # run fuzz tests (60s per fuzzer)
 ```
 
 ## Pull Requests

@@ -13,7 +13,7 @@ jobs:
   test:
     strategy:
       matrix:
-        go-version: ['1.25.x', '1.26.x']
+        go-version: ['1.23.x', '1.26.x']
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
@@ -46,7 +46,7 @@ jobs:
           go-version: '1.26.x'
 
       - name: Lint
-        run: make go
+        run: make yaml
 
   fuzz:
     runs-on: ubuntu-latest

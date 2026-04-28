@@ -10,7 +10,7 @@ This package is used as the default YAML encoding/decoding package for the rotin
 go get github.com/go-rotini/yaml
 ```
 
-Requires Go 1.21 or later.
+Requires Go 1.23 or later.
 
 ## Quick Start
 
