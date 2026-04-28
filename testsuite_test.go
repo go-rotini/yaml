@@ -17,6 +17,49 @@ import (
 
 const testSuiteDir = "testdata/yaml-test-suite"
 
+type suiteTest struct {
+	id  string
+	dir string
+}
+
+func discoverTestDirs(t *testing.T) []suiteTest {
+	t.Helper()
+	entries, err := os.ReadDir(testSuiteDir)
+	if err != nil {
+		t.Skipf("yaml-test-suite not found at %s: %v", testSuiteDir, err)
+	}
+	var tests []suiteTest
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == "name" || name == "tags" {
+			continue
+		}
+		dir := filepath.Join(testSuiteDir, name)
+		if _, err := os.Stat(filepath.Join(dir, "in.yaml")); err == nil {
+			tests = append(tests, suiteTest{id: name, dir: dir})
+			continue
+		}
+		subs, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, sub := range subs {
+			if !sub.IsDir() {
+				continue
+			}
+			subDir := filepath.Join(dir, sub.Name())
+			if _, err := os.Stat(filepath.Join(subDir, "in.yaml")); err == nil {
+				tests = append(tests, suiteTest{id: name + "/" + sub.Name(), dir: subDir})
+			}
+		}
+	}
+	sort.Slice(tests, func(i, j int) bool { return tests[i].id < tests[j].id })
+	return tests
+}
+
 func nodeEvents(docs []*node) []string {
 	var events []string
 	events = append(events, "+STR")
@@ -154,9 +197,7 @@ type testResult struct {
 	detail string
 }
 
-func runSingleTest(id string) testResult {
-	dir := filepath.Join(testSuiteDir, id)
-
+func runSingleTest(id, dir string) testResult {
 	inYAML, err := os.ReadFile(filepath.Join(dir, "in.yaml"))
 	if err != nil {
 		return testResult{id, "skip", "no in.yaml"}
@@ -209,18 +250,7 @@ func runSingleTest(id string) testResult {
 }
 
 func TestYAMLTestSuite(t *testing.T) {
-	entries, err := os.ReadDir(testSuiteDir)
-	if err != nil {
-		t.Skipf("yaml-test-suite not found at %s: %v\nRun: git clone --branch data-2022-01-17 --depth 1 https://github.com/yaml/yaml-test-suite.git %s", testSuiteDir, err, testSuiteDir)
-	}
-
-	var testIDs []string
-	for _, e := range entries {
-		if e.IsDir() {
-			testIDs = append(testIDs, e.Name())
-		}
-	}
-	sort.Strings(testIDs)
+	tests := discoverTestDirs(t)
 
 	var (
 		passed     atomic.Int32
@@ -233,14 +263,14 @@ func TestYAMLTestSuite(t *testing.T) {
 		failedMu   sync.Mutex
 	)
 
-	for _, id := range testIDs {
-		t.Run(id, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.id, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
 			ch := make(chan testResult, 1)
 			go func() {
-				ch <- runSingleTest(t.Name()[len("TestYAMLTestSuite/"):])
+				ch <- runSingleTest(tc.id, tc.dir)
 			}()
 
 			select {
@@ -275,14 +305,14 @@ func TestYAMLTestSuite(t *testing.T) {
 
 	total := int(passed.Load()) + int(errCorrect.Load())
 	t.Logf("\n=== YAML Test Suite Results ===")
-	t.Logf("Total:          %d", len(testIDs))
+	t.Logf("Total:          %d", len(tests))
 	t.Logf("Events match:   %d", passed.Load())
 	t.Logf("Event mismatch: %d", failed.Load())
 	t.Logf("Error correct:  %d (correctly rejected invalid input)", errCorrect.Load())
 	t.Logf("Error missed:   %d (should reject but accepted)", errMissed.Load())
 	t.Logf("Timed out:      %d", timedOut.Load())
 	t.Logf("Skipped:        %d", skipped.Load())
-	t.Logf("Pass rate:      %.1f%% (%d/%d)", float64(total)*100/float64(len(testIDs)), total, len(testIDs))
+	t.Logf("Pass rate:      %.1f%% (%d/%d)", float64(total)*100/float64(len(tests)), total, len(tests))
 
 	if len(failedIDs) > 0 {
 		sort.Strings(failedIDs)
@@ -291,39 +321,26 @@ func TestYAMLTestSuite(t *testing.T) {
 }
 
 func TestYAMLTestSuiteJSON(t *testing.T) {
-	entries, err := os.ReadDir(testSuiteDir)
-	if err != nil {
-		t.Skipf("yaml-test-suite not found: %v", err)
-	}
-
-	var testIDs []string
-	for _, e := range entries {
-		if e.IsDir() {
-			testIDs = append(testIDs, e.Name())
-		}
-	}
-	sort.Strings(testIDs)
+	tests := discoverTestDirs(t)
 
 	var passed, failed, skipped int
 
-	for _, id := range testIDs {
-		t.Run(id, func(t *testing.T) {
-			dir := filepath.Join(testSuiteDir, id)
-
-			if _, err := os.Stat(filepath.Join(dir, "error")); err == nil {
+	for _, tc := range tests {
+		t.Run(tc.id, func(t *testing.T) {
+			if _, err := os.Stat(filepath.Join(tc.dir, "error")); err == nil {
 				skipped++
 				t.Skip("error case")
 				return
 			}
 
-			inJSON, err := os.ReadFile(filepath.Join(dir, "in.json"))
+			inJSON, err := os.ReadFile(filepath.Join(tc.dir, "in.json"))
 			if err != nil {
 				skipped++
 				t.Skip("no in.json")
 				return
 			}
 
-			inYAML, err := os.ReadFile(filepath.Join(dir, "in.yaml"))
+			inYAML, err := os.ReadFile(filepath.Join(tc.dir, "in.yaml"))
 			if err != nil {
 				skipped++
 				t.Skip("no in.yaml")
