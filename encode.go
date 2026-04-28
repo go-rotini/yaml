@@ -15,9 +15,10 @@ import (
 )
 
 type encoder struct {
-	opts *encoderOptions
-	ctx  context.Context
-	buf  []byte
+	opts       *encoderOptions
+	ctx        context.Context
+	buf        []byte
+	encodingKey bool
 }
 
 func newEncoder(opts *encoderOptions) *encoder {
@@ -305,7 +306,7 @@ func (e *encoder) marshalSlice(v reflect.Value, indent int, inline bool) error {
 	}
 
 	for i := range v.Len() {
-		if i > 0 || needsNewlineBefore(e.buf) {
+		if i > 0 {
 			e.buf = append(e.buf, '\n')
 			e.writeIndent(seqIndent)
 		}
@@ -351,14 +352,16 @@ func (e *encoder) marshalMap(v reflect.Value, indent int, inline bool) error {
 	for i, key := range keys {
 		val := v.MapIndex(key)
 
-		if i > 0 || needsNewlineBefore(e.buf) {
+		if i > 0 {
 			e.buf = append(e.buf, '\n')
 			e.writeIndent(indent)
 		}
 
+		e.encodingKey = true
 		if err := e.marshalValue(key, indent, true); err != nil {
 			return err
 		}
+		e.encodingKey = false
 		e.buf = append(e.buf, ':')
 
 		if isCompound(val) {
@@ -390,9 +393,11 @@ func (e *encoder) marshalFlowMapping(v reflect.Value, indent int) error {
 		if i > 0 {
 			e.buf = append(e.buf, ", "...)
 		}
+		e.encodingKey = true
 		if err := e.marshalValue(key, indent, true); err != nil {
 			return err
 		}
+		e.encodingKey = false
 		e.buf = append(e.buf, ": "...)
 		if err := e.marshalValue(v.MapIndex(key), indent, true); err != nil {
 			return err
@@ -427,7 +432,7 @@ func (e *encoder) marshalStruct(v reflect.Value, indent int, inline bool) error 
 			})
 			for _, key := range keys {
 				val := field.MapIndex(key)
-				if !first || needsNewlineBefore(e.buf) {
+				if !first {
 					e.buf = append(e.buf, '\n')
 					e.writeIndent(indent)
 				}
@@ -450,7 +455,7 @@ func (e *encoder) marshalStruct(v reflect.Value, indent int, inline bool) error 
 			continue
 		}
 
-		if !first || needsNewlineBefore(e.buf) {
+		if !first {
 			e.buf = append(e.buf, '\n')
 			e.writeIndent(indent)
 		}
@@ -508,6 +513,11 @@ func (e *encoder) marshalFlowStruct(v reflect.Value, sf *structFields, indent in
 
 func (e *encoder) writeScalar(s string, indent int) {
 	if e.opts.jsonCompat {
+		e.writeQuotedScalar(s)
+		return
+	}
+
+	if e.opts.quoteAll && !e.encodingKey {
 		e.writeQuotedScalar(s)
 		return
 	}
@@ -744,9 +754,3 @@ func isEmpty(v reflect.Value) bool {
 	return false
 }
 
-func needsNewlineBefore(buf []byte) bool {
-	if len(buf) == 0 {
-		return false
-	}
-	return buf[len(buf)-1] != '\n'
-}

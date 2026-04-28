@@ -1295,21 +1295,6 @@ func TestIsEmpty(t *testing.T) {
 	}
 }
 
-func TestNeedsNewlineBefore(t *testing.T) {
-	if needsNewlineBefore(nil) {
-		t.Error("expected false for nil")
-	}
-	if needsNewlineBefore([]byte{}) {
-		t.Error("expected false for empty")
-	}
-	if needsNewlineBefore([]byte("hello\n")) {
-		t.Error("expected false when last char is newline")
-	}
-	if !needsNewlineBefore([]byte("hello")) {
-		t.Error("expected true when last char is not newline")
-	}
-}
-
 func TestMarshalChannel(t *testing.T) {
 	ch := make(chan int)
 	data, err := Marshal(ch)
@@ -2716,5 +2701,49 @@ func TestMarshalFlowMappingSortBoundary(t *testing.T) {
 	cIdx := strings.Index(s, "c:")
 	if aIdx >= bIdx || bIdx >= cIdx {
 		t.Errorf("keys should be sorted: %s", s)
+	}
+}
+
+func TestMarshalQuoteAll(t *testing.T) {
+	type Config struct {
+		Name    string            `yaml:"name"`
+		Port    int               `yaml:"port"`
+		Debug   bool              `yaml:"debug"`
+		Tags    []string          `yaml:"tags"`
+		Labels  map[string]string `yaml:"labels"`
+	}
+
+	c := Config{
+		Name:   "nginx",
+		Port:   8080,
+		Debug:  true,
+		Tags:   []string{"v1", "prod"},
+		Labels: map[string]string{"app": "web"},
+	}
+
+	b, err := MarshalWithOptions(c, WithQuoteAllStrings(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := string(b)
+
+	if !strings.Contains(s, `name: "nginx"`) {
+		t.Errorf("string value should be quoted, got:\n%s", s)
+	}
+	if !strings.Contains(s, "port: 8080") {
+		t.Errorf("int value should not be quoted, got:\n%s", s)
+	}
+	if !strings.Contains(s, "debug: true") {
+		t.Errorf("bool value should not be quoted, got:\n%s", s)
+	}
+	if strings.Contains(s, `"name":`) || strings.Contains(s, `"labels":`) {
+		t.Errorf("struct keys should not be quoted, got:\n%s", s)
+	}
+	if strings.Contains(s, `"app":`) {
+		t.Errorf("map keys should not be quoted, got:\n%s", s)
+	}
+	if !strings.Contains(s, `- "v1"`) {
+		t.Errorf("sequence string elements should be quoted, got:\n%s", s)
 	}
 }

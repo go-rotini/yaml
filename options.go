@@ -30,6 +30,7 @@ type encoderOptions struct {
 	jsonCompat       bool
 	useLiteral       bool
 	useSingleQuote   bool
+	quoteAll         bool
 	omitEmpty        bool
 	autoInt          bool
 	comments         map[string][]Comment
@@ -78,6 +79,12 @@ func WithLiteralStyle(b bool) EncodeOption {
 // the value contains no characters requiring escape sequences.
 func WithSingleQuote(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.useSingleQuote = b }
+}
+
+// WithQuoteAllStrings forces all string scalar values to be quoted when set to true.
+// Mapping keys remain unquoted unless they require quoting for syntactic reasons.
+func WithQuoteAllStrings(b bool) EncodeOption {
+	return func(o *encoderOptions) { o.quoteAll = b }
 }
 
 // WithOmitEmpty omits struct fields and map entries whose values are zero/empty,
