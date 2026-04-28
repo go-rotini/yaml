@@ -2,25 +2,17 @@ TEST_SUITE_DIR := testdata/yaml-test-suite
 TEST_SUITE_REPO := https://github.com/yaml/yaml-test-suite.git
 TEST_SUITE_TAG := $(shell git ls-remote --tags $(TEST_SUITE_REPO) 'refs/tags/data-*' | grep -v '\^{}' | sed 's|.*refs/tags/||' | sort | tail -1)
 
-.PHONY: all clean clone-test-suite go test test-acceptance test-bench test-conformance test-fuzz test-race
+.PHONY: all clean clone-test-suite test test-acceptance test-bench test-conformance test-fuzz test-mutation test-race yaml
 
-all: go test test-bench test-conformance test-fuzz test-race
+all: yaml test test-acceptance test-bench test-conformance test-fuzz test-race
 
 clean:
-	rm -rf $(TEST_SUITE_DIR) *.out
+	@rm -rf $(TEST_SUITE_DIR) *.out
 
 clone-test-suite: $(TEST_SUITE_DIR)
 
 $(TEST_SUITE_DIR):
 	@git clone --branch $(TEST_SUITE_TAG) --depth 1 $(TEST_SUITE_REPO) $(TEST_SUITE_DIR)
-
-go:
-	@go mod download
-	@test -z "$$(gofmt -l .)" || (echo "files not formatted:" && gofmt -l . && exit 1)
-	go vet ./...
-	go tool golangci-lint run ./...
-	go tool go-licenses check ./...
-	go tool govulncheck ./...
 
 test: clone-test-suite
 	@go test -v -coverprofile=test.out .
@@ -42,9 +34,17 @@ test-fuzz:
 	@go test -fuzz=FuzzScanner -fuzztime=60s .
 	@go test -fuzz=FuzzRoundTrip -fuzztime=60s .
 
-test-mutation:
+test-mutation: clone-test-suite
 	@go tool github.com/go-gremlins/gremlins/cmd/gremlins unleash --config .gremlins.yaml
 
 test-race:
 	@go test -race -coverprofile=test_race.out .
 	@go tool cover -func=test_race.out | tail -1
+
+yaml: clean clone-test-suite
+	@go mod download
+	@test -z "$$(gofmt -l .)" || (echo "files not formatted:" && gofmt -l . && exit 1)
+	go vet ./...
+	go tool golangci-lint run ./...
+	go tool go-licenses check ./...
+	go tool govulncheck ./...

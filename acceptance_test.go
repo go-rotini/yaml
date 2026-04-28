@@ -241,8 +241,8 @@ func TestAcceptanceUnmarshalNestedStructs(t *testing.T) {
 		} `yaml:"template"`
 	}
 	type deployment struct {
-		APIVersion string `yaml:"apiVersion"`
-		Kind       string `yaml:"kind"`
+		APIVersion string     `yaml:"apiVersion"`
+		Kind       string     `yaml:"kind"`
 		Spec       deploySpec `yaml:"spec"`
 	}
 
@@ -407,7 +407,7 @@ func TestAcceptanceEncoderMultiDoc(t *testing.T) {
 
 func TestAcceptanceMarshalWithOptions(t *testing.T) {
 	obj := map[string]any{
-		"items": []string{"a", "b"},
+		"items":  []string{"a", "b"},
 		"nested": map[string]int{"x": 1},
 	}
 	flow, err := MarshalWithOptions(obj, WithFlow(true))
