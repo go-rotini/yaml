@@ -7,7 +7,7 @@ TEST_SUITE_TAG := $(shell git ls-remote --tags $(TEST_SUITE_REPO) 'refs/tags/dat
 all: yaml test test-acceptance test-bench test-conformance test-fuzz test-mutation test-race
 
 clean:
-	@rm -rf $(TEST_SUITE_DIR) *.out
+	@rm -rf $(TEST_SUITE_DIR) *.out test_mutation.json
 
 clone-test-suite: $(TEST_SUITE_DIR)
 
