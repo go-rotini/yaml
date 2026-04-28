@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -1250,5 +1251,237 @@ func TestScanNextAtEndAfterSpaces(t *testing.T) {
 	}
 	if !hasEnd {
 		t.Fatal("expected stream end token for whitespace-only input")
+	}
+}
+
+func TestScanBlockScalarNewlineAfterIndicator(t *testing.T) {
+	input := "text: |\n  line1\n  line2\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["text"] != "line1\nline2\n" {
+		t.Errorf("expected literal block, got %q", out["text"])
+	}
+}
+
+func TestScanBlockScalarIndentDetection(t *testing.T) {
+	input := "text: |\n    line1\n    line2\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["text"] != "line1\nline2\n" {
+		t.Errorf("expected dedented content, got %q", out["text"])
+	}
+}
+
+func TestScanBlockScalarEmptyLeadingLines(t *testing.T) {
+	input := "text: |\n\n\n  content\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out["text"], "content") {
+		t.Errorf("expected content after empty lines, got %q", out["text"])
+	}
+}
+
+func TestScanBlockScalarDocumentMarkerTerminates(t *testing.T) {
+	input := "text: |\n  line1\n---\nnext: doc\n"
+	var out1, out2 map[string]string
+	dec := NewDecoder(strings.NewReader(input))
+	if err := dec.Decode(&out1); err != nil {
+		t.Fatal(err)
+	}
+	if out1["text"] != "line1\n" {
+		t.Errorf("block scalar should stop at document marker, got %q", out1["text"])
+	}
+	if err := dec.Decode(&out2); err != nil {
+		t.Fatal(err)
+	}
+	if out2["next"] != "doc" {
+		t.Errorf("second doc should parse, got %v", out2)
+	}
+}
+
+func TestScanExplicitKey(t *testing.T) {
+	input := "? explicit_key\n: value\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["explicit_key"] != "value" {
+		t.Errorf("expected explicit key, got %v", out)
+	}
+}
+
+func TestScanBlockValueColonAfterFlow(t *testing.T) {
+	input := "[a, b]: value\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Docs) == 0 {
+		t.Fatal("expected at least 1 document")
+	}
+}
+
+func TestScanFlowEndResetDepth(t *testing.T) {
+	input := "{a: {b: 1}}\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, ok := out["a"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested map, got %T", out["a"])
+	}
+	if fmt.Sprint(inner["b"]) != "1" {
+		t.Errorf("expected b=1, got %v", inner["b"])
+	}
+}
+
+func TestScanFlowColonAfterSequence(t *testing.T) {
+	input := "{[a]: 1}\n"
+	var out any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScanPlainScalarCommentTerminator(t *testing.T) {
+	input := "key: value # comment\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["key"] != "value" {
+		t.Errorf("expected 'value', got %q", out["key"])
+	}
+}
+
+func TestScanPlainScalarNoCommentInMiddle(t *testing.T) {
+	input := "key: val#ue\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["key"] != "val#ue" {
+		t.Errorf("# without preceding space is not a comment, got %q", out["key"])
+	}
+}
+
+func TestScanHexEscapeLowercase(t *testing.T) {
+	input := "val: \"\\x61\\x62\\x63\"\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["val"] != "abc" {
+		t.Errorf("expected 'abc' from hex escapes, got %q", out["val"])
+	}
+}
+
+func TestScanHexEscapeUppercase(t *testing.T) {
+	input := "val: \"\\x41\\x42\\x43\"\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["val"] != "ABC" {
+		t.Errorf("expected 'ABC' from hex escapes, got %q", out["val"])
+	}
+}
+
+func TestScanHexEscapeMixed(t *testing.T) {
+	input := "val: \"\\x4a\\x4A\"\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["val"] != "JJ" {
+		t.Errorf("expected 'JJ', got %q", out["val"])
+	}
+}
+
+func TestScanBlockValueWithAnchor(t *testing.T) {
+	input := "&tag key: value\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["key"] != "value" {
+		t.Errorf("expected value, got %v", out)
+	}
+}
+
+func TestScanFlowNegativeDepthGuard(t *testing.T) {
+	input := "key: val\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScanBlockScalarIndentPreserved(t *testing.T) {
+	input := "text: |\n  line1\n    indented\n  line3\n"
+	var out map[string]string
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out["text"], "  indented") {
+		t.Errorf("extra indentation should be preserved, got %q", out["text"])
+	}
+}
+
+func TestScanBlockTabIndentation(t *testing.T) {
+	input := "key:\n\t value\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err == nil {
+		t.Error("tab indentation should produce an error")
+	}
+}
+
+func TestScanBlockIndentBoundary(t *testing.T) {
+	input := "outer:\n  inner: val\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, ok := out["outer"].(map[string]any)
+	if !ok {
+		t.Fatal("expected nested map")
+	}
+	if inner["inner"] != "val" {
+		t.Errorf("expected val, got %v", inner["inner"])
+	}
+}
+
+func TestScanPlainScalarQuestionTerminator(t *testing.T) {
+	input := "{a: b? c}\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["a"] != "b? c" {
+		t.Errorf("? without space should not terminate, got %q", out["a"])
 	}
 }

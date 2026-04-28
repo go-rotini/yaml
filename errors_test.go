@@ -241,3 +241,93 @@ func TestFormatErrorColumn1(t *testing.T) {
 		t.Error("expected caret")
 	}
 }
+
+func TestFormatErrorLineOutOfRange(t *testing.T) {
+	data := []byte("line1\nline2\n")
+	synErr := &SyntaxError{Message: "error", Pos: Position{Line: 10, Column: 1}}
+	formatted := FormatError(data, synErr)
+	if formatted != synErr.Error() {
+		t.Errorf("out-of-range line should return plain error, got:\n%s", formatted)
+	}
+}
+
+func TestFormatErrorLineZero(t *testing.T) {
+	data := []byte("line1\n")
+	synErr := &SyntaxError{Message: "error", Pos: Position{Line: 0, Column: 1}}
+	formatted := FormatError(data, synErr)
+	if formatted != synErr.Error() {
+		t.Errorf("line 0 (negative index) should return plain error, got:\n%s", formatted)
+	}
+}
+
+func TestFormatErrorCaretPosition(t *testing.T) {
+	data := []byte("key: value\n")
+	synErr := &SyntaxError{Message: "error", Pos: Position{Line: 1, Column: 6}}
+	formatted := FormatError(data, synErr)
+	lines := strings.Split(formatted, "\n")
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "^") {
+			idx := strings.Index(line, "^")
+			if idx != 7 {
+				t.Errorf("caret should be at position 7 (2 indent + 5 spaces), got %d in: %q", idx, line)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected caret in formatted output")
+	}
+}
+
+func TestFormatErrorWithColor(t *testing.T) {
+	data := []byte("key: value\n")
+	synErr := &SyntaxError{Message: "error", Pos: Position{Line: 1, Column: 6}}
+	formatted := FormatError(data, synErr, true)
+	if !strings.Contains(formatted, "\x1b[") {
+		t.Error("expected ANSI escape codes with color=true")
+	}
+	if !strings.Contains(formatted, "^") {
+		t.Error("expected caret with color=true")
+	}
+}
+
+func TestFormatErrorWithoutColor(t *testing.T) {
+	data := []byte("key: value\n")
+	synErr := &SyntaxError{Message: "error", Pos: Position{Line: 1, Column: 6}}
+	formatted := FormatError(data, synErr, false)
+	if strings.Contains(formatted, "\x1b[") {
+		t.Error("expected no ANSI escape codes with color=false")
+	}
+	if !strings.Contains(formatted, "^") {
+		t.Error("expected caret with color=false")
+	}
+}
+
+func TestRepeatByteZero(t *testing.T) {
+	result := repeatByte(' ', 0)
+	if result != "" {
+		t.Errorf("repeatByte with n=0 should be empty, got %q", result)
+	}
+}
+
+func TestRepeatByteNegative(t *testing.T) {
+	result := repeatByte(' ', -1)
+	if result != "" {
+		t.Errorf("repeatByte with negative n should be empty, got %q", result)
+	}
+}
+
+func TestRepeatBytePositive(t *testing.T) {
+	result := repeatByte(' ', 5)
+	if result != "     " {
+		t.Errorf("repeatByte(5) should be 5 spaces, got %q", result)
+	}
+}
+
+func TestRepeatByteOne(t *testing.T) {
+	result := repeatByte('x', 1)
+	if result != "x" {
+		t.Errorf("repeatByte(1) should be 'x', got %q", result)
+	}
+}

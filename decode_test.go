@@ -6746,3 +6746,398 @@ func TestDecodeMapSliceAliasKeyUnknown(t *testing.T) {
 		t.Error("expected error for unknown alias key in MapSlice")
 	}
 }
+
+func TestDecodeMaxDepthDisabledWhenZero(t *testing.T) {
+	input := "a:\n  b:\n    c:\n      d:\n        e: deep"
+	var out map[string]any
+	err := UnmarshalWithOptions([]byte(input), &out, WithMaxDepth(0))
+	if err != nil {
+		t.Fatalf("maxDepth=0 should mean unlimited: %v", err)
+	}
+}
+
+func TestDecodeAnchorStoredAndResolved(t *testing.T) {
+	input := "x: &a hello\ny: *a\nz: &b world\nw: *b\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["x"] != "hello" || out["y"] != "hello" {
+		t.Errorf("anchor a: x=%v y=%v", out["x"], out["y"])
+	}
+	if out["z"] != "world" || out["w"] != "world" {
+		t.Errorf("anchor b: z=%v w=%v", out["z"], out["w"])
+	}
+}
+
+func TestDecodePointerToNullResetsNonNil(t *testing.T) {
+	type S struct {
+		A *string `yaml:"a"`
+		B *int    `yaml:"b"`
+	}
+	str := "initial"
+	num := 42
+	s := S{A: &str, B: &num}
+	err := Unmarshal([]byte("a: null\nb: null\n"), &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.A != nil {
+		t.Error("expected A to be nil")
+	}
+	if s.B != nil {
+		t.Error("expected B to be nil")
+	}
+}
+
+func TestDecodePointerAllocatesForValue(t *testing.T) {
+	type S struct {
+		A *string `yaml:"a"`
+		B *int    `yaml:"b"`
+	}
+	var s S
+	err := Unmarshal([]byte("a: hello\nb: 42\n"), &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.A == nil || *s.A != "hello" {
+		t.Errorf("A = %v", s.A)
+	}
+	if s.B == nil || *s.B != 42 {
+		t.Errorf("B = %v", s.B)
+	}
+}
+
+func TestDecodeImplicitEmptyVsExplicit(t *testing.T) {
+	var out1 map[string]any
+	err := Unmarshal([]byte("key:\n"), &out1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out1["key"] != nil {
+		t.Errorf("implicit empty should be nil, got %v", out1["key"])
+	}
+
+	var out2 map[string]any
+	err = Unmarshal([]byte("key: \"\"\n"), &out2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out2["key"] != "" {
+		t.Errorf("explicit empty string should be empty string, got %v (%T)", out2["key"], out2["key"])
+	}
+}
+
+func TestDecodeTagResolver(t *testing.T) {
+	input := "val: !custom foo\n"
+	type S struct {
+		Val string `yaml:"val"`
+	}
+	var out S
+	err := UnmarshalWithOptions([]byte(input), &out, WithTagResolver(&TagResolver{
+		Tag:    "!custom",
+		GoType: reflect.TypeOf(""),
+		Resolve: func(value string) (any, error) {
+			return "resolved:" + value, nil
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Val != "resolved:foo" {
+		t.Errorf("expected resolved:foo, got %v", out.Val)
+	}
+}
+
+func TestDecodeMapLoopBoundaryEvenChildren(t *testing.T) {
+	input := "a: 1\nb: 2\nc: 3\nd: 4\n"
+	var out map[string]int
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 4 {
+		t.Errorf("expected 4 entries, got %d", len(out))
+	}
+	if out["a"] != 1 || out["d"] != 4 {
+		t.Errorf("unexpected values: %v", out)
+	}
+}
+
+func TestDecodeStructLoopBoundary(t *testing.T) {
+	type S struct {
+		A string `yaml:"a"`
+		B string `yaml:"b"`
+		C string `yaml:"c"`
+	}
+	var s S
+	err := Unmarshal([]byte("a: x\nb: y\nc: z\n"), &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.A != "x" || s.B != "y" || s.C != "z" {
+		t.Errorf("unexpected: %+v", s)
+	}
+}
+
+func TestDecodeMergeKey(t *testing.T) {
+	input := "defaults: &d\n  a: 1\n  b: 2\nresult:\n  <<: *d\n  c: 3\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok := out["result"].(map[string]any)
+	if !ok {
+		t.Fatal("result should be a map")
+	}
+	if fmt.Sprint(result["a"]) != "1" || fmt.Sprint(result["b"]) != "2" || fmt.Sprint(result["c"]) != "3" {
+		t.Errorf("merge should include all keys: %v", result)
+	}
+}
+
+func TestDecodeSequenceToArrayTruncate(t *testing.T) {
+	input := "items:\n  - a\n  - b\n  - c\n  - d\n  - e\n"
+	type S struct {
+		Items [3]string `yaml:"items"`
+	}
+	var s S
+	err := Unmarshal([]byte(input), &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Items != [3]string{"a", "b", "c"} {
+		t.Errorf("array should truncate to size: %v", s.Items)
+	}
+}
+
+func TestDecodeSequenceToArrayExactFit(t *testing.T) {
+	input := "- x\n- y\n"
+	var arr [2]string
+	err := Unmarshal([]byte(input), &arr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if arr != [2]string{"x", "y"} {
+		t.Errorf("expected [x y], got %v", arr)
+	}
+}
+
+func TestDecodeAliasInToAny(t *testing.T) {
+	input := "anchor: &a\n  x: 1\nref: *a\n"
+	var out any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	ref, ok := m["ref"].(map[string]any)
+	if !ok {
+		t.Fatal("ref should resolve to map")
+	}
+	if fmt.Sprint(ref["x"]) != "1" {
+		t.Errorf("alias value: got %v", ref["x"])
+	}
+}
+
+func TestDecodeAliasDepthMultipleRefs(t *testing.T) {
+	input := "a: &x\n  v: 1\nb: *x\nc: *x\nd: *x\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"b", "c", "d"} {
+		ref, ok := out[k].(map[string]any)
+		if !ok {
+			t.Fatalf("key %s should resolve to map", k)
+		}
+		if fmt.Sprint(ref["v"]) != "1" {
+			t.Errorf("key %s value: got %v", k, ref["v"])
+		}
+	}
+}
+
+func TestDecodeScalarToAnyImplicitEmpty(t *testing.T) {
+	input := "a:\nb: explicit\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["a"] != nil {
+		t.Errorf("implicit empty should be nil, got %v", out["a"])
+	}
+	if out["b"] != "explicit" {
+		t.Errorf("explicit should be string, got %v", out["b"])
+	}
+}
+
+func TestDecodeOrderedMapBoundary(t *testing.T) {
+	input := "x: 1\ny: 2\nz: 3\n"
+	var out any
+	err := UnmarshalWithOptions([]byte(input), &out, WithOrderedMap())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, ok := out.(MapSlice)
+	if !ok {
+		t.Fatalf("expected MapSlice, got %T", out)
+	}
+	if len(ms) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(ms))
+	}
+	if ms[0].Key != "x" || ms[2].Key != "z" {
+		t.Errorf("unexpected order: %v", ms)
+	}
+}
+
+func TestDecodeMaxDepthBoundary(t *testing.T) {
+	input := "a: val"
+	var out map[string]any
+
+	err := UnmarshalWithOptions([]byte(input), &out, WithMaxDepth(3))
+	if err != nil {
+		t.Fatalf("depth 3 should succeed for single mapping: %v", err)
+	}
+	if out["a"] != "val" {
+		t.Errorf("expected 'val', got %v", out["a"])
+	}
+
+	err = UnmarshalWithOptions([]byte(input), &out, WithMaxDepth(2))
+	if err == nil {
+		t.Fatal("depth 2 should fail for single mapping")
+	}
+}
+
+func TestDecodeAliasDepthBoundary(t *testing.T) {
+	input := "anchor: &a\n  x: 1\nref: *a\n"
+	var out map[string]any
+
+	err := UnmarshalWithOptions([]byte(input), &out, WithMaxAliasExpansion(1))
+	if err != nil {
+		t.Fatalf("expansion limit 1 should allow 1 alias ref: %v", err)
+	}
+
+	err = UnmarshalWithOptions([]byte(input), &out, WithMaxAliasExpansion(0))
+	if err == nil {
+		t.Fatal("expansion limit 0 should fail for alias ref")
+	}
+
+	multiRef := "anchor: &a\n  x: 1\nref1: *a\nref2: *a\n"
+	err = UnmarshalWithOptions([]byte(multiRef), &out, WithMaxAliasExpansion(5))
+	if err != nil {
+		t.Fatalf("expansion limit 5 should allow 2 refs: %v", err)
+	}
+	if out["ref1"] == nil || out["ref2"] == nil {
+		t.Error("both alias refs should resolve")
+	}
+}
+
+func TestDecodeAnchorStored(t *testing.T) {
+	input := "val: &myanchor hello\nref: *myanchor\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["val"] != "hello" {
+		t.Errorf("anchor value: got %v, want hello", out["val"])
+	}
+	if out["ref"] != "hello" {
+		t.Errorf("alias value: got %v, want hello", out["ref"])
+	}
+}
+
+func TestDecodePointerNull(t *testing.T) {
+	type S struct {
+		Name *string `yaml:"name"`
+	}
+	initial := "initial"
+	s := S{Name: &initial}
+	err := Unmarshal([]byte("name: null\n"), &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Name != nil {
+		t.Errorf("expected nil pointer for null value, got %v", *s.Name)
+	}
+}
+
+func TestDecodePointerNonNull(t *testing.T) {
+	type S struct {
+		Name *string `yaml:"name"`
+	}
+	var s S
+	err := Unmarshal([]byte("name: hello\n"), &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Name == nil || *s.Name != "hello" {
+		t.Errorf("expected pointer to 'hello', got %v", s.Name)
+	}
+}
+
+func TestDecodeImplicitEmptyScalar(t *testing.T) {
+	var out map[string]any
+	err := Unmarshal([]byte("key:\n"), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["key"] != nil {
+		t.Errorf("expected nil for implicit empty scalar, got %v", out["key"])
+	}
+}
+
+func TestDecodeMapIterationBoundary(t *testing.T) {
+	input := "a: x\nb: y\nc: z\n"
+	var out map[string]any
+	err := Unmarshal([]byte(input), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 3 {
+		t.Errorf("expected 3 keys, got %d", len(out))
+	}
+	if out["a"] != "x" || out["b"] != "y" || out["c"] != "z" {
+		t.Errorf("unexpected values: %v", out)
+	}
+}
+
+func TestDecodeStructRequiredFieldCheck(t *testing.T) {
+	type S struct {
+		A string `yaml:"a,required"`
+		B string `yaml:"b"`
+		C string `yaml:"c,required"`
+	}
+	var s S
+	err := Unmarshal([]byte("a: hello\nb: world\nc: foo\n"), &s)
+	if err != nil {
+		t.Fatalf("all required fields present should succeed: %v", err)
+	}
+	if s.A != "hello" || s.C != "foo" {
+		t.Errorf("unexpected values: %+v", s)
+	}
+
+	err = Unmarshal([]byte("b: world\n"), &s)
+	if err == nil {
+		t.Fatal("missing required field should fail")
+	}
+}
+
+func TestDecodeStructDuplicateKeyBoundary(t *testing.T) {
+	type S struct {
+		A string `yaml:"a"`
+		B string `yaml:"b"`
+	}
+	input := "a: first\nb: second\na: third\n"
+	var s S
+	err := Unmarshal([]byte(input), &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.A != "third" {
+		t.Errorf("expected last value 'third', got %q", s.A)
+	}
+}

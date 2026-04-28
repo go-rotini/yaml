@@ -718,3 +718,85 @@ func TestReadPositions(t *testing.T) {
 		t.Error("expected non-zero line numbers")
 	}
 }
+
+func TestPathReadChildMatch(t *testing.T) {
+	input := "name: foo\nage: 30\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := PathString("$.name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := p.Read(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Value != "foo" {
+		t.Errorf("expected foo, got %v", nodes)
+	}
+}
+
+func TestPathReplaceByIndex(t *testing.T) {
+	input := "- a\n- b\n- c\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := PathString("$[1]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = p.Replace(file.Docs[0], &Node{Kind: ScalarNode, Value: "replaced"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := NodeToBytes(file.Docs[0])
+	if !strings.Contains(string(out), "replaced") {
+		t.Errorf("expected replaced in output:\n%s", string(out))
+	}
+}
+
+func TestPathDeleteFromMapping(t *testing.T) {
+	input := "a: 1\nb: 2\nc: 3\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := PathString("$.b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = p.Delete(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := NodeToBytes(file.Docs[0])
+	s := string(out)
+	if strings.Contains(s, "b:") {
+		t.Errorf("b should be deleted:\n%s", s)
+	}
+	if !strings.Contains(s, "a:") || !strings.Contains(s, "c:") {
+		t.Errorf("a and c should remain:\n%s", s)
+	}
+}
+
+func TestPathWildcardMatch(t *testing.T) {
+	input := "a: 1\nb: 2\nc: 3\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := PathString("$.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := p.Read(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 3 {
+		t.Errorf("expected 3 matches from wildcard, got %d", len(nodes))
+	}
+}

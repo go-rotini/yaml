@@ -380,3 +380,131 @@ func TestIsPrintableYAMLBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectEncodingExactly4Bytes(t *testing.T) {
+	src := []byte{0x00, 0x00, 0xFE, 0xFF}
+	_, err := detectAndConvertEncoding(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDetectEncodingExactly3Bytes(t *testing.T) {
+	src := []byte{0x41, 0x42, 0x43}
+	result, err := detectAndConvertEncoding(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != "ABC" {
+		t.Errorf("3-byte UTF-8 should pass through, got %q", string(result))
+	}
+}
+
+func TestDetectEncodingExactly2Bytes(t *testing.T) {
+	src := []byte{0xFE, 0xFF}
+	_, err := detectAndConvertEncoding(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDetectEncodingExactly1Byte(t *testing.T) {
+	src := []byte{0x41}
+	result, err := detectAndConvertEncoding(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != "A" {
+		t.Errorf("1-byte should pass through, got %q", string(result))
+	}
+}
+
+func TestDecodeUTF16SurrogateBoundaryLow(t *testing.T) {
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint16(data[0:2], 0xD800)
+	binary.BigEndian.PutUint16(data[2:4], 0xDC00)
+	out, err := decodeUTF16(data, binary.BigEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) == 0 || out[0] == 0xEF {
+		t.Error("valid surrogate pair at boundary should not produce replacement char")
+	}
+}
+
+func TestDecodeUTF16SurrogateBoundaryHigh(t *testing.T) {
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint16(data[0:2], 0xDBFF)
+	binary.BigEndian.PutUint16(data[2:4], 0xDFFF)
+	out, err := decodeUTF16(data, binary.BigEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) == 0 || out[0] == 0xEF {
+		t.Error("valid surrogate pair at high boundary should not produce replacement char")
+	}
+}
+
+func TestDecodeUTF16HighSurrogateWithInsufficientData(t *testing.T) {
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint16(data[0:2], 0x0041)
+	binary.BigEndian.PutUint16(data[2:4], 0xD800)
+	out, err := decodeUTF16(data, binary.BigEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if s[0] != 'A' {
+		t.Errorf("first char should be A, got %q", s)
+	}
+}
+
+func TestDecodeUTF32BoundaryCodepoint(t *testing.T) {
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint32(data[0:4], 0x10FFFF)
+	out, err := decodeUTF32(data, binary.BigEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) == "�" {
+		t.Error("U+10FFFF is valid and should not produce replacement char")
+	}
+}
+
+func TestDecodeUTF32JustAboveBoundary(t *testing.T) {
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint32(data[0:4], 0x110000)
+	out, err := decodeUTF32(data, binary.BigEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "�" {
+		t.Errorf("U+110000 is invalid, expected replacement char, got %q", string(out))
+	}
+}
+
+func TestDecodeUTF32LoopBoundary(t *testing.T) {
+	data := make([]byte, 8)
+	binary.BigEndian.PutUint32(data[0:4], 0x41)
+	binary.BigEndian.PutUint32(data[4:8], 0x42)
+	out, err := decodeUTF32(data, binary.BigEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "AB" {
+		t.Errorf("expected AB, got %q", string(out))
+	}
+}
+
+func TestDecodeUTF16LoopBoundary(t *testing.T) {
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint16(data[0:2], 0x0041)
+	binary.BigEndian.PutUint16(data[2:4], 0x0042)
+	out, err := decodeUTF16(data, binary.BigEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "AB" {
+		t.Errorf("expected AB, got %q", string(out))
+	}
+}

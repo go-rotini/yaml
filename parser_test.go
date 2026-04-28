@@ -821,3 +821,93 @@ func TestUnknownDirectiveWarning(t *testing.T) {
 		t.Errorf("expected warning about %%CUSTOM, got: %s", file.Warnings[0])
 	}
 }
+
+func TestParseImplicitDocumentStart(t *testing.T) {
+	input := "key: val\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Docs) != 1 {
+		t.Fatalf("expected 1 doc, got %d", len(file.Docs))
+	}
+}
+
+func TestParseMultiDocRequiresMarker(t *testing.T) {
+	input := "a: 1\n---\nb: 2\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Docs) != 2 {
+		t.Fatalf("expected 2 docs, got %d", len(file.Docs))
+	}
+}
+
+func TestParseAllTokenTypesInDocument(t *testing.T) {
+	input := "anchor: &a val\nalias: *a\ntag: !custom tagged\nmap:\n  key: value\nseq:\n  - item\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Docs) != 1 {
+		t.Fatalf("expected 1 doc, got %d", len(file.Docs))
+	}
+}
+
+func TestDecodeTagURIPercentEncoding(t *testing.T) {
+	result := decodeTagURI("tag%3Aexample")
+	if result != "tag:example" {
+		t.Errorf("expected 'tag:example', got %q", result)
+	}
+}
+
+func TestDecodeTagURINoEncoding(t *testing.T) {
+	result := decodeTagURI("plain")
+	if result != "plain" {
+		t.Errorf("expected 'plain', got %q", result)
+	}
+}
+
+func TestDecodeTagURIMultiplePercent(t *testing.T) {
+	result := decodeTagURI("%41%42%43")
+	if result != "ABC" {
+		t.Errorf("expected 'ABC', got %q", result)
+	}
+}
+
+func TestDecodeTagURIInvalidPercent(t *testing.T) {
+	result := decodeTagURI("%ZZ")
+	if result != "%ZZ" {
+		t.Errorf("invalid hex should pass through, got %q", result)
+	}
+}
+
+func TestDecodeTagURITruncatedPercent(t *testing.T) {
+	result := decodeTagURI("end%4")
+	if !strings.Contains(result, "%4") {
+		t.Errorf("truncated %% should pass through, got %q", result)
+	}
+}
+
+func TestIsValidYAMLVersion(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"1.2", true},
+		{"1.1", true},
+		{"0.9", true},
+		{"1.", false},
+		{".1", false},
+		{"", false},
+		{"12", false},
+		{"a.b", false},
+	}
+	for _, tt := range tests {
+		got := isValidYAMLVersion(tt.input)
+		if got != tt.want {
+			t.Errorf("isValidYAMLVersion(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}

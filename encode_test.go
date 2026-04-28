@@ -2327,3 +2327,394 @@ func TestMarshalBigOmitemptyNonZero(t *testing.T) {
 		t.Errorf("expected big.Rat in output, got:\n%s", out)
 	}
 }
+
+func TestInsertHeadCommentIndentCalc(t *testing.T) {
+	buf := []byte("  name: foo\n  age: 30\n")
+	result := insertHeadComment(buf, "$.name", "about name")
+	s := string(result)
+	if !strings.Contains(s, "  # about name\n  name: foo") {
+		t.Errorf("head comment should match key indentation, got:\n%s", s)
+	}
+}
+
+func TestInsertFootCommentIndentCalc(t *testing.T) {
+	buf := []byte("  name: foo\n  age: 30\n")
+	result := insertFootComment(buf, "$.name", "after name")
+	s := string(result)
+	if !strings.Contains(s, "  name: foo\n  # after name") {
+		t.Errorf("foot comment should match key indentation, got:\n%s", s)
+	}
+}
+
+func TestMarshalCustomMarshalerNilMap(t *testing.T) {
+	type Foo struct {
+		Name string `yaml:"name"`
+	}
+	f := Foo{Name: "test"}
+	data, err := Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "name: test") {
+		t.Errorf("expected 'name: test', got:\n%s", string(data))
+	}
+}
+
+func TestMarshalSequenceNewlineBefore(t *testing.T) {
+	type S struct {
+		Items []string `yaml:"items"`
+	}
+	s := S{Items: []string{"a", "b", "c"}}
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if strings.Count(out, "- ") != 3 {
+		t.Errorf("expected 3 sequence items, got:\n%s", out)
+	}
+	if !strings.Contains(out, "- a") || !strings.Contains(out, "- b") || !strings.Contains(out, "- c") {
+		t.Errorf("missing sequence items, got:\n%s", out)
+	}
+}
+
+func TestMarshalSequenceSingleElement(t *testing.T) {
+	type S struct {
+		Items []string `yaml:"items"`
+	}
+	s := S{Items: []string{"only"}}
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "- only") {
+		t.Errorf("expected '- only', got:\n%s", string(data))
+	}
+}
+
+func TestMarshalInlineMapNewlineBefore(t *testing.T) {
+	type S struct {
+		Name  string         `yaml:"name"`
+		Extra map[string]any `yaml:",inline"`
+	}
+	s := S{
+		Name:  "test",
+		Extra: map[string]any{"x": "1", "y": "2"},
+	}
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d:\n%s", len(lines), string(data))
+	}
+}
+
+func TestMarshalFlowStructOmitEmptyField(t *testing.T) {
+	type S struct {
+		A string `yaml:"a"`
+		B string `yaml:"b,omitempty"`
+		C string `yaml:"c"`
+	}
+	s := S{A: "1", B: "", C: "3"}
+	data, err := MarshalWithOptions(s, WithFlow(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if strings.Contains(out, "b:") {
+		t.Errorf("omitempty field should be excluded in flow mode, got: %s", out)
+	}
+	if !strings.Contains(out, "a:") || !strings.Contains(out, "c:") {
+		t.Errorf("non-empty fields should be present, got: %s", out)
+	}
+}
+
+func TestMarshalFlowStructAllFields(t *testing.T) {
+	type S struct {
+		A string `yaml:"a"`
+		B string `yaml:"b,omitempty"`
+		C string `yaml:"c"`
+	}
+	s := S{A: "1", B: "2", C: "3"}
+	data, err := MarshalWithOptions(s, WithFlow(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, "a:") || !strings.Contains(out, "b:") || !strings.Contains(out, "c:") {
+		t.Errorf("all fields should be present, got: %s", out)
+	}
+}
+
+func TestMarshalLiteralScalarIndent(t *testing.T) {
+	m := map[string]any{"text": "line1\nline2\nline3\n"}
+	data, err := MarshalWithOptions(m, WithLiteralStyle(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	lines := strings.Split(s, "\n")
+	indented := 0
+	for _, line := range lines {
+		if strings.HasPrefix(line, "  ") && strings.TrimSpace(line) != "" {
+			indented++
+		}
+	}
+	if indented < 3 {
+		t.Errorf("expected at least 3 indented content lines, got %d:\n%s", indented, s)
+	}
+}
+
+func TestMarshalLiteralScalarCustomIndent(t *testing.T) {
+	m := map[string]any{"text": "line1\nline2\n"}
+	data, err := MarshalWithOptions(m, WithLiteralStyle(true), WithIndent(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "    line1") {
+		t.Errorf("expected 4-space indent for literal content, got:\n%s", s)
+	}
+}
+
+func TestInsertHeadCommentArithmetic(t *testing.T) {
+	buf := []byte("    deep:\n      key: val\n")
+	result := insertHeadComment(buf, "$.deep", "test comment")
+	s := string(result)
+	if !strings.Contains(s, "    # test comment\n    deep:") {
+		t.Errorf("head comment indent should be 4 spaces, got:\n%s", s)
+	}
+}
+
+func TestInsertFootCommentArithmetic(t *testing.T) {
+	buf := []byte("    deep:\n      key: val\n")
+	result := insertFootComment(buf, "$.deep", "test comment")
+	s := string(result)
+	if !strings.Contains(s, "    deep:\n    # test comment") {
+		t.Errorf("foot comment indent should be 4 spaces, got:\n%s", s)
+	}
+}
+
+func TestMarshalMapMultipleKeys(t *testing.T) {
+	m := map[string]string{"a": "1", "b": "2", "c": "3"}
+	data, err := Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if strings.Count(s, ": ") != 3 {
+		t.Errorf("expected 3 key-value pairs:\n%s", s)
+	}
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) != 3 {
+		t.Errorf("expected 3 lines, got %d:\n%s", len(lines), s)
+	}
+}
+
+func TestMarshalMapNewlinesBetweenEntries(t *testing.T) {
+	m := map[string]int{"x": 1, "y": 2}
+	data, err := Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.TrimSpace(string(data))
+	lines := strings.Split(s, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d:\n%s", len(lines), s)
+	}
+}
+
+func TestMarshalStructMultipleFields(t *testing.T) {
+	type S struct {
+		A string `yaml:"a"`
+		B int    `yaml:"b"`
+		C bool   `yaml:"c"`
+	}
+	s := S{A: "hello", B: 42, C: true}
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d:\n%s", len(lines), out)
+	}
+	if !strings.Contains(out, "a: hello") {
+		t.Errorf("missing field a:\n%s", out)
+	}
+	if !strings.Contains(out, "b: 42") {
+		t.Errorf("missing field b:\n%s", out)
+	}
+}
+
+func TestMarshalStructInlineMapNewlines(t *testing.T) {
+	type S struct {
+		Name  string         `yaml:"name"`
+		Extra map[string]any `yaml:",inline"`
+	}
+	s := S{
+		Name:  "test",
+		Extra: map[string]any{"alpha": "a", "beta": "b", "gamma": "c"},
+	}
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 lines (name + 3 inline), got %d:\n%s", len(lines), string(data))
+	}
+}
+
+func TestMarshalStructInlineMapCompoundIndent(t *testing.T) {
+	type S struct {
+		Name  string            `yaml:"name"`
+		Extra map[string][]int  `yaml:",inline"`
+	}
+	s := S{
+		Name:  "test",
+		Extra: map[string][]int{"nums": {1, 2, 3}},
+	}
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, "nums:") {
+		t.Errorf("missing inline map key:\n%s", out)
+	}
+	if !strings.Contains(out, "- 1") {
+		t.Errorf("missing sequence items:\n%s", out)
+	}
+}
+
+func TestMarshalStructFlowFieldIndent(t *testing.T) {
+	type S struct {
+		Name  string   `yaml:"name"`
+		Items []string `yaml:"items,flow"`
+	}
+	s := S{Name: "test", Items: []string{"a", "b"}}
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, "items: [a, b]") {
+		t.Errorf("expected flow sequence for items:\n%s", out)
+	}
+}
+
+func TestMarshalStructCompoundFieldIndent(t *testing.T) {
+	type Inner struct {
+		X int `yaml:"x"`
+	}
+	type S struct {
+		Name  string `yaml:"name"`
+		Inner Inner  `yaml:"inner"`
+	}
+	s := S{Name: "test", Inner: Inner{X: 1}}
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, "inner:\n") {
+		t.Errorf("compound field should have newline after colon:\n%s", out)
+	}
+	if !strings.Contains(out, "  x: 1") {
+		t.Errorf("nested field should be indented:\n%s", out)
+	}
+}
+
+func TestMarshalLiteralScalarLastLineBreak(t *testing.T) {
+	m1 := map[string]any{"text": "line1\nline2\n"}
+	data1, _ := MarshalWithOptions(m1, WithLiteralStyle(true))
+	if !strings.Contains(string(data1), "|") {
+		t.Error("trailing newline should use | indicator")
+	}
+
+	m2 := map[string]any{"text": "line1\nline2"}
+	data2, _ := MarshalWithOptions(m2, WithLiteralStyle(true))
+	if !strings.Contains(string(data2), "|-") {
+		t.Error("no trailing newline should use |- indicator")
+	}
+}
+
+func TestMarshalLiteralScalarMultipleLines(t *testing.T) {
+	m := map[string]any{"text": "a\nb\nc\nd\n"}
+	data, err := MarshalWithOptions(m, WithLiteralStyle(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if strings.Count(s, "\n") < 4 {
+		t.Errorf("expected at least 4 newlines in output:\n%s", s)
+	}
+}
+
+func TestMarshalEmitNodeMapping(t *testing.T) {
+	input := "a: 1\nb: 2\nc: 3\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NodeToBytes(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d:\n%s", len(lines), s)
+	}
+}
+
+func TestMarshalEmitNodeSequence(t *testing.T) {
+	input := "- x\n- y\n- z\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NodeToBytes(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Count(s, "- ") != 3 {
+		t.Errorf("expected 3 sequence entries:\n%s", s)
+	}
+}
+
+func TestMarshalEmitNodeNestedMapping(t *testing.T) {
+	input := "outer:\n  inner: val\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NodeToBytes(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "outer:") || !strings.Contains(s, "inner: val") {
+		t.Errorf("nested mapping not preserved:\n%s", s)
+	}
+}
+
+func TestMarshalFlowMappingSortBoundary(t *testing.T) {
+	m := map[string]int{"a": 1, "b": 2, "c": 3}
+	data, err := MarshalWithOptions(m, WithFlow(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	aIdx := strings.Index(s, "a:")
+	bIdx := strings.Index(s, "b:")
+	cIdx := strings.Index(s, "c:")
+	if aIdx >= bIdx || bIdx >= cIdx {
+		t.Errorf("keys should be sorted: %s", s)
+	}
+}
