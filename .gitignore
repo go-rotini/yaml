@@ -36,3 +36,6 @@ go.work.sum
 
 # YAML test suite (cloned separately)
 testdata/yaml-test-suite/
+
+# Mutation testing output
+test_mutation.json

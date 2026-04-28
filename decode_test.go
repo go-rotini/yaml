@@ -6639,3 +6639,110 @@ func TestBigRatInvalidInput(t *testing.T) {
 		t.Error("expected error for invalid big.Rat input")
 	}
 }
+
+func TestDecodeScalarBigFloatError(t *testing.T) {
+	d := newDecoder(defaultDecodeOptions())
+	n := &node{kind: nodeScalar, value: "not_a_float"}
+	var bf big.Float
+	v := reflect.ValueOf(&bf).Elem()
+	if err := d.decodeScalar(n, v); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.typeErrors) == 0 {
+		t.Error("expected type error for invalid big.Float input")
+	}
+}
+
+func TestDecodeScalarBigFloatValid(t *testing.T) {
+	d := newDecoder(defaultDecodeOptions())
+	n := &node{kind: nodeScalar, value: "3.14"}
+	var bf big.Float
+	v := reflect.ValueOf(&bf).Elem()
+	if err := d.decodeScalar(n, v); err != nil {
+		t.Fatal(err)
+	}
+	expected, _, _ := big.ParseFloat("3.14", 10, 256, big.ToNearestEven)
+	if bf.Cmp(expected) != 0 {
+		t.Errorf("expected 3.14, got %s", bf.Text('g', -1))
+	}
+}
+
+func TestDecodeMappingToEmptyInterfaceInternal(t *testing.T) {
+	d := newDecoder(defaultDecodeOptions())
+	n := &node{
+		kind: nodeMapping,
+		children: []*node{
+			{kind: nodeScalar, value: "key"},
+			{kind: nodeScalar, value: "val"},
+		},
+	}
+	var target any
+	v := reflect.ValueOf(&target).Elem()
+	if err := d.decodeMapping(n, v); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := target.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", target)
+	}
+	if m["key"] != "val" {
+		t.Errorf("expected val, got %v", m["key"])
+	}
+}
+
+func TestDecodeMappingToEmptyInterfaceNilResult(t *testing.T) {
+	d := newDecoder(defaultDecodeOptions())
+	n := &node{kind: nodeMapping}
+	var target any
+	v := reflect.ValueOf(&target).Elem()
+	if err := d.decodeMapping(n, v); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := target.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", target)
+	}
+	if len(m) != 0 {
+		t.Errorf("expected empty map, got %v", m)
+	}
+}
+
+func TestDecodeMapSliceAliasKey(t *testing.T) {
+	d := newDecoder(defaultDecodeOptions())
+	d.opts.useOrderedMap = true
+	d.anchors["a"] = &node{kind: nodeScalar, value: "mykey"}
+	n := &node{
+		kind: nodeMapping,
+		children: []*node{
+			{kind: nodeAlias, alias: "a"},
+			{kind: nodeScalar, value: "val"},
+		},
+	}
+	result, err := d.decodeToAny(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, ok := result.(MapSlice)
+	if !ok {
+		t.Fatalf("expected MapSlice, got %T", result)
+	}
+	if len(ms) != 1 || ms[0].Key != "mykey" {
+		t.Errorf("expected key 'mykey', got %v", ms)
+	}
+}
+
+func TestDecodeMapSliceAliasKeyUnknown(t *testing.T) {
+	d := newDecoder(defaultDecodeOptions())
+	d.opts.useOrderedMap = true
+	n := &node{
+		kind: nodeMapping,
+		children: []*node{
+			{kind: nodeAlias, alias: "nonexistent"},
+			{kind: nodeScalar, value: "val"},
+		},
+	}
+	_, err := d.decodeToAny(n)
+	if err == nil {
+		t.Error("expected error for unknown alias key in MapSlice")
+	}
+}

@@ -2252,3 +2252,78 @@ func TestMarshalStructFieldNonCompoundError(t *testing.T) {
 		t.Fatal("expected error from non-compound struct field marshal")
 	}
 }
+
+func TestMarshalBigIntValue(t *testing.T) {
+	bi, _ := new(big.Int).SetString("123456789012345678901234567890", 10)
+	data, err := Marshal(*bi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "123456789012345678901234567890") {
+		t.Errorf("expected big.Int value in output, got:\n%s", data)
+	}
+}
+
+func TestMarshalBigFloatValue(t *testing.T) {
+	bf, _, _ := big.ParseFloat("3.14159265358979323846", 10, 256, big.ToNearestEven)
+	data, err := Marshal(*bf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "3.14159") {
+		t.Errorf("expected big.Float value in output, got:\n%s", data)
+	}
+}
+
+func TestMarshalBigRatValue(t *testing.T) {
+	br := new(big.Rat).SetFrac64(1, 3)
+	data, err := Marshal(*br)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "1/3") {
+		t.Errorf("expected big.Rat value in output, got:\n%s", data)
+	}
+}
+
+func TestMarshalBigOmitemptyZero(t *testing.T) {
+	type S struct {
+		I big.Int   `yaml:"i,omitempty"`
+		F big.Float `yaml:"f,omitempty"`
+		R big.Rat   `yaml:"r,omitempty"`
+	}
+	data, err := Marshal(S{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if strings.Contains(s, "i:") || strings.Contains(s, "f:") || strings.Contains(s, "r:") {
+		t.Errorf("expected zero big values to be omitted, got:\n%s", s)
+	}
+}
+
+func TestMarshalBigOmitemptyNonZero(t *testing.T) {
+	type S struct {
+		I big.Int   `yaml:"i,omitempty"`
+		F big.Float `yaml:"f,omitempty"`
+		R big.Rat   `yaml:"r,omitempty"`
+	}
+	s := S{}
+	s.I.SetInt64(42)
+	s.F.SetFloat64(3.14)
+	s.R.SetFrac64(1, 2)
+	data, err := Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, "i:") {
+		t.Errorf("expected big.Int in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "f:") {
+		t.Errorf("expected big.Float in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "r:") {
+		t.Errorf("expected big.Rat in output, got:\n%s", out)
+	}
+}
