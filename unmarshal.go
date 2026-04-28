@@ -88,6 +88,11 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 // successive calls to [Decoder.Decode] to iterate over a multi-document
 // stream; it returns [io.EOF] when no more documents remain.
 //
+// The entire input is consumed from the reader on the first call to Decode.
+// For streams where documents arrive incrementally (e.g. from a network
+// connection), callers should frame each document and decode individually
+// with [Unmarshal].
+//
 // A Decoder is not safe for concurrent use. Callers that need to decode
 // from multiple goroutines must provide their own synchronization.
 type Decoder struct {
