@@ -2,7 +2,7 @@ TEST_SUITE_DIR := testdata/yaml-test-suite
 TEST_SUITE_REPO := https://github.com/yaml/yaml-test-suite.git
 TEST_SUITE_TAG := $(shell git ls-remote --tags $(TEST_SUITE_REPO) 'refs/tags/data-*' | grep -v '\^{}' | sed 's|.*refs/tags/||' | sort | tail -1)
 
-.PHONY: all clean clone-test-suite go test test-bench test-conformance test-fuzz test-race
+.PHONY: all clean clone-test-suite go test test-acceptance test-bench test-conformance test-fuzz test-race
 
 all: go test test-bench test-conformance test-fuzz test-race
 
@@ -25,6 +25,10 @@ go:
 test: clone-test-suite
 	@go test -v -coverprofile=test.out .
 	@go tool cover -func=test.out | tail -1
+
+test-acceptance:
+	@go test -v -run TestAcceptance -coverprofile=test_acceptance.out .
+	@go tool cover -func=test_acceptance.out | tail -1
 
 test-bench:
 	@go test -bench=. -benchmem -count=1 . | tee test_bench.out
