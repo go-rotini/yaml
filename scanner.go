@@ -23,6 +23,8 @@ type scanner struct {
 	docStartLine      int
 	docStartMapIndent int
 	flowBlockIndent   int
+	explicitKeyLine   int
+	explicitKeyCol    int
 }
 
 func newScanner(src []byte) *scanner {
@@ -156,6 +158,22 @@ func (s *scanner) scanNext() error {
 		if s.flowBlockIndent >= 0 && s.col-1 <= s.flowBlockIndent {
 			return &SyntaxError{Message: "flow content must be indented more than the enclosing block", Pos: s.position()}
 		}
+		if s.flowBlockIndent >= 0 {
+			lineStart := max(s.pos-(s.col-1), 0)
+			spaces := 0
+			for i := lineStart; i < s.pos; i++ {
+				if s.src[i] == ' ' {
+					spaces++
+				} else if s.src[i] == '\t' {
+					if !(spaces > s.flowBlockIndent && spaces > 0) {
+						return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
+					}
+					break
+				} else {
+					break
+				}
+			}
+		}
 		return s.scanFlowToken()
 	}
 
@@ -166,11 +184,16 @@ func (s *scanner) scanBlockToken() error {
 	ch := s.peek()
 	if s.col-1 > s.indent && ch != '{' && ch != '[' && ch != '}' && ch != ']' {
 		lineStart := max(s.pos-(s.col-1), 0)
+		spaces := 0
 		for i := lineStart; i < s.pos; i++ {
-			if s.src[i] == '\t' {
+			if s.src[i] == ' ' {
+				spaces++
+			} else if s.src[i] == '\t' {
+				if spaces > s.indent && spaces > 0 {
+					break
+				}
 				return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
-			}
-			if s.src[i] != ' ' {
+			} else {
 				break
 			}
 		}
@@ -346,6 +369,8 @@ func (s *scanner) scanExplicitKey() error {
 		s.pushIndent(col, tokenBlockMappingStart)
 	}
 	s.emit(tokenKey, "", s.position())
+	s.explicitKeyLine = s.line
+	s.explicitKeyCol = s.col
 	s.advance(1)
 	s.skipSpaces()
 	return nil
@@ -354,6 +379,7 @@ func (s *scanner) scanExplicitKey() error {
 func (s *scanner) scanBlockValue() error {
 	col := s.col - 1
 	hasKey := false
+	var foundKeyPos Position
 	depth := 0
 blockValueLoop:
 	for _, t := range slices.Backward(s.tokens) {
@@ -371,11 +397,22 @@ blockValueLoop:
 		case depth == 0:
 			if tk == tokenKey {
 				hasKey = true
+				foundKeyPos = t.pos
 				break blockValueLoop
 			}
 			if tk == tokenValue || tk == tokenDocumentStart || tk == tokenDocumentEnd || tk == tokenStreamStart {
 				break blockValueLoop
 			}
+		}
+	}
+	if hasKey && s.explicitKeyCol > 0 &&
+		foundKeyPos.Line == s.explicitKeyLine && foundKeyPos.Column == s.explicitKeyCol {
+		ekCol := s.explicitKeyCol - 1
+		if col != ekCol {
+			hasKey = false
+		} else {
+			s.explicitKeyLine = 0
+			s.explicitKeyCol = 0
 		}
 	}
 	if !hasKey {
@@ -669,6 +706,12 @@ headerLoop:
 			blockIndent = col
 			break
 		}
+		if lineSpaces > maxEmptyIndent {
+			maxEmptyIndent = lineSpaces
+		}
+		if blockIndent == 0 && maxEmptyIndent > 0 {
+			blockIndent = maxEmptyIndent
+		}
 		if blockIndent > 0 && maxEmptyIndent > blockIndent {
 			return &SyntaxError{Message: "leading empty lines have more indentation than content", Pos: pos}
 		}
@@ -706,6 +749,9 @@ headerLoop:
 		}
 
 		if lineCol < blockIndent {
+			if !s.atEnd() && s.peek() == '\t' {
+				return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
+			}
 			s.pos = lineStart
 			s.col -= lineCol
 			break
@@ -885,6 +931,7 @@ func (s *scanner) scanDoubleQuotedScalar() error {
 	pos := s.position()
 	s.advance(1)
 	var buf []byte
+	lastEscapeEnd := 0
 
 	for {
 		if s.atEnd() {
@@ -969,17 +1016,27 @@ func (s *scanner) scanDoubleQuotedScalar() error {
 			default:
 				return &SyntaxError{Message: fmt.Sprintf("invalid escape character '%c'", esc), Pos: s.position()}
 			}
+			lastEscapeEnd = len(buf)
 			continue
 		}
 		if ch == '\n' || ch == '\r' {
-			for len(buf) > 0 && (buf[len(buf)-1] == ' ' || buf[len(buf)-1] == '\t') {
+			for len(buf) > lastEscapeEnd && (buf[len(buf)-1] == ' ' || buf[len(buf)-1] == '\t') {
 				buf = buf[:len(buf)-1]
 			}
 			s.advanceLine()
 			if err := s.checkDocMarkerInQuoted("double-quoted"); err != nil {
 				return err
 			}
+			leadingSpaces := 0
+			hadTab := false
 			for !s.atEnd() && (s.peek() == ' ' || s.peek() == '\t') {
+				if s.peek() == ' ' {
+					if !hadTab {
+						leadingSpaces++
+					}
+				} else {
+					hadTab = true
+				}
 				s.advance(1)
 			}
 			emptyLines := 0
@@ -989,11 +1046,23 @@ func (s *scanner) scanDoubleQuotedScalar() error {
 				if err := s.checkDocMarkerInQuoted("double-quoted"); err != nil {
 					return err
 				}
+				leadingSpaces = 0
+				hadTab = false
 				for !s.atEnd() && (s.peek() == ' ' || s.peek() == '\t') {
+					if s.peek() == ' ' {
+						if !hadTab {
+							leadingSpaces++
+						}
+					} else {
+						hadTab = true
+					}
 					s.advance(1)
 				}
 			}
-			if s.flow == 0 && !s.atEnd() && s.col-1 <= s.indent {
+			if s.flow == 0 && !s.atEnd() && leadingSpaces <= s.indent {
+				if hadTab {
+					return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
+				}
 				return &SyntaxError{Message: "quoted scalar continuation not indented enough", Pos: s.position()}
 			}
 			if emptyLines > 0 {
@@ -1261,8 +1330,26 @@ func (s *scanner) scanDirective() error {
 	return nil
 }
 
+func (s *scanner) checkTabIndentAt(p Position) {
+	lineStart := p.Offset - (p.Column - 1)
+	if lineStart < 0 {
+		lineStart = 0
+	}
+	for i := p.Offset - 1; i >= lineStart; i-- {
+		ch := s.src[i]
+		if ch == '\t' {
+			s.scanErr = &SyntaxError{Message: "tab character used for indentation", Pos: p}
+			return
+		}
+		if ch != ' ' {
+			return
+		}
+	}
+}
+
 func (s *scanner) pushIndent(col int, kind tokenKind) {
 	if col > s.indent {
+		s.checkTabIndentAt(s.position())
 		s.indents = append(s.indents, s.indent)
 		s.indent = col
 		s.emit(kind, "", s.position())
@@ -1274,6 +1361,10 @@ func (s *scanner) unwindIndents(col int) {
 		s.indent = s.indents[len(s.indents)-1]
 		s.indents = s.indents[:len(s.indents)-1]
 		s.emit(tokenBlockEnd, "", s.position())
+	}
+	if s.explicitKeyCol > 0 && s.indent < s.explicitKeyCol-1 {
+		s.explicitKeyLine = 0
+		s.explicitKeyCol = 0
 	}
 }
 
@@ -1354,6 +1445,7 @@ func (s *scanner) emitScalar(value string, pos Position) {
 			s.scanErr = &SyntaxError{Message: "block collection on document start line must not have properties", Pos: pos}
 		}
 		if s.flow == 0 && indentCol > s.indent {
+			s.checkTabIndentAt(pos)
 			s.indents = append(s.indents, s.indent)
 			s.indent = indentCol
 			if pos.Line == s.docStartLine {

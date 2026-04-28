@@ -122,6 +122,12 @@ func (p *parser) parseDirective() error {
 				Pos:     t.pos,
 			}
 		}
+		if !isValidYAMLVersion(parts[1]) {
+			return &SyntaxError{
+				Message: fmt.Sprintf("invalid %%YAML version: %s", parts[1]),
+				Pos:     t.pos,
+			}
+		}
 		if p.seenYAMLDirective {
 			return &SyntaxError{
 				Message: "duplicate %YAML directive",
@@ -836,4 +842,20 @@ func (p *parser) advance() {
 	if p.pos < len(p.tokens) {
 		p.pos++
 	}
+}
+
+func isValidYAMLVersion(s string) bool {
+	dot := strings.IndexByte(s, '.')
+	if dot <= 0 || dot == len(s)-1 {
+		return false
+	}
+	for i, c := range s {
+		if i == dot {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
