@@ -12,7 +12,7 @@ clean:
 clone-test-suite: $(TEST_SUITE_DIR)
 
 $(TEST_SUITE_DIR):
-	@git clone --branch $(TEST_SUITE_TAG) --depth 1 $(TEST_SUITE_REPO) $(TEST_SUITE_DIR)
+	@git clone --quiet --branch $(TEST_SUITE_TAG) --depth 1 $(TEST_SUITE_REPO) $(TEST_SUITE_DIR)
 
 test: clone-test-suite
 	@go test -v -coverprofile=test.out .

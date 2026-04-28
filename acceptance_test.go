@@ -12,12 +12,13 @@ import (
 
 var k8sYAML []byte
 
-func init() {
+func TestMain(m *testing.M) {
 	var err error
 	k8sYAML, err = os.ReadFile("testdata/acceptance/k8s.yaml")
 	if err != nil {
 		panic("failed to read testdata/acceptance/k8s.yaml: " + err.Error())
 	}
+	os.Exit(m.Run())
 }
 
 // ---------------------------------------------------------------------------
@@ -355,8 +356,14 @@ func TestAcceptanceMarshalRoundTrip(t *testing.T) {
 			t.Fatalf("doc %d: re-Unmarshal: %v", docIdx, err)
 		}
 
-		origJSON, _ := json.Marshal(original)
-		decJSON, _ := json.Marshal(decoded)
+		origJSON, err := json.Marshal(original)
+		if err != nil {
+			t.Fatalf("doc %d: json.Marshal original: %v", docIdx, err)
+		}
+		decJSON, err := json.Marshal(decoded)
+		if err != nil {
+			t.Fatalf("doc %d: json.Marshal decoded: %v", docIdx, err)
+		}
 		if string(origJSON) != string(decJSON) {
 			t.Errorf("doc %d: round-trip mismatch", docIdx)
 		}

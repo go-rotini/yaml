@@ -162,17 +162,19 @@ func (s *scanner) scanNext() error {
 			lineStart := max(s.pos-(s.col-1), 0)
 			spaces := 0
 			for i := lineStart; i < s.pos; i++ {
-				if s.src[i] == ' ' {
+				switch s.src[i] {
+				case ' ':
 					spaces++
-				} else if s.src[i] == '\t' {
-					if !(spaces > s.flowBlockIndent && spaces > 0) {
+				case '\t':
+					if spaces <= s.flowBlockIndent || spaces <= 0 {
 						return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
 					}
-					break
-				} else {
-					break
+					goto doneFlowIndent
+				default:
+					goto doneFlowIndent
 				}
 			}
+		doneFlowIndent:
 		}
 		return s.scanFlowToken()
 	}
@@ -186,17 +188,19 @@ func (s *scanner) scanBlockToken() error {
 		lineStart := max(s.pos-(s.col-1), 0)
 		spaces := 0
 		for i := lineStart; i < s.pos; i++ {
-			if s.src[i] == ' ' {
+			switch s.src[i] {
+			case ' ':
 				spaces++
-			} else if s.src[i] == '\t' {
+			case '\t':
 				if spaces > s.indent && spaces > 0 {
-					break
+					goto doneBlockIndent
 				}
 				return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
-			} else {
-				break
+			default:
+				goto doneBlockIndent
 			}
 		}
+	doneBlockIndent:
 	}
 	s.unwindIndents(s.col - 1)
 
@@ -1331,10 +1335,7 @@ func (s *scanner) scanDirective() error {
 }
 
 func (s *scanner) checkTabIndentAt(p Position) {
-	lineStart := p.Offset - (p.Column - 1)
-	if lineStart < 0 {
-		lineStart = 0
-	}
+	lineStart := max(p.Offset-(p.Column-1), 0)
 	for i := p.Offset - 1; i >= lineStart; i-- {
 		ch := s.src[i]
 		if ch == '\t' {
