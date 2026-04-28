@@ -154,7 +154,7 @@ func PathString(expr string) (*Path, error) {
 func (p *Path) Read(n *Node) ([]*Node, error) {
 	current := []*Node{n}
 
-	for i, seg := range p.segments {
+	for _, seg := range p.segments {
 		if _, ok := seg.(rootSegment); ok {
 			if n.Kind == DocumentNode && len(n.Children) > 0 {
 				current = []*Node{n.Children[0]}
@@ -164,22 +164,7 @@ func (p *Path) Read(n *Node) ([]*Node, error) {
 
 		var next []*Node
 		for _, node := range current {
-			if _, ok := seg.(recursiveSegment); ok {
-				next = append(next, seg.match(node)...)
-				if i+1 < len(p.segments) {
-					nextSeg := p.segments[i+1]
-					var filtered []*Node
-					for _, candidate := range next {
-						matches := nextSeg.match(candidate)
-						if len(matches) > 0 {
-							filtered = append(filtered, candidate)
-						}
-					}
-					_ = filtered
-				}
-			} else {
-				next = append(next, seg.match(node)...)
-			}
+			next = append(next, seg.match(node)...)
 		}
 		current = next
 	}
