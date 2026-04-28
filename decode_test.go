@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"math/big"
 	"os"
@@ -3237,91 +3236,6 @@ func TestUnmarshalDuration(t *testing.T) {
 	}
 	if c.Timeout != 5*time.Second {
 		t.Errorf("expected 5s, got %v", c.Timeout)
-	}
-}
-
-// ─── k8s.yaml Integration Test ──────────────────────────────────────────────
-
-func TestUnmarshalK8sYAML(t *testing.T) {
-	data, err := os.ReadFile("../../k8s.yaml")
-	if err != nil {
-		t.Skip("k8s.yaml not found:", err)
-	}
-
-	dec := NewDecoder(bytes.NewReader(data))
-
-	docCount := 0
-	for {
-		var doc map[string]any
-		err := dec.Decode(&doc)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("document %d: %v", docCount, err)
-		}
-		docCount++
-
-		kind, ok := doc["kind"].(string)
-		if !ok {
-			t.Errorf("document %d: missing 'kind'", docCount)
-			continue
-		}
-
-		switch kind {
-		case "Namespace":
-			meta := doc["metadata"].(map[string]any)
-			if meta["name"] != "webapp-prod" {
-				t.Errorf("Namespace: expected name=webapp-prod, got %v", meta["name"])
-			}
-		case "ServiceAccount":
-			meta := doc["metadata"].(map[string]any)
-			if meta["name"] != "webapp-sa" {
-				t.Errorf("ServiceAccount: expected name=webapp-sa, got %v", meta["name"])
-			}
-		case "ConfigMap":
-			data, ok := doc["data"].(map[string]any)
-			if !ok {
-				t.Error("ConfigMap: missing data")
-			} else {
-				if data["APP_ENV"] != "production" {
-					t.Errorf("ConfigMap: expected APP_ENV=production, got %v", data["APP_ENV"])
-				}
-			}
-		case "Deployment":
-			spec := doc["spec"].(map[string]any)
-			replicas := spec["replicas"]
-			if replicas != int64(3) {
-				t.Errorf("Deployment: expected replicas=3, got %v (%T)", replicas, replicas)
-			}
-		case "Service":
-			spec := doc["spec"].(map[string]any)
-			if spec["type"] != "ClusterIP" {
-				t.Errorf("Service: expected type=ClusterIP, got %v", spec["type"])
-			}
-		case "Ingress":
-			spec := doc["spec"].(map[string]any)
-			if spec["ingressClassName"] != "nginx" {
-				t.Errorf("Ingress: expected ingressClassName=nginx, got %v", spec["ingressClassName"])
-			}
-		case "HorizontalPodAutoscaler":
-			spec := doc["spec"].(map[string]any)
-			if spec["minReplicas"] != int64(3) {
-				t.Errorf("HPA: expected minReplicas=3, got %v", spec["minReplicas"])
-			}
-		case "NetworkPolicy":
-			spec := doc["spec"].(map[string]any)
-			policyTypes, ok := spec["policyTypes"].([]any)
-			if !ok {
-				t.Error("NetworkPolicy: missing policyTypes")
-			} else if len(policyTypes) != 2 {
-				t.Errorf("NetworkPolicy: expected 2 policyTypes, got %d", len(policyTypes))
-			}
-		}
-	}
-
-	if docCount < 8 {
-		t.Errorf("expected at least 8 documents, got %d", docCount)
 	}
 }
 

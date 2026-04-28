@@ -38,6 +38,9 @@ test-fuzz:
 	@go test -fuzz=FuzzScanner -fuzztime=60s .
 	@go test -fuzz=FuzzRoundTrip -fuzztime=60s .
 
+test-mutation:
+	@go tool github.com/go-gremlins/gremlins/cmd/gremlins unleash
+
 test-race:
 	@go test -race -coverprofile=test_race.out .
 	@go tool cover -func=test_race.out | tail -1

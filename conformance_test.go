@@ -1,9 +1,11 @@
 package yaml
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -323,23 +325,10 @@ func TestYAMLTestSuite(t *testing.T) {
 func TestYAMLTestSuiteJSON(t *testing.T) {
 	tests := discoverTestDirs(t)
 
-	var passed, failed, skipped int
+	var passed, failed, errCorrect, errMissed, skipped int
 
 	for _, tc := range tests {
 		t.Run(tc.id, func(t *testing.T) {
-			if _, err := os.Stat(filepath.Join(tc.dir, "error")); err == nil {
-				skipped++
-				t.Skip("error case")
-				return
-			}
-
-			inJSON, err := os.ReadFile(filepath.Join(tc.dir, "in.json"))
-			if err != nil {
-				skipped++
-				t.Skip("no in.json")
-				return
-			}
-
 			inYAML, err := os.ReadFile(filepath.Join(tc.dir, "in.yaml"))
 			if err != nil {
 				skipped++
@@ -347,60 +336,125 @@ func TestYAMLTestSuiteJSON(t *testing.T) {
 				return
 			}
 
+			_, isErrorCase := os.Stat(filepath.Join(tc.dir, "error"))
+			expectError := isErrorCase == nil
+
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			type jsonResult struct {
-				data []byte
+			type decodeResult struct {
+				docs []any
 				err  error
 			}
-			ch := make(chan jsonResult, 1)
+			ch := make(chan decodeResult, 1)
 			go func() {
-				d, e := ToJSON(inYAML)
-				ch <- jsonResult{d, e}
+				dec := NewDecoder(bytes.NewReader(inYAML))
+				var docs []any
+				for {
+					var v any
+					if err := dec.Decode(&v); err != nil {
+						if err == io.EOF {
+							break
+						}
+						ch <- decodeResult{nil, err}
+						return
+					}
+					docs = append(docs, v)
+				}
+				ch <- decodeResult{docs, nil}
 			}()
 
-			var gotJSON []byte
+			var docs []any
+			var decErr error
 			select {
 			case <-ctx.Done():
 				t.Errorf("timeout")
 				failed++
 				return
 			case res := <-ch:
-				if res.err != nil {
-					t.Errorf("ToJSON failed: %v", res.err)
+				docs = res.docs
+				decErr = res.err
+			}
+
+			if expectError {
+				if decErr != nil {
+					errCorrect++
+				} else {
+					errMissed++
+					t.Errorf("expected error but decode succeeded")
+				}
+				return
+			}
+
+			if decErr != nil {
+				t.Errorf("decode failed: %v", decErr)
+				failed++
+				return
+			}
+
+			inJSON, err := os.ReadFile(filepath.Join(tc.dir, "in.json"))
+			if err != nil {
+				passed++
+				return
+			}
+
+			var expectedDocs []any
+			jdec := json.NewDecoder(bytes.NewReader(inJSON))
+			for jdec.More() {
+				var v any
+				if err := jdec.Decode(&v); err != nil {
+					skipped++
+					t.Skipf("invalid expected JSON: %v", err)
+					return
+				}
+				expectedDocs = append(expectedDocs, v)
+			}
+
+			if len(expectedDocs) == 0 && len(docs) == 0 {
+				passed++
+				return
+			}
+
+			if len(docs) != len(expectedDocs) {
+				t.Errorf("document count mismatch: expected %d, got %d", len(expectedDocs), len(docs))
+				failed++
+				return
+			}
+
+			for i := range docs {
+				gotBytes, err := json.Marshal(docs[i])
+				if err != nil {
+					t.Errorf("doc %d: json marshal failed: %v", i, err)
 					failed++
 					return
 				}
-				gotJSON = res.data
-			}
-
-			var expected, got any
-			if err := json.Unmarshal(inJSON, &expected); err != nil {
-				t.Skipf("invalid expected JSON: %v", err)
-				skipped++
-				return
-			}
-			if err := json.Unmarshal(gotJSON, &got); err != nil {
-				t.Errorf("invalid generated JSON: %v\nraw: %s", err, gotJSON)
-				failed++
-				return
-			}
-
-			if !reflect.DeepEqual(normalizeJSON(expected), normalizeJSON(got)) {
-				t.Errorf("JSON mismatch:\nexpected: %s\ngot:      %s", string(inJSON), string(gotJSON))
-				failed++
-				return
+				var got any
+				if err := json.Unmarshal(gotBytes, &got); err != nil {
+					t.Errorf("doc %d: invalid generated JSON: %v\nraw: %s", i, err, gotBytes)
+					failed++
+					return
+				}
+				if !reflect.DeepEqual(normalizeJSON(expectedDocs[i]), normalizeJSON(got)) {
+					expBytes, _ := json.Marshal(expectedDocs[i])
+					t.Errorf("doc %d JSON mismatch:\nexpected: %s\ngot:      %s", i, expBytes, gotBytes)
+					failed++
+					return
+				}
 			}
 
 			passed++
 		})
 	}
 
+	total := passed + errCorrect
 	t.Logf("\n=== YAML Test Suite JSON Results ===")
-	t.Logf("Passed:  %d", passed)
-	t.Logf("Failed:  %d", failed)
-	t.Logf("Skipped: %d", skipped)
+	t.Logf("Total:          %d", len(tests))
+	t.Logf("JSON match:     %d", passed)
+	t.Logf("JSON mismatch:  %d", failed)
+	t.Logf("Error correct:  %d (correctly rejected invalid input)", errCorrect)
+	t.Logf("Error missed:   %d (should reject but accepted)", errMissed)
+	t.Logf("Skipped:        %d", skipped)
+	t.Logf("Pass rate:      %.1f%% (%d/%d)", float64(total)*100/float64(len(tests)), total, len(tests))
 }
 
 func normalizeJSON(v any) any {
