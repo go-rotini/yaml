@@ -2571,8 +2571,8 @@ func TestMarshalStructInlineMapNewlines(t *testing.T) {
 
 func TestMarshalStructInlineMapCompoundIndent(t *testing.T) {
 	type S struct {
-		Name  string            `yaml:"name"`
-		Extra map[string][]int  `yaml:",inline"`
+		Name  string           `yaml:"name"`
+		Extra map[string][]int `yaml:",inline"`
 	}
 	s := S{
 		Name:  "test",
