@@ -164,7 +164,7 @@ func TestAcceptanceUnmarshalTo(t *testing.T) {
 
 func TestAcceptanceUnmarshalAnchorAlias(t *testing.T) {
 	dec := NewDecoder(bytes.NewReader(k8sYAML))
-	var configMap, secret map[string]any
+	var configMap map[string]any
 	for {
 		var obj map[string]any
 		if err := dec.Decode(&obj); err != nil {
@@ -173,25 +173,25 @@ func TestAcceptanceUnmarshalAnchorAlias(t *testing.T) {
 			}
 			t.Fatal(err)
 		}
-		switch obj["kind"] {
-		case "ConfigMap":
+		if obj["kind"] == "ConfigMap" {
 			configMap = obj
-		case "Secret":
-			secret = obj
+			break
 		}
 	}
 
-	cmLabels, _ := configMap["metadata"].(map[string]any)["labels"].(map[string]any)
-	secLabels, _ := secret["metadata"].(map[string]any)["labels"].(map[string]any)
+	meta, _ := configMap["metadata"].(map[string]any)
+	labels, _ := meta["labels"].(map[string]any)
+	annotations, _ := meta["annotations"].(map[string]any)
+	aliased, _ := annotations["verified-labels"].(map[string]any)
 
-	if cmLabels["app"] != "web-frontend" {
-		t.Errorf("ConfigMap label: got %v", cmLabels["app"])
+	if labels["app"] != "web-frontend" {
+		t.Errorf("ConfigMap label: got %v", labels["app"])
 	}
-	if secLabels["app"] != "web-frontend" {
-		t.Error("anchor/alias: Secret labels should match ConfigMap labels")
+	if aliased["app"] != labels["app"] {
+		t.Error("anchor/alias: aliased labels should match anchor labels")
 	}
-	if secLabels["tier"] != cmLabels["tier"] || secLabels["environment"] != cmLabels["environment"] {
-		t.Error("anchor/alias: label values diverged")
+	if aliased["tier"] != labels["tier"] || aliased["environment"] != labels["environment"] {
+		t.Error("anchor/alias: aliased label values diverged")
 	}
 }
 

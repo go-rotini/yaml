@@ -16,6 +16,8 @@ metadata:
     app: web-frontend
     tier: frontend
     environment: staging
+  annotations:
+    verified-labels: *common-labels
 data:
   DATABASE_URL: "postgres://db.internal:5432/appdb"
   CACHE_TTL: "300"
@@ -37,7 +39,10 @@ kind: Secret
 metadata:
   name: app-secrets
   namespace: demo
-  labels: *common-labels
+  labels:
+    app: web-frontend
+    tier: frontend
+    environment: staging
 type: Opaque
 stringData:
   API_KEY: "sk-proj-abc123def456"
@@ -53,7 +58,10 @@ kind: Deployment
 metadata:
   name: web-frontend
   namespace: demo
-  labels: *common-labels
+  labels:
+    app: web-frontend
+    tier: frontend
+    environment: staging
   annotations:
     deployment.kubernetes.io/revision: "3"
     kubectl.kubernetes.io/last-applied-configuration: "{}"
@@ -70,7 +78,10 @@ spec:
       app: web-frontend
   template:
     metadata:
-      labels: *common-labels
+      labels:
+        app: web-frontend
+        tier: frontend
+        environment: staging
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
@@ -177,7 +188,10 @@ kind: Service
 metadata:
   name: web-frontend
   namespace: demo
-  labels: *common-labels
+  labels:
+    app: web-frontend
+    tier: frontend
+    environment: staging
 spec:
   type: ClusterIP
   selector:
@@ -294,7 +308,10 @@ kind: ServiceAccount
 metadata:
   name: web-frontend
   namespace: demo
-  labels: *common-labels
+  labels:
+    app: web-frontend
+    tier: frontend
+    environment: staging
   annotations:
     eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/web-frontend"
 automountServiceAccountToken: false
