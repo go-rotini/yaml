@@ -2706,11 +2706,11 @@ func TestMarshalFlowMappingSortBoundary(t *testing.T) {
 
 func TestMarshalQuoteAll(t *testing.T) {
 	type Config struct {
-		Name    string            `yaml:"name"`
-		Port    int               `yaml:"port"`
-		Debug   bool              `yaml:"debug"`
-		Tags    []string          `yaml:"tags"`
-		Labels  map[string]string `yaml:"labels"`
+		Name   string            `yaml:"name"`
+		Port   int               `yaml:"port"`
+		Debug  bool              `yaml:"debug"`
+		Tags   []string          `yaml:"tags"`
+		Labels map[string]string `yaml:"labels"`
 	}
 
 	c := Config{
