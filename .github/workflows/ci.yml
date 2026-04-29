@@ -31,7 +31,7 @@ jobs:
 
       - name: Upload coverage
         if: matrix.go-version == '1.26.x'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: test.out
@@ -88,7 +88,7 @@ jobs:
         run: make test-bench
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmarks
           path: test_bench.out
