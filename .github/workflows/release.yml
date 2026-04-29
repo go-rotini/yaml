@@ -24,11 +24,12 @@ jobs:
         with:
           go-version: '1.26.x'
 
-      - name: Semantic Release
+      - name: Determine version
         uses: go-semantic-release/action@2e9dc4247a6004f8377781bef4cb9dad273a741f # v1
         id: semrel
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          dry: true
 
       - name: Generate SBOM
         if: steps.semrel.outputs.version != ''
@@ -43,8 +44,18 @@ jobs:
         with:
           subject-path: sbom.spdx.json
 
-      - name: Upload SBOM to release
+      - name: Create draft release
         if: steps.semrel.outputs.version != ''
-        run: gh release upload v${{ steps.semrel.outputs.version }} sbom.spdx.json
+        run: |
+          gh release create v${{ steps.semrel.outputs.version }} \
+            --draft \
+            --generate-notes \
+            sbom.spdx.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish release
+        if: steps.semrel.outputs.version != ''
+        run: gh release edit v${{ steps.semrel.outputs.version }} --draft=false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
