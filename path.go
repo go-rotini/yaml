@@ -162,7 +162,7 @@ func (p *Path) Read(n *Node) ([]*Node, error) {
 			continue
 		}
 
-		var next []*Node
+		next := make([]*Node, 0, len(current))
 		for _, node := range current {
 			next = append(next, seg.match(node)...)
 		}

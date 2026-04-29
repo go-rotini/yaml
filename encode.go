@@ -15,9 +15,9 @@ import (
 )
 
 type encoder struct {
-	opts       *encoderOptions
-	ctx        context.Context
-	buf        []byte
+	opts        *encoderOptions
+	ctx         context.Context
+	buf         []byte
 	encodingKey bool
 }
 
@@ -753,4 +753,3 @@ func isEmpty(v reflect.Value) bool {
 	}
 	return false
 }
-
