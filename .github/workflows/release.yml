@@ -36,7 +36,7 @@ jobs:
 
       - name: Attest SBOM provenance
         if: steps.semrel.outputs.version != ''
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: sbom.spdx.json
 
