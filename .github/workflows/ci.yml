@@ -46,7 +46,7 @@ jobs:
           go-version: '1.26.x'
 
       - name: Lint
-        run: make yaml
+        run: make lint
 
   fuzz:
     runs-on: ubuntu-latest

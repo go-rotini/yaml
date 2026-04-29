@@ -7,6 +7,7 @@ Contributions are welcome! Here's how to get started.
 ```bash
 git clone https://github.com/go-rotini/yaml.git
 cd yaml
+go mod download
 make all   # run all project processes
 ```
 
@@ -17,13 +18,22 @@ make all   # run all project processes
 3. Ensure `make all` passes before submitting a pull request.
 4. Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages (e.g., `feat:`, `fix:`, `test:`, `docs:`).
 
-## Running Tests
+## Linting
 
 ```bash
-make test              # run all tests
-make test-conformance  # run YAML test suite conformance tests
+make lint
+```
+
+## Testing
+
+```bash
+make test              # run tests
+make test-acceptance   # run YAML acceptance tests verifying encoding/decoding behavior
 make test-bench        # run benchmarks
+make test-conformance  # run YAML test suite conformance tests
 make test-fuzz         # run fuzz tests (60s per fuzzer)
+make test-mutation     # run mutation tests
+make test-race         # run tests with race detector
 ```
 
 ## Pull Requests
