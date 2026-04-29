@@ -2,8 +2,7 @@ unleash:
   timeout-coefficient: 0
   output-statuses: "lckvsr"
   output: test_mutation.json
-  exclude-files:
-    - "cmd/"
+  exclude-files: []
   threshold:
     efficacy: 80
     mutant-coverage: 0
