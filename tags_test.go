@@ -352,6 +352,89 @@ func TestTagParsingAnchorAlias(t *testing.T) {
 	}
 }
 
+func TestParseTagDefault(t *testing.T) {
+	fi := parseTag("count,default=2")
+	if !fi.hasDefault {
+		t.Error("expected hasDefault=true")
+	}
+	if fi.defaultValue != "2" {
+		t.Errorf("expected defaultValue=2, got %q", fi.defaultValue)
+	}
+	if fi.name != "count" {
+		t.Errorf("expected name=count, got %q", fi.name)
+	}
+}
+
+func TestParseTagDefaultEmpty(t *testing.T) {
+	fi := parseTag("name,default=")
+	if !fi.hasDefault {
+		t.Error("expected hasDefault=true for empty default")
+	}
+	if fi.defaultValue != "" {
+		t.Errorf("expected empty defaultValue, got %q", fi.defaultValue)
+	}
+}
+
+func TestParseTagDefaultNoName(t *testing.T) {
+	fi := parseTag(",default=hello")
+	if !fi.hasDefault {
+		t.Error("expected hasDefault=true")
+	}
+	if fi.defaultValue != "hello" {
+		t.Errorf("expected defaultValue=hello, got %q", fi.defaultValue)
+	}
+	if fi.name != "" {
+		t.Errorf("expected empty name, got %q", fi.name)
+	}
+}
+
+func TestParseTagDefaultWithOmitempty(t *testing.T) {
+	fi := parseTag("port,omitempty,default=8080")
+	if !fi.omitEmpty {
+		t.Error("expected omitEmpty=true")
+	}
+	if !fi.hasDefault {
+		t.Error("expected hasDefault=true")
+	}
+	if fi.defaultValue != "8080" {
+		t.Errorf("expected defaultValue=8080, got %q", fi.defaultValue)
+	}
+}
+
+func TestParseTagDefaultWithRequired(t *testing.T) {
+	fi := parseTag("port,required,default=8080")
+	if !fi.required {
+		t.Error("expected required=true")
+	}
+	if !fi.hasDefault {
+		t.Error("expected hasDefault=true")
+	}
+}
+
+func TestParseTagNoDefault(t *testing.T) {
+	fi := parseTag("name,omitempty")
+	if fi.hasDefault {
+		t.Error("expected hasDefault=false")
+	}
+	if fi.defaultValue != "" {
+		t.Errorf("expected empty defaultValue, got %q", fi.defaultValue)
+	}
+}
+
+func TestParseTagDefaultLastWins(t *testing.T) {
+	fi := parseTag("name,default=a,default=b")
+	if fi.defaultValue != "b" {
+		t.Errorf("expected last default to win, got %q", fi.defaultValue)
+	}
+}
+
+func TestParseTagDefaultWithEqualsInValue(t *testing.T) {
+	fi := parseTag("name,default=a=b")
+	if fi.defaultValue != "a=b" {
+		t.Errorf("expected defaultValue=a=b, got %q", fi.defaultValue)
+	}
+}
+
 func TestConflictingFieldNamesTag(t *testing.T) {
 	type S struct {
 		A string `yaml:"name"`

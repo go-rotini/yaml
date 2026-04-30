@@ -123,6 +123,24 @@ func (e *ValidationError) Is(target error) bool {
 	return ok
 }
 
+// DefaultError is returned when a default value from a struct tag cannot be
+// applied — for example, when the default string cannot be parsed into the
+// target type, or when default is combined with required.
+type DefaultError struct {
+	Field   string
+	Message string
+	Pos     Position
+}
+
+func (e *DefaultError) Error() string {
+	return fmt.Sprintf("yaml: field %q: %s", e.Field, e.Message)
+}
+
+func (e *DefaultError) Is(target error) bool {
+	_, ok := target.(*DefaultError)
+	return ok
+}
+
 // Sentinel errors for use with [errors.Is].
 var (
 	ErrSyntax       = &SyntaxError{}
@@ -131,6 +149,7 @@ var (
 	ErrCycle        = &CycleError{}
 	ErrDuplicateKey = &DuplicateKeyError{}
 	ErrValidation   = &ValidationError{}
+	ErrDefault      = &DefaultError{}
 
 	ErrPathSyntax   = errors.New("yaml: invalid path syntax")
 	ErrPathNotFound = errors.New("yaml: path not found")
@@ -140,15 +159,21 @@ var (
 )
 
 var (
-	errConflictingFields   = errors.New("conflicting field names")
-	errUndefinedTag        = errors.New("undefined tag handle")
-	errNotBool             = errors.New("invalid boolean value")
-	errNotTime             = errors.New("invalid time value")
-	errOddChildren         = errors.New("odd number of mapping children")
-	errEmptyAlias          = errors.New("empty alias name")
-	errNoDocuments         = errors.New("no documents in file")
-	errPathTooShortReplace = errors.New("path too short for replace")
-	errPathTooShortDelete  = errors.New("path too short for delete")
+	errConflictingFields      = errors.New("conflicting field names")
+	errUndefinedTag           = errors.New("undefined tag handle")
+	errNotBool                = errors.New("invalid boolean value")
+	errNotTime                = errors.New("invalid time value")
+	errOddChildren            = errors.New("odd number of mapping children")
+	errEmptyAlias             = errors.New("empty alias name")
+	errNoDocuments            = errors.New("no documents in file")
+	errPathTooShortReplace    = errors.New("path too short for replace")
+	errPathTooShortDelete     = errors.New("path too short for delete")
+	errInvalidBoolDefault     = errors.New("invalid bool default")
+	errInvalidDurationDefault = errors.New("invalid duration default")
+	errInvalidIntDefault      = errors.New("invalid int default")
+	errInvalidUintDefault     = errors.New("invalid uint default")
+	errInvalidFloatDefault    = errors.New("invalid float default")
+	errUnsupportedDefault     = errors.New("default tag is not supported for type")
 )
 
 // FormatError returns a human-readable string for a [SyntaxError] or

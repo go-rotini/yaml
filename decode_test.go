@@ -7141,3 +7141,922 @@ func TestDecodeStructDuplicateKeyBoundary(t *testing.T) {
 		t.Errorf("expected last value 'third', got %q", s.A)
 	}
 }
+
+// ─── setDefaultValue ────────────────────────────────────────────────────────
+
+func TestSetDefaultValueString(t *testing.T) {
+	var s string
+	v := reflect.ValueOf(&s).Elem()
+	if err := setDefaultValue(v, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if s != "hello" {
+		t.Errorf("expected hello, got %q", s)
+	}
+}
+
+func TestSetDefaultValueStringEmpty(t *testing.T) {
+	s := "existing"
+	v := reflect.ValueOf(&s).Elem()
+	if err := setDefaultValue(v, ""); err != nil {
+		t.Fatal(err)
+	}
+	if s != "" {
+		t.Errorf("expected empty, got %q", s)
+	}
+}
+
+func TestSetDefaultValueBool(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want bool
+	}{
+		{"true", true},
+		{"True", true},
+		{"TRUE", true},
+		{"false", false},
+		{"False", false},
+		{"FALSE", false},
+	}
+	for _, tt := range tests {
+		var b bool
+		v := reflect.ValueOf(&b).Elem()
+		if err := setDefaultValue(v, tt.raw); err != nil {
+			t.Errorf("parseBool(%q): %v", tt.raw, err)
+			continue
+		}
+		if b != tt.want {
+			t.Errorf("parseBool(%q) = %v, want %v", tt.raw, b, tt.want)
+		}
+	}
+}
+
+func TestSetDefaultValueBoolInvalid(t *testing.T) {
+	var b bool
+	v := reflect.ValueOf(&b).Elem()
+	if err := setDefaultValue(v, "yes"); err == nil {
+		t.Error("expected error for invalid bool default 'yes'")
+	}
+	if err := setDefaultValue(v, "maybe"); err == nil {
+		t.Error("expected error for invalid bool default 'maybe'")
+	}
+}
+
+func TestSetDefaultValueInt(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want int64
+	}{
+		{"42", 42},
+		{"-5", -5},
+		{"0xff", 255},
+		{"0o755", 493},
+		{"0b1010", 10},
+		{"0", 0},
+	}
+	for _, tt := range tests {
+		var i int
+		v := reflect.ValueOf(&i).Elem()
+		if err := setDefaultValue(v, tt.raw); err != nil {
+			t.Errorf("parseInt(%q): %v", tt.raw, err)
+			continue
+		}
+		if int64(i) != tt.want {
+			t.Errorf("parseInt(%q) = %d, want %d", tt.raw, i, tt.want)
+		}
+	}
+}
+
+func TestSetDefaultValueIntInvalid(t *testing.T) {
+	var i int
+	v := reflect.ValueOf(&i).Elem()
+	if err := setDefaultValue(v, "abc"); err == nil {
+		t.Error("expected error for invalid int default")
+	}
+}
+
+func TestSetDefaultValueInt8(t *testing.T) {
+	var i int8
+	v := reflect.ValueOf(&i).Elem()
+	if err := setDefaultValue(v, "127"); err != nil {
+		t.Fatal(err)
+	}
+	if i != 127 {
+		t.Errorf("expected 127, got %d", i)
+	}
+}
+
+func TestSetDefaultValueUint(t *testing.T) {
+	var u uint
+	v := reflect.ValueOf(&u).Elem()
+	if err := setDefaultValue(v, "10"); err != nil {
+		t.Fatal(err)
+	}
+	if u != 10 {
+		t.Errorf("expected 10, got %d", u)
+	}
+}
+
+func TestSetDefaultValueUintHex(t *testing.T) {
+	var u uint
+	v := reflect.ValueOf(&u).Elem()
+	if err := setDefaultValue(v, "0xAB"); err != nil {
+		t.Fatal(err)
+	}
+	if u != 0xAB {
+		t.Errorf("expected 0xAB, got %d", u)
+	}
+}
+
+func TestSetDefaultValueUintInvalid(t *testing.T) {
+	var u uint
+	v := reflect.ValueOf(&u).Elem()
+	if err := setDefaultValue(v, "-1"); err == nil {
+		t.Error("expected error for negative uint default")
+	}
+}
+
+func TestSetDefaultValueFloat(t *testing.T) {
+	var f float64
+	v := reflect.ValueOf(&f).Elem()
+	if err := setDefaultValue(v, "3.14"); err != nil {
+		t.Fatal(err)
+	}
+	if f != 3.14 {
+		t.Errorf("expected 3.14, got %f", f)
+	}
+}
+
+func TestSetDefaultValueFloatSpecials(t *testing.T) {
+	var f float64
+	v := reflect.ValueOf(&f).Elem()
+	if err := setDefaultValue(v, ".inf"); err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsInf(f, 1) {
+		t.Errorf("expected +Inf, got %f", f)
+	}
+
+	if err := setDefaultValue(v, "-.inf"); err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsInf(f, -1) {
+		t.Errorf("expected -Inf, got %f", f)
+	}
+
+	if err := setDefaultValue(v, ".nan"); err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsNaN(f) {
+		t.Errorf("expected NaN, got %f", f)
+	}
+}
+
+func TestSetDefaultValueDuration(t *testing.T) {
+	var d time.Duration
+	v := reflect.ValueOf(&d).Elem()
+	if err := setDefaultValue(v, "5s"); err != nil {
+		t.Fatal(err)
+	}
+	if d != 5*time.Second {
+		t.Errorf("expected 5s, got %v", d)
+	}
+}
+
+func TestSetDefaultValueDurationMs(t *testing.T) {
+	var d time.Duration
+	v := reflect.ValueOf(&d).Elem()
+	if err := setDefaultValue(v, "100ms"); err != nil {
+		t.Fatal(err)
+	}
+	if d != 100*time.Millisecond {
+		t.Errorf("expected 100ms, got %v", d)
+	}
+}
+
+func TestSetDefaultValueDurationInvalid(t *testing.T) {
+	var d time.Duration
+	v := reflect.ValueOf(&d).Elem()
+	if err := setDefaultValue(v, "abc"); err == nil {
+		t.Error("expected error for invalid duration default")
+	}
+}
+
+func TestSetDefaultValuePointerInt(t *testing.T) {
+	var p *int
+	v := reflect.ValueOf(&p).Elem()
+	if err := setDefaultValue(v, "5"); err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || *p != 5 {
+		t.Errorf("expected ptr to 5, got %v", p)
+	}
+}
+
+func TestSetDefaultValuePointerString(t *testing.T) {
+	var p *string
+	v := reflect.ValueOf(&p).Elem()
+	if err := setDefaultValue(v, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || *p != "hi" {
+		t.Errorf("expected ptr to 'hi', got %v", p)
+	}
+}
+
+func TestSetDefaultValuePointerBool(t *testing.T) {
+	var p *bool
+	v := reflect.ValueOf(&p).Elem()
+	if err := setDefaultValue(v, "true"); err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || !*p {
+		t.Errorf("expected ptr to true, got %v", p)
+	}
+}
+
+func TestSetDefaultValueDoublePointer(t *testing.T) {
+	var p **int
+	v := reflect.ValueOf(&p).Elem()
+	if err := setDefaultValue(v, "5"); err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || *p == nil || **p != 5 {
+		t.Errorf("expected double ptr to 5, got %v", p)
+	}
+}
+
+func TestSetDefaultValueSliceUnsupported(t *testing.T) {
+	var s []int
+	v := reflect.ValueOf(&s).Elem()
+	if err := setDefaultValue(v, "1"); err == nil {
+		t.Error("expected error for unsupported slice type")
+	}
+}
+
+func TestSetDefaultValueMapUnsupported(t *testing.T) {
+	var m map[string]int
+	v := reflect.ValueOf(&m).Elem()
+	if err := setDefaultValue(v, "x"); err == nil {
+		t.Error("expected error for unsupported map type")
+	}
+}
+
+func TestSetDefaultValueStructUnsupported(t *testing.T) {
+	var s struct{ X int }
+	v := reflect.ValueOf(&s).Elem()
+	if err := setDefaultValue(v, "x"); err == nil {
+		t.Error("expected error for unsupported struct type")
+	}
+}
+
+func TestSetDefaultValueTimeUnsupported(t *testing.T) {
+	var tm time.Time
+	v := reflect.ValueOf(&tm).Elem()
+	if err := setDefaultValue(v, "2024-01-01"); err == nil {
+		t.Error("expected error for unsupported time.Time type")
+	}
+}
+
+func TestSetDefaultValueChanUnsupported(t *testing.T) {
+	var c chan int
+	v := reflect.ValueOf(&c).Elem()
+	if err := setDefaultValue(v, "1"); err == nil {
+		t.Error("expected error for unsupported chan type")
+	}
+}
+
+// ─── applyDefaults integration via Unmarshal ────────────────────────────────
+
+func TestDefaultAbsentKeyApplied(t *testing.T) {
+	type S struct {
+		Name string `yaml:"name"`
+		Port int    `yaml:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("name: app"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 8080 {
+		t.Errorf("expected port=8080, got %d", s.Port)
+	}
+	if s.Name != "app" {
+		t.Errorf("expected name=app, got %q", s.Name)
+	}
+}
+
+func TestDefaultPresentKeyYAMLWins(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("port: 3000"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 3000 {
+		t.Errorf("expected port=3000, got %d", s.Port)
+	}
+}
+
+func TestDefaultExplicitZeroPreserved(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("port: 0"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 0 {
+		t.Errorf("expected port=0 (explicit zero wins), got %d", s.Port)
+	}
+}
+
+func TestDefaultExplicitNullPreserved(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("port: null"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 0 {
+		t.Errorf("expected port=0 (explicit null wins), got %d", s.Port)
+	}
+}
+
+func TestDefaultExplicitTildePreserved(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("port: ~"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 0 {
+		t.Errorf("expected port=0 (tilde null wins), got %d", s.Port)
+	}
+}
+
+func TestDefaultIgnoredWithoutOption(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	var s S
+	err := Unmarshal([]byte("name: app"), &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 0 {
+		t.Errorf("expected port=0 (defaults disabled), got %d", s.Port)
+	}
+}
+
+func TestDefaultRequiredContradiction(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,required,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("port: 3000"), &s, WithDefaults())
+	if err == nil {
+		t.Fatal("expected error for required+default contradiction")
+	}
+	var de *DefaultError
+	if !errors.As(err, &de) {
+		t.Errorf("expected DefaultError, got %T: %v", err, err)
+	}
+	if !errors.Is(err, ErrDefault) {
+		t.Error("expected errors.Is(err, ErrDefault)")
+	}
+}
+
+func TestDefaultRequiredContradictionAbsent(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,required,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("name: app"), &s, WithDefaults())
+	if err == nil {
+		t.Fatal("expected error for required+default contradiction")
+	}
+}
+
+func TestDefaultNestedStructChildApplied(t *testing.T) {
+	type Server struct {
+		Host string `yaml:"host,default=localhost"`
+		Port int    `yaml:"port,default=8080"`
+	}
+	type Config struct {
+		Server Server `yaml:"server"`
+	}
+	var c Config
+	err := UnmarshalWithOptions([]byte("server:\n  host: example.com"), &c, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.Host != "example.com" {
+		t.Errorf("expected host=example.com, got %q", c.Server.Host)
+	}
+	if c.Server.Port != 8080 {
+		t.Errorf("expected port=8080, got %d", c.Server.Port)
+	}
+}
+
+func TestDefaultNestedStructParentAbsent(t *testing.T) {
+	type Server struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	type Config struct {
+		Name   string `yaml:"name"`
+		Server Server `yaml:"server"`
+	}
+	var c Config
+	err := UnmarshalWithOptions([]byte("name: app"), &c, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.Port != 0 {
+		t.Errorf("expected port=0 (parent absent, child defaults not applied), got %d", c.Server.Port)
+	}
+}
+
+func TestDefaultMergeKeyNonZero(t *testing.T) {
+	input := "defaults: &d\n  port: 3000\nserver:\n  <<: *d"
+	type Server struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	type Config struct {
+		Defaults Server `yaml:"defaults"`
+		Server   Server `yaml:"server"`
+	}
+	var c Config
+	err := UnmarshalWithOptions([]byte(input), &c, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.Port != 3000 {
+		t.Errorf("expected port=3000 (merge wins over default), got %d", c.Server.Port)
+	}
+}
+
+func TestDefaultMultipleFields(t *testing.T) {
+	type S struct {
+		Host  string  `yaml:"host,default=localhost"`
+		Port  int     `yaml:"port,default=8080"`
+		Debug bool    `yaml:"debug,default=true"`
+		Ratio float64 `yaml:"ratio,default=0.5"`
+		Name  string  `yaml:"name"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("name: app"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Host != "localhost" {
+		t.Errorf("expected host=localhost, got %q", s.Host)
+	}
+	if s.Port != 8080 {
+		t.Errorf("expected port=8080, got %d", s.Port)
+	}
+	if !s.Debug {
+		t.Error("expected debug=true")
+	}
+	if s.Ratio != 0.5 {
+		t.Errorf("expected ratio=0.5, got %f", s.Ratio)
+	}
+	if s.Name != "app" {
+		t.Errorf("expected name=app, got %q", s.Name)
+	}
+}
+
+func TestDefaultMixedPresentAbsent(t *testing.T) {
+	type S struct {
+		A int `yaml:"a,default=1"`
+		B int `yaml:"b,default=2"`
+		C int `yaml:"c,default=3"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("b: 20"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.A != 1 {
+		t.Errorf("expected a=1, got %d", s.A)
+	}
+	if s.B != 20 {
+		t.Errorf("expected b=20, got %d", s.B)
+	}
+	if s.C != 3 {
+		t.Errorf("expected c=3, got %d", s.C)
+	}
+}
+
+func TestDefaultInlineStruct(t *testing.T) {
+	type Inner struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	type Outer struct {
+		Inner Inner  `yaml:",inline"`
+		Name  string `yaml:"name"`
+	}
+	var o Outer
+	err := UnmarshalWithOptions([]byte("name: app"), &o, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Inner.Port != 8080 {
+		t.Errorf("expected port=8080, got %d", o.Inner.Port)
+	}
+}
+
+func TestDefaultEmbeddedStruct(t *testing.T) {
+	type Base struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	type Config struct {
+		Base
+		Name string `yaml:"name"`
+	}
+	var c Config
+	err := UnmarshalWithOptions([]byte("name: app"), &c, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Port != 8080 {
+		t.Errorf("expected port=8080, got %d", c.Port)
+	}
+}
+
+func TestDefaultEmbeddedPointerStruct(t *testing.T) {
+	type Base struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	type Config struct {
+		*Base
+		Name string `yaml:"name"`
+	}
+	var c Config
+	err := UnmarshalWithOptions([]byte("name: app"), &c, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Base == nil {
+		t.Fatal("expected Base to be auto-allocated")
+	}
+	if c.Port != 8080 {
+		t.Errorf("expected port=8080, got %d", c.Port)
+	}
+}
+
+func TestDefaultSequenceElements(t *testing.T) {
+	type Item struct {
+		Name  string `yaml:"name"`
+		Count int    `yaml:"count,default=1"`
+	}
+	type Config struct {
+		Items []Item `yaml:"items"`
+	}
+	input := "items:\n  - name: foo\n  - name: bar\n    count: 5"
+	var c Config
+	err := UnmarshalWithOptions([]byte(input), &c, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(c.Items))
+	}
+	if c.Items[0].Count != 1 {
+		t.Errorf("expected item[0].count=1 (default), got %d", c.Items[0].Count)
+	}
+	if c.Items[1].Count != 5 {
+		t.Errorf("expected item[1].count=5, got %d", c.Items[1].Count)
+	}
+}
+
+func TestDefaultPreInitializedNonZeroPreserved(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	s := S{Port: 3000}
+	err := UnmarshalWithOptions([]byte("name: app"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 3000 {
+		t.Errorf("expected port=3000 (pre-initialized preserved), got %d", s.Port)
+	}
+}
+
+func TestDefaultPreInitializedZeroGetsDefault(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	s := S{Port: 0}
+	err := UnmarshalWithOptions([]byte("name: app"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 8080 {
+		t.Errorf("expected port=8080 (zero field gets default), got %d", s.Port)
+	}
+}
+
+func TestDefaultEmptyStringDefault(t *testing.T) {
+	type S struct {
+		Name string `yaml:"name,default="`
+	}
+	s := S{Name: ""}
+	err := UnmarshalWithOptions([]byte("x: 1"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Name != "" {
+		t.Errorf("expected empty string default, got %q", s.Name)
+	}
+}
+
+func TestDefaultInvalidIntReturnsError(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=abc"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("name: app"), &s, WithDefaults())
+	if err == nil {
+		t.Fatal("expected error for invalid int default")
+	}
+	var de *DefaultError
+	if !errors.As(err, &de) {
+		t.Errorf("expected DefaultError, got %T: %v", err, err)
+	}
+	if de.Field != "port" {
+		t.Errorf("expected field=port, got %q", de.Field)
+	}
+}
+
+func TestDefaultUnsupportedTypeReturnsError(t *testing.T) {
+	type S struct {
+		Items []int `yaml:"items,default=1"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("x: 1"), &s, WithDefaults())
+	if err == nil {
+		t.Fatal("expected error for unsupported type default")
+	}
+	if !errors.Is(err, ErrDefault) {
+		t.Errorf("expected ErrDefault, got %v", err)
+	}
+}
+
+func TestDefaultWithUnmarshalTo(t *testing.T) {
+	type S struct {
+		Port int    `yaml:"port,default=8080"`
+		Name string `yaml:"name"`
+	}
+	s, err := UnmarshalTo[S]([]byte("name: app"), WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 8080 {
+		t.Errorf("expected port=8080, got %d", s.Port)
+	}
+	if s.Name != "app" {
+		t.Errorf("expected name=app, got %q", s.Name)
+	}
+}
+
+func TestDefaultWithDecoder(t *testing.T) {
+	type S struct {
+		Name string `yaml:"name"`
+		Port int    `yaml:"port,default=8080"`
+	}
+	input := "---\nname: first\n---\nname: second\nport: 3000\n"
+	dec := NewDecoder(strings.NewReader(input), WithDefaults())
+
+	var s1 S
+	if err := dec.Decode(&s1); err != nil {
+		t.Fatal(err)
+	}
+	if s1.Port != 8080 {
+		t.Errorf("doc1: expected port=8080, got %d", s1.Port)
+	}
+
+	var s2 S
+	if err := dec.Decode(&s2); err != nil {
+		t.Fatal(err)
+	}
+	if s2.Port != 3000 {
+		t.Errorf("doc2: expected port=3000, got %d", s2.Port)
+	}
+}
+
+func TestDefaultDuplicateKeyLastWins(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("port: 3000\nport: 0"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 0 {
+		t.Errorf("expected port=0 (last dup wins, key is seen), got %d", s.Port)
+	}
+}
+
+func TestDefaultDurationTag(t *testing.T) {
+	type S struct {
+		Timeout time.Duration `yaml:"timeout,default=30s"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("x: 1"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Timeout != 30*time.Second {
+		t.Errorf("expected timeout=30s, got %v", s.Timeout)
+	}
+}
+
+func TestDefaultPointerField(t *testing.T) {
+	type S struct {
+		Port *int `yaml:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("x: 1"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port == nil || *s.Port != 8080 {
+		t.Errorf("expected port ptr to 8080, got %v", s.Port)
+	}
+}
+
+func TestDefaultHexValue(t *testing.T) {
+	type S struct {
+		Mask int `yaml:"mask,default=0xff"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("x: 1"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Mask != 255 {
+		t.Errorf("expected mask=255, got %d", s.Mask)
+	}
+}
+
+func TestDefaultWithValidatorSeesDefaults(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("x: 1"), &s, WithDefaults(), WithValidator(&testStructValidator{}))
+	if err == nil {
+		t.Fatal("expected validation error (validator should see defaulted values)")
+	}
+	if !strings.Contains(err.Error(), "validation failed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestDefaultWithStrictNoConflict(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("port: 3000"), &s, WithDefaults(), WithStrict())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 3000 {
+		t.Errorf("expected port=3000, got %d", s.Port)
+	}
+}
+
+func TestDefaultWithJSONTag(t *testing.T) {
+	type S struct {
+		Port int `json:"port,default=8080"`
+	}
+	var s S
+	err := UnmarshalWithOptions([]byte("port: 3000"), &s, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 3000 {
+		t.Errorf("expected port=3000, got %d", s.Port)
+	}
+
+	var s2 S
+	err = UnmarshalWithOptions([]byte("x: 1"), &s2, WithDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.Port != 8080 {
+		t.Errorf("expected port=8080 from json tag default, got %d", s2.Port)
+	}
+}
+
+func TestDefaultRequiredWithoutDefaultsOption(t *testing.T) {
+	type S struct {
+		Port int `yaml:"port,required"`
+	}
+	var s S
+	err := Unmarshal([]byte("port: 3000"), &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 3000 {
+		t.Errorf("expected port=3000, got %d", s.Port)
+	}
+
+	var s2 S
+	err = Unmarshal([]byte("x: 1"), &s2)
+	if err == nil {
+		t.Fatal("expected required field error")
+	}
+}
+
+func TestDefaultErrorIs(t *testing.T) {
+	e := &DefaultError{Field: "port", Message: "invalid"}
+	if !errors.Is(e, ErrDefault) {
+		t.Error("expected DefaultError to match ErrDefault")
+	}
+	if errors.Is(e, ErrSyntax) {
+		t.Error("DefaultError should not match ErrSyntax")
+	}
+}
+
+func TestDefaultErrorMessage(t *testing.T) {
+	e := &DefaultError{Field: "port", Message: "invalid int default"}
+	expected := `yaml: field "port": invalid int default`
+	if e.Error() != expected {
+		t.Errorf("expected %q, got %q", expected, e.Error())
+	}
+}
+
+func TestDefaultFloat32(t *testing.T) {
+	var f float32
+	v := reflect.ValueOf(&f).Elem()
+	if err := setDefaultValue(v, "1.5"); err != nil {
+		t.Fatal(err)
+	}
+	if f != 1.5 {
+		t.Errorf("expected 1.5, got %f", f)
+	}
+}
+
+func TestDefaultUint8(t *testing.T) {
+	var u uint8
+	v := reflect.ValueOf(&u).Elem()
+	if err := setDefaultValue(v, "42"); err != nil {
+		t.Fatal(err)
+	}
+	if u != 42 {
+		t.Errorf("expected 42, got %d", u)
+	}
+}
+
+func TestDefaultUint16(t *testing.T) {
+	var u uint16
+	v := reflect.ValueOf(&u).Elem()
+	if err := setDefaultValue(v, "1000"); err != nil {
+		t.Fatal(err)
+	}
+	if u != 1000 {
+		t.Errorf("expected 1000, got %d", u)
+	}
+}
+
+func TestDefaultUint32(t *testing.T) {
+	var u uint32
+	v := reflect.ValueOf(&u).Elem()
+	if err := setDefaultValue(v, "100000"); err != nil {
+		t.Fatal(err)
+	}
+	if u != 100000 {
+		t.Errorf("expected 100000, got %d", u)
+	}
+}
+
+func TestDefaultUint64(t *testing.T) {
+	var u uint64
+	v := reflect.ValueOf(&u).Elem()
+	if err := setDefaultValue(v, "99999999"); err != nil {
+		t.Fatal(err)
+	}
+	if u != 99999999 {
+		t.Errorf("expected 99999999, got %d", u)
+	}
+}
+
+func TestDefaultFloatInvalid(t *testing.T) {
+	var f float64
+	v := reflect.ValueOf(&f).Elem()
+	if err := setDefaultValue(v, "notanumber"); err == nil {
+		t.Error("expected error for invalid float default")
+	}
+}

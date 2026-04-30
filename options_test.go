@@ -35,7 +35,7 @@ func TestDefaultDecodeOptions(t *testing.T) {
 	if o.maxAliasExpansion != 1000 {
 		t.Errorf("expected maxAliasExpansion=1000, got %d", o.maxAliasExpansion)
 	}
-	if o.strict || o.disallowDuplicates || o.useOrderedMap || o.useJSONUnmarshaler || o.recursiveDir {
+	if o.strict || o.disallowDuplicates || o.useOrderedMap || o.useJSONUnmarshaler || o.applyDefaults || o.recursiveDir {
 		t.Error("expected all bool options false by default")
 	}
 	if o.maxDocumentSize != 0 || o.maxNodes != 0 {
@@ -352,6 +352,17 @@ func TestEncodeOptionIsFunc(t *testing.T) {
 	var opt EncodeOption = WithIndent(4)
 	if opt == nil {
 		t.Error("expected non-nil option")
+	}
+}
+
+func TestWithDefaultsOption(t *testing.T) {
+	o := defaultDecodeOptions()
+	if o.applyDefaults {
+		t.Error("expected applyDefaults=false by default")
+	}
+	WithDefaults()(o)
+	if !o.applyDefaults {
+		t.Error("expected applyDefaults=true after WithDefaults")
 	}
 }
 

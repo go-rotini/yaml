@@ -23,6 +23,8 @@
 //   - inline: inline the struct's fields into the parent mapping
 //   - flow: encode the field in flow style (e.g. [a, b] or {k: v})
 //   - required: return an error during decoding if the key is absent
+//   - default=<value>: set field to <value> during decoding if the key is absent
+//     (requires [WithDefaults]; scalar types only)
 //
 // A tag of "-" excludes the field from encoding and decoding.
 //

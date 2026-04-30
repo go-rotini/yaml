@@ -417,6 +417,13 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 			seen[n.children[i].value] = true
 		}
 	}
+
+	if d.opts.applyDefaults {
+		if err := d.applyDefaults(v, sf, seen); err != nil {
+			return err
+		}
+	}
+
 	for _, fi := range sf.fields {
 		if fi.required && !seen[fi.name] {
 			return &SyntaxError{
@@ -431,6 +438,99 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 		if err := d.opts.validator.Struct(iface); err != nil {
 			return &ValidationError{Err: err, Pos: n.pos}
 		}
+	}
+
+	return nil
+}
+
+func (d *decoder) applyDefaults(v reflect.Value, sf *structFields, seen map[string]bool) error {
+	for _, fi := range sf.fields {
+		if !fi.hasDefault {
+			continue
+		}
+
+		if fi.required {
+			return &DefaultError{
+				Field:   fi.name,
+				Message: "field has both required and default tags, which is contradictory",
+			}
+		}
+
+		if seen[fi.name] {
+			continue
+		}
+
+		field := fieldByIndex(v, fi.index)
+		if !field.CanSet() {
+			continue
+		}
+
+		if !field.IsZero() {
+			continue
+		}
+
+		if err := setDefaultValue(field, fi.defaultValue); err != nil {
+			return &DefaultError{
+				Field:   fi.name,
+				Message: err.Error(),
+			}
+		}
+	}
+	return nil
+}
+
+func setDefaultValue(v reflect.Value, raw string) error {
+	if v.Kind() == reflect.Pointer {
+		ptr := reflect.New(v.Type().Elem())
+		if err := setDefaultValue(ptr.Elem(), raw); err != nil {
+			return err
+		}
+		v.Set(ptr)
+		return nil
+	}
+
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString(raw)
+
+	case reflect.Bool:
+		b, err := parseBool(raw)
+		if err != nil {
+			return fmt.Errorf("%w %q", errInvalidBoolDefault, raw)
+		}
+		v.SetBool(b)
+
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if v.Type() == reflect.TypeFor[time.Duration]() {
+			dur, err := time.ParseDuration(raw)
+			if err != nil {
+				return fmt.Errorf("%w %q", errInvalidDurationDefault, raw)
+			}
+			v.SetInt(int64(dur))
+			return nil
+		}
+		i, err := parseInt(raw)
+		if err != nil {
+			return fmt.Errorf("%w %q", errInvalidIntDefault, raw)
+		}
+		v.SetInt(i)
+
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		u, err := parseUint(raw)
+		if err != nil {
+			return fmt.Errorf("%w %q", errInvalidUintDefault, raw)
+		}
+		v.SetUint(u)
+
+	case reflect.Float32, reflect.Float64:
+		f, err := parseFloat(raw)
+		if err != nil {
+			return fmt.Errorf("%w %q", errInvalidFloatDefault, raw)
+		}
+		v.SetFloat(f)
+
+	default:
+		return fmt.Errorf("%w %s", errUnsupportedDefault, v.Type())
 	}
 
 	return nil

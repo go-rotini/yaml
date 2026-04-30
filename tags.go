@@ -7,15 +7,17 @@ import (
 )
 
 type fieldInfo struct {
-	name      string
-	index     []int
-	omitEmpty bool
-	flow      bool
-	inline    bool
-	required  bool
-	anchor    string
-	alias     string
-	skip      bool
+	name         string
+	index        []int
+	omitEmpty    bool
+	flow         bool
+	inline       bool
+	required     bool
+	anchor       string
+	alias        string
+	skip         bool
+	defaultValue string
+	hasDefault   bool
 }
 
 func parseTag(tag string) fieldInfo {
@@ -46,6 +48,9 @@ func parseTag(tag string) fieldInfo {
 				fi.anchor = v
 			} else if v, ok := strings.CutPrefix(opt, "alias="); ok {
 				fi.alias = v
+			} else if v, ok := strings.CutPrefix(opt, "default="); ok {
+				fi.defaultValue = v
+				fi.hasDefault = true
 			}
 		}
 	}
