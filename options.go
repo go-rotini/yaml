@@ -154,6 +154,7 @@ type decoderOptions struct {
 	disallowDuplicates bool
 	useOrderedMap      bool
 	useJSONUnmarshaler bool
+	applyDefaults      bool
 	maxDepth           int
 	maxAliasExpansion  int
 	maxDocumentSize    int
@@ -179,6 +180,15 @@ func defaultDecodeOptions() *decoderOptions {
 // [FailsafeSchema] to treat all plain scalars as strings.
 func WithSchema(s Schema) DecodeOption {
 	return func(o *decoderOptions) { o.schema = s }
+}
+
+// WithDefaults enables applying default values from struct tags when a YAML
+// key is absent from the input. Default values are specified with the
+// "default=<value>" tag option (e.g. `yaml:"port,default=8080"`).
+// Only scalar types are supported: string, bool, int/uint variants, float
+// variants, and time.Duration. Without this option, default tags are ignored.
+func WithDefaults() DecodeOption {
+	return func(o *decoderOptions) { o.applyDefaults = true }
 }
 
 // WithStrict causes decoding to return an [UnknownFieldError] if a YAML key does

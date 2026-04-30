@@ -123,6 +123,24 @@ func (e *ValidationError) Is(target error) bool {
 	return ok
 }
 
+// DefaultError is returned when a default value from a struct tag cannot be
+// applied — for example, when the default string cannot be parsed into the
+// target type, or when default is combined with required.
+type DefaultError struct {
+	Field   string
+	Message string
+	Pos     Position
+}
+
+func (e *DefaultError) Error() string {
+	return fmt.Sprintf("yaml: field %q: %s", e.Field, e.Message)
+}
+
+func (e *DefaultError) Is(target error) bool {
+	_, ok := target.(*DefaultError)
+	return ok
+}
+
 // Sentinel errors for use with [errors.Is].
 var (
 	ErrSyntax       = &SyntaxError{}
@@ -131,6 +149,7 @@ var (
 	ErrCycle        = &CycleError{}
 	ErrDuplicateKey = &DuplicateKeyError{}
 	ErrValidation   = &ValidationError{}
+	ErrDefault      = &DefaultError{}
 
 	ErrPathSyntax   = errors.New("yaml: invalid path syntax")
 	ErrPathNotFound = errors.New("yaml: path not found")

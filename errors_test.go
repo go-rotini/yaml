@@ -37,6 +37,11 @@ func TestErrorIs(t *testing.T) {
 	if !errors.Is(valErr, ErrValidation) {
 		t.Error("expected ValidationError to match ErrValidation")
 	}
+
+	defErr := &DefaultError{Field: "port", Message: "invalid"}
+	if !errors.Is(defErr, ErrDefault) {
+		t.Error("expected DefaultError to match ErrDefault")
+	}
 }
 
 func TestErrorIsNonMatch(t *testing.T) {
@@ -66,6 +71,11 @@ func TestErrorIsNonMatch(t *testing.T) {
 	dupErr := &DuplicateKeyError{Key: "k"}
 	if errors.Is(dupErr, ErrCycle) {
 		t.Error("DuplicateKeyError should not match ErrCycle")
+	}
+
+	defErr := &DefaultError{Field: "f", Message: "bad"}
+	if errors.Is(defErr, ErrSyntax) {
+		t.Error("DefaultError should not match ErrSyntax")
 	}
 }
 
@@ -104,6 +114,14 @@ func TestErrorStrings(t *testing.T) {
 	}
 	if !strings.Contains(val.Error(), "line 4") {
 		t.Errorf("expected line number in error: %s", val.Error())
+	}
+
+	def := &DefaultError{Field: "port", Message: "cannot parse"}
+	if !strings.Contains(def.Error(), "port") {
+		t.Errorf("expected field name in error: %s", def.Error())
+	}
+	if !strings.Contains(def.Error(), "cannot parse") {
+		t.Errorf("expected message in error: %s", def.Error())
 	}
 }
 
