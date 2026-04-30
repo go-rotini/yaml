@@ -496,7 +496,7 @@ func setDefaultValue(v reflect.Value, raw string) error {
 	case reflect.Bool:
 		b, err := parseBool(raw)
 		if err != nil {
-			return fmt.Errorf("invalid bool default %q", raw)
+			return fmt.Errorf("%w %q", errInvalidBoolDefault, raw)
 		}
 		v.SetBool(b)
 
@@ -504,33 +504,33 @@ func setDefaultValue(v reflect.Value, raw string) error {
 		if v.Type() == reflect.TypeFor[time.Duration]() {
 			dur, err := time.ParseDuration(raw)
 			if err != nil {
-				return fmt.Errorf("invalid duration default %q", raw)
+				return fmt.Errorf("%w %q", errInvalidDurationDefault, raw)
 			}
 			v.SetInt(int64(dur))
 			return nil
 		}
 		i, err := parseInt(raw)
 		if err != nil {
-			return fmt.Errorf("invalid int default %q", raw)
+			return fmt.Errorf("%w %q", errInvalidIntDefault, raw)
 		}
 		v.SetInt(i)
 
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		u, err := parseUint(raw)
 		if err != nil {
-			return fmt.Errorf("invalid uint default %q", raw)
+			return fmt.Errorf("%w %q", errInvalidUintDefault, raw)
 		}
 		v.SetUint(u)
 
 	case reflect.Float32, reflect.Float64:
 		f, err := parseFloat(raw)
 		if err != nil {
-			return fmt.Errorf("invalid float default %q", raw)
+			return fmt.Errorf("%w %q", errInvalidFloatDefault, raw)
 		}
 		v.SetFloat(f)
 
 	default:
-		return fmt.Errorf("default tag is not supported for type %s", v.Type())
+		return fmt.Errorf("%w %s", errUnsupportedDefault, v.Type())
 	}
 
 	return nil
