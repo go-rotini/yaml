@@ -1,6 +1,8 @@
 module github.com/go-rotini/yaml
 
-go 1.26.2
+go 1.23
+
+toolchain go1.26.2
 
 tool (
 	github.com/go-gremlins/gremlins/cmd/gremlins
