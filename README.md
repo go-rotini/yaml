@@ -30,7 +30,7 @@ This package is used as the default YAML support package for [rotini](https://gi
 go get github.com/go-rotini/yaml
 ```
 
-Requires Go 1.23 or later.
+Requires Go 1.26 or later.
 
 ## Quick Start
 
