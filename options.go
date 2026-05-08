@@ -34,6 +34,7 @@ type encoderOptions struct {
 	quoteAll             bool
 	omitEmpty            bool
 	autoInt              bool
+	durationAsString     bool
 	comments             map[string][]Comment
 	customMarshalers     map[reflect.Type]any
 	kyaml                bool
@@ -142,6 +143,17 @@ func WithKYAML() EncodeOption {
 // Has no effect unless [WithKYAML] is also set.
 func WithKYAMLAlwaysQuoteKeys() EncodeOption {
 	return func(o *encoderOptions) { o.kyamlAlwaysQuoteKeys = true }
+}
+
+// WithDurationAsString controls how [time.Duration] values are encoded.
+// When false (the default), durations encode as int64 nanoseconds, matching
+// [encoding/json]. When true, durations encode using their human-readable
+// String() form (e.g. "1h30m") wrapped as a quoted string under KYAML mode.
+//
+// The string form is more readable for config files; the int64 form is
+// stable for machine-to-machine interchange and matches stdlib behavior.
+func WithDurationAsString(b bool) EncodeOption {
+	return func(o *encoderOptions) { o.durationAsString = b }
 }
 
 // DecodeOption configures the behavior of [Unmarshal], [UnmarshalWithOptions],

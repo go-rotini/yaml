@@ -67,6 +67,16 @@ func applyComments(buf []byte, comments map[string][]Comment) []byte {
 	return buf
 }
 
+// matchKeyLine reports whether a line (after stripping leading spaces)
+// begins with `key:` or `"key":` — the latter form is needed because KYAML
+// quotes type-ambiguous, numeric, or otherwise-special keys.
+func matchKeyLine(trimmed, key string) bool {
+	if strings.HasPrefix(trimmed, key+":") {
+		return true
+	}
+	return strings.HasPrefix(trimmed, `"`+key+`":`)
+}
+
 func insertHeadComment(buf []byte, path, text string) []byte {
 	key := pathToKey(path)
 	if key == "" {
@@ -75,7 +85,7 @@ func insertHeadComment(buf []byte, path, text string) []byte {
 	lines := strings.Split(string(buf), "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " ")
-		if strings.HasPrefix(trimmed, key+":") {
+		if matchKeyLine(trimmed, key) {
 			indent := strings.Repeat(" ", len(line)-len(trimmed))
 			comment := indent + "# " + text
 			after := make([]string, 0, len(lines)+1)
@@ -96,7 +106,7 @@ func insertLineComment(buf []byte, path, text string) []byte {
 	lines := strings.Split(string(buf), "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " ")
-		if strings.HasPrefix(trimmed, key+":") {
+		if matchKeyLine(trimmed, key) {
 			lines[i] = line + " # " + text
 			return []byte(strings.Join(lines, "\n"))
 		}
@@ -112,7 +122,7 @@ func insertFootComment(buf []byte, path, text string) []byte {
 	lines := strings.Split(string(buf), "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " ")
-		if strings.HasPrefix(trimmed, key+":") {
+		if matchKeyLine(trimmed, key) {
 			indent := strings.Repeat(" ", len(line)-len(trimmed))
 			comment := indent + "# " + text
 			after := make([]string, 0, len(lines)+1)

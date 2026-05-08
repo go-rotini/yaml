@@ -1064,6 +1064,76 @@ func TestKYAMLLintCosmetic(t *testing.T) {
 	}
 }
 
+// TestKYAMLFormatPreservesComments (R11.1, R11.2, R11.3, R11.4): comments
+// from the input AST should survive Format() and appear in the KYAML
+// output. Best-effort per R11.5.
+func TestKYAMLFormatPreservesComments(t *testing.T) {
+	src := []byte(`# top of file
+apiVersion: v1
+kind: Pod
+metadata:
+  # name comment
+  name: my-pod
+  labels:
+    app: demo  # inline comment
+`)
+	out, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{"name comment", "inline comment"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expected comment %q in formatted output:\n%s", want, s)
+		}
+	}
+	if !ValidKYAML(out) {
+		t.Errorf("output is not valid KYAML:\n%s\nerrors: %v", s, ValidateKYAML(out))
+	}
+}
+
+// TestKYAMLFormatNoCommentsIdempotent: with no comments in input, Format
+// remains byte-idempotent.
+func TestKYAMLFormatNoCommentsIdempotent(t *testing.T) {
+	src := []byte("apiVersion: v1\nkind: Pod\nmetadata:\n  name: x\n")
+	once, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Errorf("Format not idempotent\n=== once:\n%s=== twice:\n%s", once, twice)
+	}
+}
+
+// TestKYAMLEncodeR85UncuddleOnComments (R8.5): when comments are registered
+// via WithComment, sequence cuddling is suppressed so post-pass-inserted
+// comments don't land between cuddled brackets.
+func TestKYAMLEncodeR85UncuddleOnComments(t *testing.T) {
+	v := []map[string]string{{"name": "x"}}
+	out, err := MarshalWithOptions(v, WithKYAML(), WithComment(map[string][]Comment{
+		"name": {{Position: HeadCommentPos, Text: "the name"}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	// Without cuddling, the output must NOT contain `[{` (open cuddle) or
+	// `}]` (close cuddle).
+	if strings.Contains(s, "[{") {
+		t.Errorf("expected uncuddled open `[` `{` when comments present:\n%s", s)
+	}
+	if strings.Contains(s, "}]") {
+		t.Errorf("expected uncuddled close `}` `]` when comments present:\n%s", s)
+	}
+	if !strings.Contains(s, "the name") {
+		t.Errorf("comment not preserved:\n%s", s)
+	}
+}
+
 // TestKYAMLFormatErrorRenders verifies FormatError handles KYAMLError.
 func TestKYAMLFormatErrorRenders(t *testing.T) {
 	src := []byte("---\n{ port: 0x50 }\n")

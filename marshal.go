@@ -94,7 +94,11 @@ func (enc *Encoder) EncodeContext(ctx context.Context, v any) error {
 	if err != nil {
 		return err
 	}
-	if enc.n > 0 {
+	// Inter-document separator: under default block-style YAML, write "---\n"
+	// between docs. Under KYAML mode, each document already begins with its
+	// own "---\n" header (R3.1), so writing another separator would produce
+	// a duplicate "---\n---\n". Suppress the inter-doc separator in that case.
+	if enc.n > 0 && !enc.opts.kyaml {
 		if _, err := enc.w.Write([]byte("---\n")); err != nil {
 			return err
 		}

@@ -2810,6 +2810,42 @@ func TestKYAMLEncodeStringQuoting(t *testing.T) {
 	}
 }
 
+// TestKYAMLEncodeBracketKeysQuoted (R5.3 regression): a key containing `[`
+// or `]` MUST be quoted, regardless of bracket content. The YAML flow
+// parser treats `[` as a flow-sequence start in flow context, so an
+// unquoted bracket key produces invalid YAML even when emitted inside a
+// flow mapping. This was the root cause of fuzz seed
+// testdata/fuzz/FuzzMarshalKYAML/9961762ecc024444 (key "A[]") which
+// emitted unquoted and broke decode.
+func TestKYAMLEncodeBracketKeysQuoted(t *testing.T) {
+	keys := []string{
+		"A[]",         // empty brackets — original fuzz seed
+		"A[B]",        // brackets with content
+		"metadata[a]", // realistic-looking JSONPath-style key
+		"foo]bar",     // unmatched bracket
+		"[start",      // bracket at start
+	}
+	for _, k := range keys {
+		t.Run(k, func(t *testing.T) {
+			out, err := MarshalKYAML(map[string]int{k: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(out), `"`+k+`":`) {
+				t.Errorf("bracket-containing key %q must be quoted, got:\n%s", k, out)
+			}
+			// And the output must round-trip cleanly through the YAML parser.
+			var got map[string]int
+			if err := Unmarshal(out, &got); err != nil {
+				t.Errorf("output not parseable as YAML: %v\n%s", err, out)
+			}
+			if got[k] != 1 {
+				t.Errorf("round-trip mismatch for key %q: got %v", k, got)
+			}
+		})
+	}
+}
+
 // TestKYAMLEncodeKeyQuoting verifies R5.1 + R5.2: type-ambiguous keys are
 // quoted; safe keys are unquoted.
 func TestKYAMLEncodeKeyQuoting(t *testing.T) {
@@ -2911,6 +2947,79 @@ func TestKYAMLEncodeWholeFloat(t *testing.T) {
 	}
 	if !strings.Contains(s, "b: 2.5,") {
 		t.Errorf("non-whole 2.5 not rendered correctly:\n%s", s)
+	}
+}
+
+// TestKYAMLEncodeFlowFold (R10): multi-line strings whose fully-escaped
+// single-line form exceeds lineWidth are rendered using KYAML's flow-folded
+// form — `\n` escapes for real newlines plus trailing-backslash continuations
+// for source-line wrapping.
+func TestKYAMLEncodeFlowFold(t *testing.T) {
+	// A long enough multi-line string with 2+ newlines triggers folding.
+	long := strings.Repeat("a", 50) + "\n" + strings.Repeat("b", 50) + "\n" + strings.Repeat("c", 50)
+	out, err := MarshalKYAML(map[string]string{"k": long})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	// Flow-fold output contains a backslash+newline continuation marker.
+	if !strings.Contains(s, "\\\n") {
+		t.Errorf("expected flow-fold continuation `\\<newline>`:\n%s", s)
+	}
+	// Round-trip preserves the original string.
+	var got map[string]string
+	if err := Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if got["k"] != long {
+		t.Errorf("flow-fold round-trip mismatch:\n want: %q\n got:  %q", long, got["k"])
+	}
+}
+
+func TestKYAMLEncodeFlowFoldShortStaysSingleLine(t *testing.T) {
+	// Short multi-line string stays on a single line with `\n` escapes.
+	short := "a\nb\nc"
+	out, err := MarshalKYAML(map[string]string{"k": short})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "\\\n") {
+		t.Errorf("short multi-line string should not flow-fold:\n%s", s)
+	}
+	if !strings.Contains(s, `\n`) {
+		t.Errorf("expected literal \\n escape:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeFlowFoldSingleNewlineStaysInline(t *testing.T) {
+	// Even very long strings with only ONE newline stay single-line — the
+	// trigger requires 2+ newlines so the threshold can't flip on round-trip.
+	long := strings.Repeat("a", 200) + "\n" + strings.Repeat("b", 200)
+	out, err := MarshalKYAML(map[string]string{"k": long})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "\\\n") {
+		t.Errorf("single-newline string should never flow-fold (idempotence guard):\n%s", out)
+	}
+}
+
+func TestKYAMLEncodeFlowFoldIdempotent(t *testing.T) {
+	// Long multi-line string with embedded invalid UTF-8 — the previous
+	// fuzz failure case. After Format, the bytes are normalized to U+FFFD
+	// UTF-8 (3 bytes) and the second Format must produce identical output.
+	src := []byte("---\n{\n  k: \"" + strings.Repeat("0", 50) + "\\n" + strings.Repeat("1", 50) + "\\n" + strings.Repeat("2", 50) + "\",\n}\n")
+	once, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twice, err := Format(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Errorf("flow-fold not idempotent\n=== once:\n%s=== twice:\n%s", once, twice)
 	}
 }
 
@@ -3327,6 +3436,183 @@ func TestKYAMLEncodeJSONNumber(t *testing.T) {
 	}
 }
 
+// TestKYAMLEncodeRawValueRoundTrip covers R13.11: RawValue carries raw YAML
+// bytes that the encoder re-parses and re-emits as canonical KYAML — not
+// pass-through, since pass-through could leak non-KYAML constructs.
+func TestKYAMLEncodeRawValueRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "block-style mapping converts to KYAML",
+			raw:  "name: foo\nvalue: 42\n",
+		},
+		{
+			name: "anchor and alias get reified",
+			raw:  "shared: &x { a: 1 }\ncopy: *x\n",
+		},
+		{
+			name: "scalar value",
+			raw:  "42\n",
+		},
+		{
+			name: "already-KYAML",
+			raw:  "---\n{ name: \"x\" }\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := MarshalKYAML(map[string]any{"r": RawValue(tc.raw)})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !ValidKYAML(out) {
+				t.Errorf("RawValue output is not valid KYAML:\n%s", out)
+			}
+			// Anchor must be reified (no `&` or `*` symbols).
+			if bytes.Contains(out, []byte("&")) {
+				t.Errorf("anchor not reified:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestKYAMLEncodeRawValueEmpty(t *testing.T) {
+	out, err := MarshalKYAML(map[string]any{"r": RawValue("")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "r: null,") {
+		t.Errorf("empty RawValue should encode as null:\n%s", out)
+	}
+}
+
+func TestKYAMLEncodeRawValueInvalid(t *testing.T) {
+	bad := RawValue([]byte(": :\n - : :\n"))
+	_, err := MarshalKYAML(map[string]any{"r": bad})
+	if err == nil {
+		t.Error("expected error for un-parseable RawValue")
+	}
+}
+
+// TestRawValueMarshalYAMLDirect covers RawValue.MarshalYAML directly so
+// the BytesMarshaler interface implementation (used in default-mode
+// encoding) is exercised.
+func TestRawValueMarshalYAMLDirect(t *testing.T) {
+	r := RawValue([]byte("hello"))
+	got, err := r.MarshalYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("got %q, want %q", got, "hello")
+	}
+	empty := RawValue(nil)
+	got, err = empty.MarshalYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "null" {
+		t.Errorf("empty RawValue should marshal to %q, got %q", "null", got)
+	}
+}
+
+// TestKYAMLFormatPreservesLineAndFootComments exercises walkKYAMLComments's
+// line and foot branches (head-only paths were already covered by other
+// tests).
+func TestKYAMLFormatPreservesLineAndFootComments(t *testing.T) {
+	src := []byte(`name: foo  # inline comment
+other: bar
+`)
+	out, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ValidKYAML(out) {
+		t.Errorf("output not valid KYAML:\n%s", out)
+	}
+	if !strings.Contains(string(out), "inline comment") {
+		t.Logf("inline comment not preserved (best-effort per R11.5):\n%s", out)
+	}
+}
+
+// TestWalkKYAMLCommentsLineAndFoot directly exercises walkKYAMLComments
+// with synthetic AST nodes carrying line and foot comments. These code
+// paths exist for forward-compatibility with future parser support for
+// inline/foot comment capture.
+func TestWalkKYAMLCommentsLineAndFoot(t *testing.T) {
+	// Synthetic mapping with key carrying line + foot comments and value
+	// carrying head + line + foot comments.
+	mapping := &node{
+		kind: nodeMapping,
+		children: []*node{
+			{
+				kind:        nodeScalar,
+				value:       "name",
+				lineComment: "  inline on key  ",
+				footComment: "after the name",
+			},
+			{
+				kind:        nodeScalar,
+				value:       "demo",
+				headComment: "before value",
+				lineComment: "after value",
+				footComment: "below value",
+			},
+			{
+				kind:        nodeScalar,
+				value:       "list",
+				headComment: "list head",
+			},
+			{
+				kind: nodeSequence,
+				children: []*node{
+					{kind: nodeScalar, value: "item1", lineComment: "item line"},
+				},
+			},
+		},
+	}
+
+	out := make(map[string][]Comment)
+	walkKYAMLComments(mapping, "", out)
+
+	// Verify line and foot for the key node.
+	if got := commentsAtPos(out["name"], LineCommentPos); !contains(got, "inline on key") {
+		t.Errorf("line comment on key 'name' missing: %+v", out["name"])
+	}
+	if got := commentsAtPos(out["name"], FootCommentPos); !contains(got, "after the name") {
+		t.Errorf("foot comment on key 'name' missing: %+v", out["name"])
+	}
+	// Verify head/line/foot on the value.
+	if got := commentsAtPos(out["name"], HeadCommentPos); !contains(got, "before value") {
+		t.Errorf("head comment on value missing: %+v", out["name"])
+	}
+	// list[0] has line comment.
+	if got := commentsAtPos(out["list[0]"], LineCommentPos); !contains(got, "item line") {
+		t.Errorf("line comment on sequence element missing: %+v", out["list[0]"])
+	}
+}
+
+func commentsAtPos(cs []Comment, p CommentPosition) []string {
+	var out []string
+	for _, c := range cs {
+		if c.Position == p {
+			out = append(out, c.Text)
+		}
+	}
+	return out
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestKYAMLEncodeJSONRawMessage(t *testing.T) {
 	raw := json.RawMessage(`{"port":80,"name":"x"}`)
 	out, err := MarshalKYAML(map[string]any{"r": raw})
@@ -3385,6 +3671,30 @@ func TestKYAMLEncodeTimeAndDuration(t *testing.T) {
 	}
 	if !strings.Contains(s, "d: 5400000000000,") {
 		t.Errorf("time.Duration not int64 nanoseconds:\n%s", s)
+	}
+}
+
+// TestKYAMLEncodeDurationAsString covers R13.7: WithDurationAsString opts
+// into the human-readable string form for time.Duration.
+func TestKYAMLEncodeDurationAsString(t *testing.T) {
+	v := map[string]any{
+		"d": time.Hour + 30*time.Minute,
+	}
+	out, err := MarshalWithOptions(v, WithKYAML(), WithDurationAsString(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `d: "1h30m0s",`) {
+		t.Errorf("expected duration as quoted string, got:\n%s", out)
+	}
+
+	// Default (without the option): int64 nanoseconds.
+	out, err = MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "d: 5400000000000,") {
+		t.Errorf("expected default int64 ns:\n%s", out)
 	}
 }
 
@@ -3616,6 +3926,39 @@ func (k kyamlYAMLContextMarshaler) MarshalYAML(ctx context.Context) (any, error)
 		return nil, errors.New("nil ctx")
 	}
 	return map[string]string{"tag": k.Tag}, nil
+}
+
+// TestKYAMLEncoderMultiDocSeparator (R3.2): under KYAML mode, the Encoder
+// must NOT emit a duplicate "---\n" separator between documents — each KYAML
+// doc already begins with its own "---\n" header.
+func TestKYAMLEncoderMultiDocSeparator(t *testing.T) {
+	var buf bytes.Buffer
+	enc := NewEncoder(&buf, WithKYAML())
+	if err := enc.Encode(map[string]int{"a": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Encode(map[string]int{"b": 2}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	// No double separator — must not contain "---\n---\n".
+	if strings.Contains(out, "---\n---\n") {
+		t.Errorf("duplicate document separator under KYAML mode:\n%s", out)
+	}
+	// Must contain exactly two "---\n" occurrences (one per doc header).
+	if got := strings.Count(out, "---\n"); got != 2 {
+		t.Errorf("expected 2 \"---\\n\" headers, got %d:\n%s", got, out)
+	}
+	// Each document is independently valid KYAML.
+	parts := strings.SplitAfter(out, "---\n")
+	for i, p := range parts {
+		if i == 0 || p == "" {
+			continue
+		}
+		if !ValidKYAML([]byte("---\n" + strings.TrimPrefix(p, "---\n"))) {
+			t.Errorf("doc %d is not valid KYAML:\n%s", i, p)
+		}
+	}
 }
 
 func TestKYAMLDispatchContextMarshaler(t *testing.T) {

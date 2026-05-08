@@ -95,6 +95,17 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 		break
 	}
 
+	// Per R13.11: RawValue carries arbitrary YAML bytes that may contain
+	// non-KYAML constructs (anchors, tags, block style). Re-parse through
+	// the YAML decoder and re-emit as canonical KYAML rather than letting
+	// the bytes flow through verbatim. Must run before dispatchMarshaler
+	// since RawValue implements BytesMarshaler.
+	if v.CanInterface() {
+		if rv, ok := v.Interface().(RawValue); ok {
+			return e.emitRawValue(rv, indent)
+		}
+	}
+
 	// Per R13.2, json.Marshaler takes precedence under KYAML mode.
 	if handled, err := e.dispatchMarshaler(v, indent); handled {
 		return err
@@ -111,6 +122,11 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 			e.buf = append(e.buf, data...)
 			return nil
 		case time.Duration:
+			if e.opts.durationAsString {
+				// Per R13.7: emit as a quoted human-readable string.
+				e.emitString(t.String(), indent)
+				return nil
+			}
 			e.buf = strconv.AppendInt(e.buf, int64(t), 10)
 			return nil
 		case json.Number:
@@ -281,6 +297,22 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 	return false, nil
 }
 
+// emitRawValue parses RawValue's stored YAML bytes and re-emits as KYAML.
+// Per R13.11, raw bytes are not passed through verbatim under KYAML mode —
+// they could otherwise leak non-KYAML constructs (anchors, tags, block
+// style) into strict-KYAML output.
+func (e *kyamlEmitter) emitRawValue(rv RawValue, indent int) error {
+	if len(rv) == 0 {
+		e.buf = append(e.buf, "null"...)
+		return nil
+	}
+	var raw any
+	if err := UnmarshalWithOptions([]byte(rv), &raw, WithOrderedMap()); err != nil {
+		return fmt.Errorf("yaml: cannot decode RawValue: %w", err)
+	}
+	return e.emit(reflect.ValueOf(raw), indent)
+}
+
 // emitRawJSON parses raw JSON bytes and re-emits as KYAML.
 func (e *kyamlEmitter) emitRawJSON(data []byte, indent int) error {
 	var v any
@@ -335,6 +367,11 @@ func (e *kyamlEmitter) emitFloat(f float64, bits int) error {
 // cuddles to the inner `}`. The cuddled compound element's logical indent is
 // the sequence's own indent (so its close bracket lines up with what would
 // otherwise be the sequence's close position).
+//
+// Per R8.5, cuddling is suppressed when comments are present (set via
+// [WithComment]) — comment placement uses a post-pass string replacement
+// that can't reliably target cuddled boundaries, so the safest behavior is
+// to keep brackets on their own lines whenever any comment is registered.
 func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 	n := v.Len()
 	if n == 0 {
@@ -344,10 +381,13 @@ func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 	inner := indent + e.opts.indent
 	e.buf = append(e.buf, '[')
 
+	// R8.5: when any comment is registered, suppress cuddling globally.
+	suppressCuddle := len(e.opts.comments) > 0
+
 	for i := range n {
 		elem := v.Index(i)
 		elemForCuddle := unwrapForCuddle(elem)
-		startsBracket := emitsAsCompound(elemForCuddle)
+		startsBracket := !suppressCuddle && emitsAsCompound(elemForCuddle)
 
 		// Pre-element placement.
 		if i == 0 {
@@ -386,8 +426,9 @@ func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 	}
 
 	// Close: cuddle if last element ended with a closing bracket
-	// (and we're cuddling — i.e., the last element is compound).
-	if lastIsCloseBracket(e.buf) {
+	// (and we're cuddling — i.e., the last element is compound). Suppress
+	// close cuddling per R8.5 when comments are present.
+	if !suppressCuddle && lastIsCloseBracket(e.buf) {
 		e.buf = append(e.buf, ']')
 	} else {
 		e.buf = append(e.buf, ',', '\n')
@@ -564,14 +605,95 @@ func (e *kyamlEmitter) formatKey(key string) string {
 	return key
 }
 
-// emitString renders a string value per R6.4 (always double-quoted, single
-// line, with embedded \n escapes for newlines). Flow-folded multi-line form
-// (KEP-5295 R10) is intentionally not used in v0.2.0 — any length-based
-// trigger flips between encode passes and breaks Format idempotence under
-// fuzz. The single-line form is always valid KYAML.
+// emitString renders a string value per R6.4 (always double-quoted). For
+// multi-line strings whose fully-escaped single-line form exceeds the
+// configured line width, the value is rendered using KYAML's flow-folded
+// multi-line form (R10) — readable across the source line for log/config
+// content. Otherwise a single-line double-quoted scalar with embedded \n
+// escapes is used.
+//
+// The flow-fold trigger uses the FULLY-ESCAPED length (post escapeKYAMLLine)
+// which is invariant under UTF-8 normalization: invalid UTF-8 bytes are
+// replaced by literal U+FFFD UTF-8 (3 bytes) on first encode, and the
+// resulting valid U+FFFD round-trips to itself on subsequent passes.
+// Idempotence verified by FuzzKYAMLRoundTrip.
 func (e *kyamlEmitter) emitString(s string, indent int) {
-	_ = indent
+	if shouldUseFlowFold(s, e.opts.lineWidth) {
+		e.buf = append(e.buf, kyamlFlowFold(s, indent+e.opts.indent)...)
+		return
+	}
 	e.buf = append(e.buf, quoteKYAMLString(s)...)
+}
+
+// shouldUseFlowFold reports whether s should be emitted using KYAML's
+// flow-folded multi-line form (R10) rather than a single-line double-quoted
+// scalar with embedded \n escapes.
+//
+// Triggers (all must hold):
+//  1. The string contains at least 2 literal newlines (so the threshold
+//     can't flip on round-trip).
+//  2. Its fully-escaped single-line form (post escapeKYAMLLine) exceeds
+//     lineWidth. Using the escaped length rather than the raw input length
+//     keeps the trigger stable across encode → decode → encode cycles
+//     (UTF-8 normalization preserves escape lengths).
+//  3. No continuation line (any line after the first) begins with
+//     whitespace. YAML's `\<newline>` continuation rule strips leading
+//     whitespace on the next source line — but if the first byte of the
+//     line is part of the actual string data, we'd lose it on round-trip.
+//     Strings violating this constraint render as single-line.
+func shouldUseFlowFold(s string, lineWidth int) bool {
+	if lineWidth <= 0 {
+		return false
+	}
+	if strings.Count(s, "\n") < 2 {
+		return false
+	}
+	// Continuation-line leading-whitespace check.
+	lines := strings.Split(s, "\n")
+	for i := 1; i < len(lines); i++ {
+		line := lines[i]
+		if line == "" {
+			continue // empty continuation line is safe
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			return false
+		}
+	}
+	escaped := escapeKYAMLLine(s)
+	// +2 for the surrounding double quotes that quoteKYAMLString would add.
+	return len(escaped)+2 > lineWidth
+}
+
+// kyamlFlowFold renders s using the KEP-5295 R10 flow-folded form: a
+// multi-line double-quoted string with `\n` escape sequences for actual
+// newlines and trailing-backslash continuations to wrap each source line.
+// contIndent is the column at which continuation lines start.
+//
+// Example output for "first\nsecond\nthird":
+//
+//	"first\n\
+//	  second\n\
+//	  third"
+//
+// The trailing `\<newline><indent>` between lines is YAML's flow-folding
+// indicator: the parser folds the newline-and-leading-whitespace away,
+// leaving only the literal `\n` escape's newline in the decoded value.
+func kyamlFlowFold(s string, contIndent int) string {
+	lines := strings.Split(s, "\n")
+	var b strings.Builder
+	b.WriteByte('"')
+	indentStr := strings.Repeat(" ", contIndent)
+	for i, line := range lines {
+		b.WriteString(escapeKYAMLLine(line))
+		if i < len(lines)-1 {
+			b.WriteString(`\n`)
+			b.WriteByte('\\')
+			b.WriteByte('\n')
+			b.WriteString(indentStr)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 func (e *kyamlEmitter) writeIndent(n int) {
@@ -1303,18 +1425,205 @@ func isHexOctalBinaryInt(s string) bool {
 
 // Format parses data as YAML (any subset, including non-KYAML constructs)
 // and re-emits it as canonical KYAML. Anchors and aliases are reified
-// (expanded inline); merge keys are resolved into flat key lists; explicit
-// tags are stripped. Comments are preserved best-effort.
+// (expanded inline by the decoder); merge keys are resolved into flat key
+// lists; explicit tags are stripped. Comments are preserved best-effort:
+// the AST is pre-walked to extract head/inline/foot comments by path
+// (R11.4) and re-inserted into the KYAML output via the existing comment
+// post-pass.
 //
 // Format is idempotent on its output: Format(Format(x)) produces the same
 // bytes as Format(x) for any valid YAML x.
 func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
+	// Parse to AST first to extract comments before they're lost in decode.
+	scanData, err := detectAndConvertEncoding(data)
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := newScanner(scanData).scan()
+	if err != nil {
+		return nil, err
+	}
+	p := newParser(tokens)
+	docs, err := p.parse()
+	if err != nil {
+		return nil, err
+	}
+
+	comments := collectKYAMLComments(docs)
+
+	// Decode to a generic any value (anchors and merge keys resolved here).
 	var v any
 	if err := UnmarshalWithOptions(data, &v, WithOrderedMap()); err != nil {
 		return nil, err
 	}
+
 	encOpts := append([]EncodeOption{WithKYAML()}, opts...)
+	if len(comments) > 0 {
+		encOpts = append(encOpts, WithComment(comments))
+	}
 	return MarshalWithOptions(v, encOpts...)
+}
+
+// collectKYAMLComments walks the parsed AST and extracts every node's
+// head/inline/foot comments into a path-keyed map suitable for
+// [WithComment]. Paths use dotted notation for mapping keys
+// ("metadata.name") and `[i]` for sequence indices. Per R11.5, this is
+// best-effort — the post-pass inserter that consumes the map matches by
+// last-path-segment, so paths that share a final segment may collide.
+func collectKYAMLComments(docs []*node) map[string][]Comment {
+	out := make(map[string][]Comment)
+	for _, doc := range docs {
+		if doc == nil {
+			continue
+		}
+		for _, child := range doc.children {
+			walkKYAMLComments(child, "", out)
+		}
+	}
+	return out
+}
+
+func walkKYAMLComments(n *node, path string, out map[string][]Comment) {
+	if n == nil {
+		return
+	}
+
+	addComments := func(p string) {
+		if p == "" {
+			return
+		}
+		// The scanner already strips the leading "#" and one optional space
+		// from each comment, so the stored text is the raw content. Pass it
+		// through verbatim — no further prefix stripping. Trim only trailing
+		// whitespace and skip lines that are empty after that trim.
+		if n.headComment != "" {
+			for line := range strings.SplitSeq(n.headComment, "\n") {
+				line = strings.TrimRight(line, " \t")
+				if line == "" {
+					continue
+				}
+				out[p] = append(out[p], Comment{Position: HeadCommentPos, Text: line})
+			}
+		}
+		if n.lineComment != "" {
+			line := strings.TrimRight(n.lineComment, " \t")
+			if line != "" {
+				out[p] = append(out[p], Comment{Position: LineCommentPos, Text: line})
+			}
+		}
+		if n.footComment != "" {
+			for line := range strings.SplitSeq(n.footComment, "\n") {
+				line = strings.TrimRight(line, " \t")
+				if line == "" {
+					continue
+				}
+				out[p] = append(out[p], Comment{Position: FootCommentPos, Text: line})
+			}
+		}
+	}
+
+	addComments(path)
+
+	switch n.kind {
+	case nodeMapping:
+		for i := 0; i+1 < len(n.children); i += 2 {
+			keyNode := n.children[i]
+			valNode := n.children[i+1]
+			if keyNode == nil || keyNode.kind != nodeScalar {
+				continue
+			}
+			// Skip keys that can't be reliably anchored by the path-based
+			// comment lookup. The post-pass splits paths on `.` and uses
+			// the last segment to match `key:` lines; keys containing
+			// path-separator characters (or that are empty) would collide
+			// with the path scheme and silently mis-place — or trigger
+			// cuddle suppression for a comment that never gets emitted.
+			// R11.5 explicitly allows comment loss in these edge cases.
+			if keyContainsPathSpecial(keyNode.value) {
+				walkKYAMLComments(valNode, path, out)
+				continue
+			}
+			childPath := keyNode.value
+			if path != "" {
+				childPath = path + "." + keyNode.value
+			}
+			// Comments on the key node attach to the entry path.
+			if keyNode.headComment != "" || keyNode.lineComment != "" || keyNode.footComment != "" {
+				tmp := &node{
+					headComment: keyNode.headComment,
+					lineComment: keyNode.lineComment,
+					footComment: keyNode.footComment,
+				}
+				walkKYAMLCommentsCollect(tmp, childPath, out)
+			}
+			walkKYAMLComments(valNode, childPath, out)
+		}
+	case nodeSequence:
+		for i, child := range n.children {
+			childPath := fmt.Sprintf("%s[%d]", path, i)
+			walkKYAMLComments(child, childPath, out)
+		}
+	}
+}
+
+// keyContainsPathSpecial reports whether s is unsuitable for use as the
+// last segment of a comment-anchor path. The post-pass that places
+// comments uses path splitting on `.` and a literal-prefix match on the
+// emitted output, so any key that isn't a simple identifier
+// ([A-Za-z_][A-Za-z0-9_-]*) cannot be reliably anchored — the comment
+// would only trigger spurious cuddle suppression.
+//
+// Per R11.5, comment loss in these edge cases is permitted.
+func keyContainsPathSpecial(s string) bool {
+	if s == "" {
+		return true
+	}
+	first := s[0]
+	if first != '_' && (first < 'A' || first > 'Z') && (first < 'a' || first > 'z') {
+		return true
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if c != '_' && c != '-' &&
+			(c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			return true
+		}
+	}
+	return false
+}
+
+// walkKYAMLCommentsCollect records comments from a synthetic node onto the
+// given path. Used to merge a key node's comments into the same path as
+// the value node. Same trim semantics as walkKYAMLComments's addComments
+// helper — verbatim content with trailing-whitespace trim only.
+func walkKYAMLCommentsCollect(n *node, path string, out map[string][]Comment) {
+	if path == "" {
+		return
+	}
+	if n.headComment != "" {
+		for line := range strings.SplitSeq(n.headComment, "\n") {
+			line = strings.TrimRight(line, " \t")
+			if line == "" {
+				continue
+			}
+			out[path] = append(out[path], Comment{Position: HeadCommentPos, Text: line})
+		}
+	}
+	if n.lineComment != "" {
+		line := strings.TrimRight(n.lineComment, " \t")
+		if line != "" {
+			out[path] = append(out[path], Comment{Position: LineCommentPos, Text: line})
+		}
+	}
+	if n.footComment != "" {
+		for line := range strings.SplitSeq(n.footComment, "\n") {
+			line = strings.TrimRight(line, " \t")
+			if line == "" {
+				continue
+			}
+			out[path] = append(out[path], Comment{Position: FootCommentPos, Text: line})
+		}
+	}
 }
 
 // Lint parses data as YAML and returns a slice of LintIssue values describing
