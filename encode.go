@@ -662,12 +662,23 @@ func (e *encoder) emitNode(n *node, indent int) {
 	}
 }
 
+// yamlBoolLiterals is the set of bare-word boolean literals in YAML 1.2
+// Core. A plain scalar matching any of these must be quoted on emit to
+// preserve its string identity through round-trip.
+var yamlBoolLiterals = map[string]struct{}{
+	"true": {}, "True": {}, "TRUE": {},
+	"false": {}, "False": {}, "FALSE": {},
+}
+
 func needsQuoting(s string) bool {
 	if s == "" {
 		return true
 	}
 
-	if isNullValue(s) || s == "true" || s == "false" || s == "True" || s == "False" || s == "TRUE" || s == "FALSE" {
+	if isNullValue(s) {
+		return true
+	}
+	if _, ok := yamlBoolLiterals[s]; ok {
 		return true
 	}
 

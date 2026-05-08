@@ -204,7 +204,11 @@ type LintIssue struct {
 	Severity Severity
 }
 
-func (i LintIssue) Error() string {
+// String renders the issue with its source position and rule ID. LintIssue
+// is a finding/deviation report rather than an error type — it carries a
+// Severity field (Error or Warning), so the surrounding type intentionally
+// implements Stringer instead of error.
+func (i LintIssue) String() string {
 	if i.Pos.Line > 0 {
 		return fmt.Sprintf("line %d, column %d: %s (%s)", i.Pos.Line, i.Pos.Column, i.Message, i.Rule)
 	}

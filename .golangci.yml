@@ -229,6 +229,19 @@ linters:
           - maintidx
           - nestif
 
+      # The KYAML emitter + spec validators in format.go have inherent
+      # complexity from KEP-5295 (many rule branches). Length and complexity
+      # warnings on this file are not actionable.
+      - path: format\.go
+        linters:
+          - cyclop
+          - gocognit
+          - gocyclo
+          - funlen
+          - maintidx
+          - nestif
+          - gocritic
+
       - path: encoding\.go
         linters:
           - cyclop

@@ -533,11 +533,10 @@ func (e *kyamlEmitter) emitMappingEntries(entries []mapEntry, indent int) error 
 		e.buf = append(e.buf, ':', ' ')
 
 		// Value
-		if ent.emitNullDirect {
+		switch {
+		case ent.emitNullDirect, !ent.value.IsValid():
 			e.buf = append(e.buf, "null"...)
-		} else if !ent.value.IsValid() {
-			e.buf = append(e.buf, "null"...)
-		} else {
+		default:
 			if err := e.emit(ent.value, inner); err != nil {
 				return err
 			}
