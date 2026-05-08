@@ -1449,7 +1449,16 @@ func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
 		return nil, err
 	}
 
-	comments := collectKYAMLComments(docs)
+	// Only extract comments from the first document — Format → Unmarshal
+	// only decodes docs[0] (multi-doc streams should use Encoder/Decoder),
+	// so picking up comments from later documents would feed the encoder
+	// a comments map that doesn't match the data being encoded, breaking
+	// idempotence.
+	var firstDoc []*node
+	if len(docs) > 0 {
+		firstDoc = docs[:1]
+	}
+	comments := collectKYAMLComments(firstDoc)
 
 	// Decode to a generic any value (anchors and merge keys resolved here).
 	var v any
