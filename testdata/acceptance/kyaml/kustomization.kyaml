@@ -1,0 +1,35 @@
+---
+{
+  apiVersion: "kustomize.config.k8s.io/v1beta1",
+  kind: "Kustomization",
+  namespace: "production",
+  namePrefix: "prod-",
+  resources: [
+    "deployment.yaml",
+    "service.yaml",
+    "configmap.yaml",
+  ],
+  commonLabels: {
+    environment: "production",
+    team: "platform",
+  },
+  configMapGenerator: [{
+    name: "app-config",
+    literals: [
+      "LOG_LEVEL=info",
+      "ENABLE_METRICS=true",
+    ],
+    patches: [{
+      path: "patch-replicas.yaml",
+      target: {
+        kind: "Deployment",
+        name: "my-app",
+      },
+    }],
+    images: [{
+      name: "my-app",
+      newName: "registry.example.com/my-app",
+      newTag: "v1.2.3",
+    }],
+  }],
+}

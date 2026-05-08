@@ -1,6 +1,7 @@
 package yaml
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
@@ -485,7 +486,7 @@ func Lint(data []byte, opts ...DecodeOption) ([]LintIssue, error) {
 		// Any deviation surfaces as a single warning; users who want
 		// detailed diagnostics can use a diff tool against Format(data).
 		formatted, fErr := Format(data)
-		if fErr == nil && string(formatted) != string(data) {
+		if fErr == nil && !bytes.Equal(formatted, data) {
 			issues = append(issues, LintIssue{
 				Rule:     "R8/R9",
 				Message:  "input does not match canonical KYAML formatting (run Format to apply)",
@@ -536,4 +537,3 @@ func validateKYAMLBytes(data []byte, docs []*node) error {
 	}
 	return nil
 }
-

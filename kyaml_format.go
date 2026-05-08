@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +59,15 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 	}
 
 	// Unwrap pointers and interfaces, with cycle guard for pointer types.
+	// We collect every pointer we descended through and clean them all up
+	// in a single deferred call at function return — avoiding a defer per
+	// loop iteration.
+	var tracked []uintptr
+	defer func() {
+		for _, p := range tracked {
+			delete(e.seen, p)
+		}
+	}()
 	for {
 		switch v.Kind() {
 		case reflect.Pointer:
@@ -70,7 +80,7 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 				return fmt.Errorf("yaml: cyclic value of type %s: %w", v.Type(), ErrUnsupported)
 			}
 			e.seen[ptr] = true
-			defer delete(e.seen, ptr)
+			tracked = append(tracked, ptr)
 			v = v.Elem()
 			continue
 		case reflect.Interface:
@@ -95,7 +105,7 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 		case time.Time:
 			data, err := t.MarshalJSON()
 			if err != nil {
-				return err
+				return fmt.Errorf("yaml: time.Time MarshalJSON: %w", err)
 			}
 			e.buf = append(e.buf, data...)
 			return nil
@@ -111,11 +121,11 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 			e.buf = append(e.buf, s...)
 			return nil
 		case json.RawMessage:
-			var any any
-			if err := json.Unmarshal(t, &any); err != nil {
+			var raw any
+			if err := json.Unmarshal(t, &raw); err != nil {
 				return fmt.Errorf("yaml: cannot decode json.RawMessage: %w", err)
 			}
-			return e.emit(reflect.ValueOf(any), indent)
+			return e.emit(reflect.ValueOf(raw), indent)
 		case big.Int:
 			e.buf = append(e.buf, t.String()...)
 			return nil
@@ -219,7 +229,7 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 		if m, ok := v.Interface().(json.Marshaler); ok {
 			data, mErr := m.MarshalJSON()
 			if mErr != nil {
-				return true, mErr
+				return true, fmt.Errorf("yaml: %T.MarshalJSON: %w", v.Interface(), mErr)
 			}
 			return true, e.emitRawJSON(data, indent)
 		}
@@ -228,7 +238,7 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 		if m, ok := v.Addr().Interface().(json.Marshaler); ok {
 			data, mErr := m.MarshalJSON()
 			if mErr != nil {
-				return true, mErr
+				return true, fmt.Errorf("yaml: %T.MarshalJSON: %w", v.Addr().Interface(), mErr)
 			}
 			return true, e.emitRawJSON(data, indent)
 		}
@@ -569,20 +579,20 @@ func (e *kyamlEmitter) writeIndent(n int) {
 	}
 }
 
-// shouldUseFlowFold decides whether a string is a candidate for KYAML's
-// flow-folded multi-line form (R10.4): contains a literal newline AND the
-// fully-escaped single-line form would exceed lineWidth.
+// shouldUseFlowFold reports whether a string should be emitted using KYAML's
+// flow-folded multi-line form (R10) rather than a single-line double-quoted
+// scalar with embedded \n escapes.
+//
+// In v0.2.0 this always returns false: flow-fold output is valid KYAML, but
+// any length-based trigger is fundamentally unstable across encode passes
+// (input string length and output string length disagree as escapes are
+// applied), which breaks Format idempotence in fuzz testing. The single-line
+// form is always valid; flow-folding is purely cosmetic. A stable trigger
+// can be added in a future release.
 func shouldUseFlowFold(s string, lineWidth int) bool {
-	if !strings.Contains(s, "\n") {
-		return false
-	}
-	if lineWidth <= 0 {
-		return false
-	}
-	// Approximate the single-line escaped length: each newline becomes "\n" (2 chars),
-	// quotes wrap (2 more), other escapes are roughly the same length.
-	approx := len(s) + strings.Count(s, "\n") + 2
-	return approx > lineWidth
+	_ = s
+	_ = lineWidth
+	return false
 }
 
 // kyamlFlowFold renders s using the flow-folding form per R10. The output is
@@ -627,8 +637,14 @@ func escapeKYAMLLine(s string) string {
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		if r == utf8.RuneError && size == 1 {
-			// Invalid UTF-8: emit replacement character (matches encoding/json).
-			b.WriteString(`\xEF\xBF\xBD`)
+			// Invalid UTF-8 byte: replace with the literal UTF-8 bytes for
+			// U+FFFD (matches encoding/json's behavior). YAML's \xHH escape
+			// represents a Unicode code point, not a raw byte, so invalid
+			// bytes cannot round-trip exactly. Emitting U+FFFD as its
+			// literal UTF-8 (3 bytes) keeps Format idempotent on canonical
+			// KYAML — subsequent passes see valid UTF-8 and emit it
+			// literally.
+			b.WriteString("�")
 			i++
 			continue
 		}
@@ -716,7 +732,7 @@ func validKYAMLKey(key string) bool {
 		return false
 	}
 	first := key[0]
-	if !(first == '_' || (first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')) {
+	if first != '_' && (first < 'A' || first > 'Z') && (first < 'a' || first > 'z') {
 		return false
 	}
 	inBracket := false
@@ -743,10 +759,7 @@ func validKYAMLKey(key string) bool {
 			return false
 		}
 	}
-	if inBracket {
-		return false
-	}
-	return true
+	return !inBracket
 }
 
 func isKYAMLKeyChar(c byte) bool {
@@ -848,8 +861,7 @@ func emitsAsCompound(v reflect.Value) bool {
 
 // lastIsCloseBracket reports whether buf's last non-whitespace byte is `}` or `]`.
 func lastIsCloseBracket(buf []byte) bool {
-	for i := len(buf) - 1; i >= 0; i-- {
-		c := buf[i]
+	for _, c := range slices.Backward(buf) {
 		if c == ' ' || c == '\n' || c == '\t' {
 			continue
 		}

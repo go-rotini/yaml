@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -135,10 +136,10 @@ func TestKYAMLFormatErrorRenders(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 	rendered := FormatError(src, err)
-	if !bytes.Contains([]byte(rendered), []byte("R12.11")) {
+	if !strings.Contains(rendered, "R12.11") {
 		t.Errorf("expected rule ID R12.11 in formatted error:\n%s", rendered)
 	}
-	if !bytes.Contains([]byte(rendered), []byte("0x50")) {
+	if !strings.Contains(rendered, "0x50") {
 		t.Errorf("expected source line in formatted error:\n%s", rendered)
 	}
 }

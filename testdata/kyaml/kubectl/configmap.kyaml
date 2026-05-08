@@ -1,0 +1,17 @@
+---
+{
+  apiVersion: "v1",
+  kind: "ConfigMap",
+  metadata: {
+    name: "kyaml-test-configmap",
+    namespace: "default",
+  },
+  data: {
+    database.host: "db.example.com",
+    database.port: "5432",
+    log.level: "info",
+    feature.enabled: "yes",
+    empty.string: "",
+  },
+  binaryData: {},
+}

@@ -45,14 +45,19 @@ func MarshalKYAMLWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
 	return MarshalWithOptions(v, append(opts, WithKYAML())...)
 }
 
-// EncodeKYAMLFile encodes v as KYAML and atomically writes the result to path.
-// The destination file is created with mode 0644 if it does not exist.
+// EncodeKYAMLFile encodes v as KYAML and writes the result to path.
+// The destination file is created with mode 0600 if it does not exist —
+// configuration files often hold secrets, so we default to owner-only.
+// Callers needing wider permissions can chmod after writing.
 func EncodeKYAMLFile(path string, v any, opts ...EncodeOption) error {
 	data, err := MarshalKYAMLWithOptions(v, opts...)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("yaml: write file %q: %w", path, err)
+	}
+	return nil
 }
 
 // Encoder writes YAML values to an output stream. When multiple values are

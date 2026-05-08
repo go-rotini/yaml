@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("apiVersion: v1\nkind: Pod\nmetadata:\n  name: x\n")

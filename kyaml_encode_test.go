@@ -172,13 +172,13 @@ func TestKYAMLEncodeWholeFloat(t *testing.T) {
 // TestKYAMLEncodeStringEscapes verifies R6.5 escape handling.
 func TestKYAMLEncodeStringEscapes(t *testing.T) {
 	cases := map[string]string{
-		"newline":  "a\nb",
-		"tab":      "a\tb",
-		"quote":    `a"b`,
-		"slash":    `a\b`,
-		"control":  string([]byte{0x01}),
-		"empty":    "",
-		"unicode":  "日本語",
+		"newline": "a\nb",
+		"tab":     "a\tb",
+		"quote":   `a"b`,
+		"slash":   `a\b`,
+		"control": string([]byte{0x01}),
+		"empty":   "",
+		"unicode": "日本語",
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {

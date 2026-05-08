@@ -1,0 +1,41 @@
+replicaCount: 3
+image:
+  repository: nginx
+  tag: 1.20-alpine
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+ingress:
+  enabled: false
+  className: nginx
+  hosts:
+  - host: chart-example.local
+    paths:
+    - path: /
+      pathType: ImplementationSpecific
+  tls: []
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+env:
+- name: LOG_LEVEL
+  value: info
+- name: FEATURE_X_ENABLED
+  value: "yes"

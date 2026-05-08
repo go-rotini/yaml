@@ -25,7 +25,33 @@
 // reports every conformance deviation, with optional cosmetic checks via
 // [WithKYAMLLintCosmetic].
 //
-// [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
+// # KYAML rule reference
+//
+// Validation errors from [ValidateKYAML] and [UnmarshalKYAML] carry rule IDs
+// from the KYAML specification:
+//
+//   - R3.1   Document must begin with the "---" header
+//   - R4.1   Mappings must be in flow style ({...})
+//   - R4.4   Mapping keys must be string scalars
+//   - R5     Type-ambiguous keys must be double-quoted
+//   - R6.1   Booleans render as lowercase true/false
+//   - R6.3   Null renders as lowercase "null"
+//   - R6.4   String values must be double-quoted
+//   - R7.1   Sequences must be in flow style ([...])
+//   - R12.1  Anchors and aliases not allowed (& *)
+//   - R12.2  Explicit tags not allowed (!! !)
+//   - R12.3  Merge keys not allowed (<<)
+//   - R12.4  Block-style scalars not allowed (| >)
+//   - R12.5  Block-style mappings not allowed
+//   - R12.6  Block-style sequences not allowed
+//   - R12.7  Plain (unquoted) string values not allowed
+//   - R12.8  Single-quoted scalars not allowed
+//   - R12.9  YAML directives not allowed (%YAML %TAG)
+//   - R12.11 Hex/octal/binary integer literals not allowed
+//   - R12.12 YAML 1.1 boolean aliases must be quoted (yes no on off)
+//   - R12.13 NaN and infinity literals not allowed (.nan .inf)
+//
+// See [KEP-5295] for the full specification.
 //
 // # Struct Tags
 //
@@ -61,4 +87,6 @@
 //	if errors.Is(err, yaml.ErrDuplicateKey) { ... }
 //
 // Use [FormatError] to produce a human-readable error with a source pointer.
+//
+// [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
 package yaml

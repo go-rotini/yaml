@@ -63,7 +63,7 @@ func UnmarshalKYAMLTo[T any](data []byte, opts ...DecodeOption) (T, error) {
 func DecodeKYAMLFile(path string, v any, opts ...DecodeOption) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("yaml: read file %q: %w", path, err)
 	}
 	return UnmarshalKYAMLWithOptions(data, v, opts...)
 }
