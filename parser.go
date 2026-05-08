@@ -43,8 +43,7 @@ func (p *parser) parse() ([]*node, error) {
 
 	for p.peek().kind != tokenStreamEnd {
 		prevPos := p.pos
-		// Collect top-of-document comments into pendingHead so they
-		// attach to the first node of the document (R11.4).
+		// R11.4: top-of-document comments attach to the first node.
 		p.collectIntoPending()
 		if p.peek().kind == tokenStreamEnd {
 			break
@@ -450,8 +449,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 		p.advance()
 	}
 
-	// Collect any leading comments into pending so the first entry's key
-	// can adopt them as its head comment (R11.4).
+	// R11.4: leading comments attach as a head comment to the first key.
 	p.collectIntoPending()
 	if p.peek().kind == tokenAnchor || p.peek().kind == tokenTag {
 		saved := p.pos
@@ -484,8 +482,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 	}
 
 	for {
-		// Collect any comment lines before the next entry into pendingHead
-		// so the next key node can adopt them as head comments (R11.4).
+		// R11.4: comments before the next entry attach to its key.
 		p.collectIntoPending()
 		t := p.peek()
 
@@ -707,8 +704,8 @@ func (p *parser) parseFlowMapping() (*node, error) {
 	}
 
 	p.advance()
-	// Comments before the first entry attach as head comment to the first
-	// key (R11.4 — preserved for KYAML re-emission via Format).
+	// R11.4: comments before the first entry attach as a head comment to
+	// the first key, so [Format] can re-emit them.
 	p.collectIntoPending()
 
 	for p.peek().kind != tokenFlowMappingEnd {
@@ -774,9 +771,8 @@ func (p *parser) parseFlowMapping() (*node, error) {
 		p.collectIntoPending()
 		if p.peek().kind == tokenFlowEntry {
 			p.advance()
-			// After the entry separator, an inline comment may appear on
-			// the same source line — also a line comment for the value
-			// just emitted.
+			// An inline comment on the same source line as the entry
+			// separator also belongs to the value just emitted.
 			if p.pos > 0 && p.peek().kind == tokenComment {
 				prev := p.tokens[p.pos-2]
 				if p.peek().pos.Line == prev.pos.Line && len(mapping.children) >= 2 {

@@ -1,5 +1,5 @@
-// Package yaml implements YAML 1.2.2 encoding and decoding, plus KYAML — a
-// strict YAML subset defined by Kubernetes [KEP-5295].
+// Package yaml implements YAML 1.2.2 encoding and decoding, plus support for
+// KYAML, the strict YAML subset defined by Kubernetes [KEP-5295].
 //
 // The API follows the conventions of [encoding/json]: use [Marshal] and
 // [Unmarshal] for one-shot conversions, [Encoder] and [Decoder] for streaming,
@@ -11,7 +11,7 @@
 //
 // # KYAML mode
 //
-// KYAML is a strict YAML subset — every KYAML document is valid YAML, but
+// KYAML is a strict subset of YAML: every KYAML document is valid YAML, but
 // only a small fraction of YAML is valid KYAML. KYAML output uses flow style
 // exclusively, double-quotes every string value, quotes type-ambiguous keys
 // (the "Norway problem"), and emits a leading "---" document header. Use

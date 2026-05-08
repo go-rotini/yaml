@@ -127,7 +127,7 @@ func WithLineWidth(n int) EncodeOption {
 //   - prefers the json struct tag and json.Marshaler over their yaml equivalents
 //   - never emits anchors, aliases, tags, merge keys, or block-style scalars
 //
-// Output is always valid YAML 1.2.2 — KYAML is a subset, never a superset.
+// KYAML is a subset of YAML 1.2.2, so output is always valid YAML.
 //
 // [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
 func WithKYAML() EncodeOption {

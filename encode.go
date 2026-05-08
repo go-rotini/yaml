@@ -67,9 +67,9 @@ func applyComments(buf []byte, comments map[string][]Comment) []byte {
 	return buf
 }
 
-// matchKeyLine reports whether a line (after stripping leading spaces)
-// begins with `key:` or `"key":` — the latter form is needed because KYAML
-// quotes type-ambiguous, numeric, or otherwise-special keys.
+// matchKeyLine reports whether trimmed (with leading spaces removed) begins
+// with `key:` or `"key":`. The quoted form is required because KYAML quotes
+// type-ambiguous, numeric, and otherwise-special keys.
 func matchKeyLine(trimmed, key string) bool {
 	if strings.HasPrefix(trimmed, key+":") {
 		return true

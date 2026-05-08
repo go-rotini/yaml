@@ -124,7 +124,7 @@ func (e *ValidationError) Is(target error) bool {
 }
 
 // DefaultError is returned when a default value from a struct tag cannot be
-// applied — for example, when the default string cannot be parsed into the
+// applied: for example, when the default string cannot be parsed into the
 // target type, or when default is combined with required.
 type DefaultError struct {
 	Field   string
@@ -205,9 +205,8 @@ type LintIssue struct {
 }
 
 // String renders the issue with its source position and rule ID. LintIssue
-// is a finding/deviation report rather than an error type — it carries a
-// Severity field (Error or Warning), so the surrounding type intentionally
-// implements Stringer instead of error.
+// is a finding rather than an error: it carries a Severity field, so the
+// type implements [fmt.Stringer] instead of error.
 func (i LintIssue) String() string {
 	if i.Pos.Line > 0 {
 		return fmt.Sprintf("line %d, column %d: %s (%s)", i.Pos.Line, i.Pos.Column, i.Message, i.Rule)
@@ -253,15 +252,14 @@ var (
 	errUnsupportedDefault     = errors.New("default tag is not supported for type")
 )
 
-// FormatError returns a human-readable string for errors carrying a source
-// position — [SyntaxError], [ValidationError], or [KYAMLError]. Output
-// includes the offending source line and a column pointer. For error types
-// without position info, FormatError returns err.Error(). Set color to true
-// to include ANSI color escape sequences.
+// FormatError returns a human-readable rendering of err, including the
+// offending source line and a column pointer when err carries a position
+// ([SyntaxError], [ValidationError], or [KYAMLError]). For other errors,
+// FormatError returns err.Error(). Pass color=true to include ANSI color
+// escape sequences.
 func FormatError(data []byte, err error, color ...bool) string {
 	useColor := len(color) > 0 && color[0]
 
-	// KYAMLError may carry many violations; render each.
 	var kyamlErr *KYAMLError
 	if errors.As(err, &kyamlErr) && len(kyamlErr.Errors) > 0 {
 		lines := bytes.Split(data, []byte("\n"))

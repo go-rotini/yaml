@@ -45,10 +45,9 @@ func MarshalKYAMLWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
 	return MarshalWithOptions(v, append(opts, WithKYAML())...)
 }
 
-// EncodeKYAMLFile encodes v as KYAML and writes the result to path.
-// The destination file is created with mode 0600 if it does not exist —
-// configuration files often hold secrets, so we default to owner-only.
-// Callers needing wider permissions can chmod after writing.
+// EncodeKYAMLFile encodes v as KYAML and writes the result to path. New
+// files are created with mode 0600 because configuration files often hold
+// secrets; callers needing wider permissions can chmod after writing.
 func EncodeKYAMLFile(path string, v any, opts ...EncodeOption) error {
 	data, err := MarshalKYAMLWithOptions(v, opts...)
 	if err != nil {
@@ -94,10 +93,9 @@ func (enc *Encoder) EncodeContext(ctx context.Context, v any) error {
 	if err != nil {
 		return err
 	}
-	// Inter-document separator: under default block-style YAML, write "---\n"
-	// between docs. Under KYAML mode, each document already begins with its
-	// own "---\n" header (R3.1), so writing another separator would produce
-	// a duplicate "---\n---\n". Suppress the inter-doc separator in that case.
+	// Block-style YAML separates documents with "---\n". KYAML already
+	// begins each document with its own "---\n" header (R3.1), so adding
+	// the separator again would produce a duplicate marker.
 	if enc.n > 0 && !enc.opts.kyaml {
 		if _, err := enc.w.Write([]byte("---\n")); err != nil {
 			return err

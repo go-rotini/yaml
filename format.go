@@ -59,10 +59,8 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 		return nil
 	}
 
-	// Unwrap pointers and interfaces, with cycle guard for pointer types.
-	// We collect every pointer we descended through and clean them all up
-	// in a single deferred call at function return — avoiding a defer per
-	// loop iteration.
+	// One deferred cleanup for every pointer descended through, instead of
+	// one defer per loop iteration.
 	var tracked []uintptr
 	defer func() {
 		for _, p := range tracked {
@@ -95,23 +93,20 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 		break
 	}
 
-	// Per R13.11: RawValue carries arbitrary YAML bytes that may contain
-	// non-KYAML constructs (anchors, tags, block style). Re-parse through
-	// the YAML decoder and re-emit as canonical KYAML rather than letting
-	// the bytes flow through verbatim. Must run before dispatchMarshaler
-	// since RawValue implements BytesMarshaler.
+	// R13.11: RawValue may carry non-KYAML constructs (anchors, tags, block
+	// style). Re-parse and re-emit so they don't flow through verbatim.
+	// Must run before dispatchMarshaler since RawValue implements BytesMarshaler.
 	if v.CanInterface() {
 		if rv, ok := v.Interface().(RawValue); ok {
 			return e.emitRawValue(rv, indent)
 		}
 	}
 
-	// Per R13.2, json.Marshaler takes precedence under KYAML mode.
 	if handled, err := e.dispatchMarshaler(v, indent); handled {
 		return err
 	}
 
-	// Special types (matches KYAML's JSON-first semantics per R13).
+	// R13: KYAML uses JSON-first semantics for these types.
 	if v.CanInterface() {
 		switch t := v.Interface().(type) {
 		case time.Time:
@@ -123,7 +118,6 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 			return nil
 		case time.Duration:
 			if e.opts.durationAsString {
-				// Per R13.7: emit as a quoted human-readable string.
 				e.emitString(t.String(), indent)
 				return nil
 			}
@@ -186,8 +180,6 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 			e.buf = append(e.buf, "null"...)
 			return nil
 		}
-		// MapSlice is a slice of MapItem but renders as a mapping per its
-		// ordered-map semantics (matching the rest of the package).
 		if v.Type() == reflect.TypeFor[MapSlice]() {
 			ms, _ := v.Interface().(MapSlice)
 			return e.emitMapSlice(ms, indent)
@@ -222,11 +214,11 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 	return fmt.Errorf("yaml: cannot KYAML-encode value of type %s: %w", v.Type(), ErrUnsupported)
 }
 
-// dispatchMarshaler checks for the KYAML-mode marshaler priority chain
-// (json.Marshaler first per R13.2, then yaml marshalers, then TextMarshaler,
-// then custom marshalers). Returns handled=true if a marshaler was invoked.
+// dispatchMarshaler invokes the highest-priority marshaler registered for v.
+// Priority under KYAML mode (R13.2): custom marshalers, json.Marshaler,
+// MarshalerContext, Marshaler, BytesMarshaler, encoding.TextMarshaler.
+// Returns handled=true if any marshaler ran.
 func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled bool, err error) {
-	// Custom marshalers (highest priority — explicit user override).
 	if e.opts.customMarshalers != nil && v.CanInterface() {
 		if fn, ok := e.opts.customMarshalers[v.Type()]; ok {
 			out := reflect.ValueOf(fn).Call([]reflect.Value{v})
@@ -235,13 +227,12 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 				return true, e2
 			}
 			data, _ := out[0].Interface().([]byte)
-			// Re-route through KYAML: the custom marshaler may have produced YAML/JSON;
-			// re-parse to any and re-emit.
+			// The custom marshaler may have produced YAML or JSON; re-parse
+			// and re-emit to keep the output strictly KYAML.
 			return true, e.emitRawJSONOrText(data, indent)
 		}
 	}
 
-	// json.Marshaler — primary under KYAML (R13.2).
 	if v.CanInterface() {
 		if m, ok := v.Interface().(json.Marshaler); ok {
 			data, mErr := m.MarshalJSON()
@@ -261,7 +252,6 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 		}
 	}
 
-	// yaml marshalers — secondary under KYAML.
 	if v.CanInterface() {
 		iface := v.Interface()
 		if m, ok := iface.(MarshalerContext); ok {
@@ -297,10 +287,9 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 	return false, nil
 }
 
-// emitRawValue parses RawValue's stored YAML bytes and re-emits as KYAML.
-// Per R13.11, raw bytes are not passed through verbatim under KYAML mode —
-// they could otherwise leak non-KYAML constructs (anchors, tags, block
-// style) into strict-KYAML output.
+// emitRawValue parses RawValue's stored bytes and re-emits as canonical KYAML
+// per R13.11. Pass-through would risk leaking anchors, tags, or block style
+// into the output.
 func (e *kyamlEmitter) emitRawValue(rv RawValue, indent int) error {
 	if len(rv) == 0 {
 		e.buf = append(e.buf, "null"...)
@@ -337,7 +326,8 @@ func (e *kyamlEmitter) emitRawJSONOrText(data []byte, indent int) error {
 	return nil
 }
 
-// emitFloat emits a float per R6.2. NaN and ±Inf are rejected with ErrUnsupported.
+// emitFloat emits a float per R6.2. NaN and infinities are rejected with
+// ErrUnsupported.
 func (e *kyamlEmitter) emitFloat(f float64, bits int) error {
 	if math.IsNaN(f) {
 		return fmt.Errorf("yaml: NaN is not representable in KYAML: %w", ErrUnsupported)
@@ -345,8 +335,7 @@ func (e *kyamlEmitter) emitFloat(f float64, bits int) error {
 	if math.IsInf(f, 0) {
 		return fmt.Errorf("yaml: Inf is not representable in KYAML: %w", ErrUnsupported)
 	}
-	// Whole-valued floats render as integers when WithAutoInt or KYAML-default
-	// JSON-style (per R6.2c).
+	// R6.2c: whole-valued floats below 2^53 render as integers.
 	if f == math.Trunc(f) && !math.IsInf(f, 0) && math.Abs(f) < 1e16 {
 		e.buf = strconv.AppendInt(e.buf, int64(f), 10)
 		return nil
@@ -360,18 +349,14 @@ func (e *kyamlEmitter) emitFloat(f float64, bits int) error {
 }
 
 // emitSequence renders a sequence in flow form with bracket cuddling per
-// R7 + R8. Cuddling only applies to sequences (R8.2 "paired brackets" — a
-// sequence's brackets pair with the brackets of a compound element).
+// R7 and R8. R8.2's "paired brackets" rule applies only to sequences: for
+// [{...}], the sequence's `[` cuddles to the element's `{`, and `]` cuddles
+// to `}`. The cuddled element's logical indent matches the sequence's, so
+// its closing bracket lines up with `]`.
 //
-// For [{...}], the open `[` cuddles to the inner `{` and the close `]`
-// cuddles to the inner `}`. The cuddled compound element's logical indent is
-// the sequence's own indent (so its close bracket lines up with what would
-// otherwise be the sequence's close position).
-//
-// Per R8.5, cuddling is suppressed when comments are present (set via
-// [WithComment]) — comment placement uses a post-pass string replacement
-// that can't reliably target cuddled boundaries, so the safest behavior is
-// to keep brackets on their own lines whenever any comment is registered.
+// R8.5 suppresses cuddling whenever any comment is registered via
+// [WithComment]: the post-pass that injects comments matches by line, so
+// keeping brackets on their own lines is required for reliable placement.
 func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 	n := v.Len()
 	if n == 0 {
@@ -389,13 +374,11 @@ func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 		elemForCuddle := unwrapForCuddle(elem)
 		startsBracket := !suppressCuddle && emitsAsCompound(elemForCuddle)
 
-		// Pre-element placement.
 		if i == 0 {
 			if !startsBracket {
 				e.buf = append(e.buf, '\n')
 				e.writeIndent(inner)
 			}
-			// else: cuddled open — emit element directly after `[`.
 		} else {
 			// Previous iteration appended ','.
 			if startsBracket && lastVisibleAfterCommaIsCloseBracket(e.buf) {
@@ -406,11 +389,8 @@ func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 			}
 		}
 
-		// Compute the indent passed to the element. For cuddled compound
-		// elements, the element's "logical indent" equals the sequence's
-		// own indent (so its close bracket lines up with `]`'s position).
-		// For non-cuddled elements (whether scalar or compound), the
-		// element sits at `inner`.
+		// Cuddled compound elements use the sequence's own indent so their
+		// close bracket aligns with `]`.
 		elemIndent := inner
 		if startsBracket {
 			elemIndent = indent
@@ -425,9 +405,8 @@ func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 		}
 	}
 
-	// Close: cuddle if last element ended with a closing bracket
-	// (and we're cuddling — i.e., the last element is compound). Suppress
-	// close cuddling per R8.5 when comments are present.
+	// Cuddle the close bracket only if the last element ended with one,
+	// and not when R8.5 has suppressed cuddling for comments.
 	if !suppressCuddle && lastIsCloseBracket(e.buf) {
 		e.buf = append(e.buf, ']')
 	} else {
@@ -438,27 +417,30 @@ func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 	return nil
 }
 
-// mapEntry holds a sortable, pre-rendered key plus the value for emitMap and
+// mapEntry is a sortable key/value pair used by emitMap, emitMapSlice, and
 // emitStruct.
 type mapEntry struct {
-	rawKey reflect.Value // for cuddle/comment lookups; may be invalid for struct fields
-	keyStr string        // pre-rendered key text (with quoting decision applied)
+	// rawKey is invalid for struct fields; populated otherwise for use by
+	// cuddle and comment lookups.
+	rawKey reflect.Value
+	// keyStr is the rendered key text with any required quoting applied.
+	keyStr string
 	value  reflect.Value
-	// nilStringFlag: true if value was already determined to be null by the caller
-	// and value should not be emitted normally.
+	// emitNullDirect skips the normal value path and writes "null". Used
+	// when the caller has already resolved the value to nil.
 	emitNullDirect bool
 }
 
-// emitMap renders a Go map in KYAML flow form. Native maps are sorted
-// lexicographically (R4.5).
+// emitMap renders a Go map in KYAML flow form. Keys are sorted
+// lexicographically per R4.5.
 func (e *kyamlEmitter) emitMap(v reflect.Value, indent int) error {
 	if v.Len() == 0 {
 		e.buf = append(e.buf, "{}"...)
 		return nil
 	}
 
+	// R4.4: only string keys are allowed.
 	keys := v.MapKeys()
-	// Convert keys to string and sort. R4.4: only string keys allowed under KYAML.
 	entries := make([]mapEntry, 0, len(keys))
 	for _, k := range keys {
 		ks, err := mapKeyToString(k)
@@ -476,7 +458,7 @@ func (e *kyamlEmitter) emitMap(v reflect.Value, indent int) error {
 	return e.emitMappingEntries(entries, indent)
 }
 
-// emitMapSlice renders an ordered MapSlice. Order is preserved (insertion order).
+// emitMapSlice renders an ordered MapSlice in insertion order.
 func (e *kyamlEmitter) emitMapSlice(ms MapSlice, indent int) error {
 	if len(ms) == 0 {
 		e.buf = append(e.buf, "{}"...)
@@ -497,8 +479,8 @@ func (e *kyamlEmitter) emitMapSlice(ms MapSlice, indent int) error {
 	return e.emitMappingEntries(entries, indent)
 }
 
-// emitStruct renders a struct in KYAML form using KYAML field resolution
-// (json tag primary per R13.4).
+// emitStruct renders a struct in KYAML form. Field resolution follows R13.4:
+// json tag primary, yaml tag secondary.
 func (e *kyamlEmitter) emitStruct(v reflect.Value, indent int) error {
 	sf := getKYAMLStructFields(v.Type())
 	if len(sf.conflicts) > 0 {
@@ -506,7 +488,6 @@ func (e *kyamlEmitter) emitStruct(v reflect.Value, indent int) error {
 			v.Type(), strings.Join(sf.conflicts, ", "), errConflictingFields)
 	}
 
-	// Collect non-omitted fields.
 	entries := make([]mapEntry, 0, len(sf.fields))
 	for _, fi := range sf.fields {
 		field := fieldByIndex(v, fi.index)
@@ -516,7 +497,6 @@ func (e *kyamlEmitter) emitStruct(v reflect.Value, indent int) error {
 		if fi.omitEmpty && isEmpty(field) {
 			continue
 		}
-		// Inline-map handling: emit each key from the map as a top-level entry.
 		if fi.inline && field.Kind() == reflect.Map {
 			mapKeys := field.MapKeys()
 			subEntries := make([]mapEntry, 0, len(mapKeys))
@@ -550,11 +530,9 @@ func (e *kyamlEmitter) emitStruct(v reflect.Value, indent int) error {
 }
 
 // emitMappingEntries is the shared rendering routine for maps, MapSlices, and
-// structs. Mappings never cuddle their close bracket — KEP R8.2's "paired
-// brackets" rule applies only to sequences with compound elements
-// (`[{...}]` / `[[...]]`). A mapping's close `}` always sits on its own
-// line at the mapping's indent, with a trailing comma after the final entry
-// per R8.1.
+// structs. R8.2's "paired brackets" rule applies only to sequences, so a
+// mapping's close `}` always sits on its own line at the mapping's indent,
+// with a trailing comma after the final entry per R8.1.
 func (e *kyamlEmitter) emitMappingEntries(entries []mapEntry, indent int) error {
 	n := len(entries)
 	if n == 0 {
@@ -565,15 +543,13 @@ func (e *kyamlEmitter) emitMappingEntries(entries []mapEntry, indent int) error 
 	e.buf = append(e.buf, '{')
 
 	for _, ent := range entries {
-		// Each field on a line of its own (R4.1).
+		// R4.1: one field per line.
 		e.buf = append(e.buf, '\n')
 		e.writeIndent(inner)
 
-		// Key
 		e.buf = append(e.buf, e.formatKey(ent.keyStr)...)
 		e.buf = append(e.buf, ':', ' ')
 
-		// Value
 		switch {
 		case ent.emitNullDirect, !ent.value.IsValid():
 			e.buf = append(e.buf, "null"...)
@@ -583,11 +559,10 @@ func (e *kyamlEmitter) emitMappingEntries(entries []mapEntry, indent int) error 
 			}
 		}
 
-		// Trailing comma after every entry (R8.1, no cuddling for mappings).
+		// R8.1: trailing comma after every entry.
 		e.buf = append(e.buf, ',')
 	}
 
-	// Close: always on its own line at the mapping's indent.
 	e.buf = append(e.buf, '\n')
 	e.writeIndent(indent)
 	e.buf = append(e.buf, '}')
@@ -605,18 +580,14 @@ func (e *kyamlEmitter) formatKey(key string) string {
 	return key
 }
 
-// emitString renders a string value per R6.4 (always double-quoted). For
-// multi-line strings whose fully-escaped single-line form exceeds the
-// configured line width, the value is rendered using KYAML's flow-folded
-// multi-line form (R10) — readable across the source line for log/config
-// content. Otherwise a single-line double-quoted scalar with embedded \n
-// escapes is used.
+// emitString renders a string per R6.4 (always double-quoted). Long
+// multi-line strings use the R10 flow-folded form; everything else uses a
+// single-line double-quoted scalar with embedded \n escapes.
 //
-// The flow-fold trigger uses the FULLY-ESCAPED length (post escapeKYAMLLine)
-// which is invariant under UTF-8 normalization: invalid UTF-8 bytes are
-// replaced by literal U+FFFD UTF-8 (3 bytes) on first encode, and the
-// resulting valid U+FFFD round-trips to itself on subsequent passes.
-// Idempotence verified by FuzzKYAMLRoundTrip.
+// shouldUseFlowFold compares the fully-escaped length (post escapeKYAMLLine)
+// rather than the raw input length. The escaped length is invariant under
+// UTF-8 normalization, so the trigger does not flip across encode/decode
+// cycles, even when invalid input bytes have been replaced by U+FFFD.
 func (e *kyamlEmitter) emitString(s string, indent int) {
 	if shouldUseFlowFold(s, e.opts.lineWidth) {
 		e.buf = append(e.buf, kyamlFlowFold(s, indent+e.opts.indent)...)
@@ -625,22 +596,14 @@ func (e *kyamlEmitter) emitString(s string, indent int) {
 	e.buf = append(e.buf, quoteKYAMLString(s)...)
 }
 
-// shouldUseFlowFold reports whether s should be emitted using KYAML's
-// flow-folded multi-line form (R10) rather than a single-line double-quoted
-// scalar with embedded \n escapes.
-//
-// Triggers (all must hold):
-//  1. The string contains at least 2 literal newlines (so the threshold
-//     can't flip on round-trip).
-//  2. Its fully-escaped single-line form (post escapeKYAMLLine) exceeds
-//     lineWidth. Using the escaped length rather than the raw input length
-//     keeps the trigger stable across encode → decode → encode cycles
-//     (UTF-8 normalization preserves escape lengths).
-//  3. No continuation line (any line after the first) begins with
-//     whitespace. YAML's `\<newline>` continuation rule strips leading
-//     whitespace on the next source line — but if the first byte of the
-//     line is part of the actual string data, we'd lose it on round-trip.
-//     Strings violating this constraint render as single-line.
+// shouldUseFlowFold reports whether s should be emitted as R10 flow-folded
+// rather than a single-line scalar. All three conditions must hold:
+//  1. s contains at least two literal newlines, so the trigger can't flip
+//     on round-trip.
+//  2. The fully-escaped single-line form exceeds lineWidth.
+//  3. No continuation line begins with whitespace. YAML strips leading
+//     whitespace from the line after a `\<newline>` continuation, so a
+//     string with such a line cannot be folded losslessly.
 func shouldUseFlowFold(s string, lineWidth int) bool {
 	if lineWidth <= 0 {
 		return false
@@ -648,36 +611,31 @@ func shouldUseFlowFold(s string, lineWidth int) bool {
 	if strings.Count(s, "\n") < 2 {
 		return false
 	}
-	// Continuation-line leading-whitespace check.
 	lines := strings.Split(s, "\n")
 	for i := 1; i < len(lines); i++ {
 		line := lines[i]
 		if line == "" {
-			continue // empty continuation line is safe
+			continue
 		}
 		if line[0] == ' ' || line[0] == '\t' {
 			return false
 		}
 	}
-	escaped := escapeKYAMLLine(s)
-	// +2 for the surrounding double quotes that quoteKYAMLString would add.
-	return len(escaped)+2 > lineWidth
+	// +2 accounts for the surrounding double quotes added by quoteKYAMLString.
+	return len(escapeKYAMLLine(s))+2 > lineWidth
 }
 
-// kyamlFlowFold renders s using the KEP-5295 R10 flow-folded form: a
-// multi-line double-quoted string with `\n` escape sequences for actual
-// newlines and trailing-backslash continuations to wrap each source line.
-// contIndent is the column at which continuation lines start.
+// kyamlFlowFold renders s using the R10 flow-folded form: a multi-line
+// double-quoted string where each source line ends with `\n\` so the parser
+// can fold away the trailing newline and leading whitespace, leaving only
+// the literal `\n` escape's newline in the decoded value. contIndent is the
+// column at which continuation lines start.
 //
 // Example output for "first\nsecond\nthird":
 //
 //	"first\n\
 //	  second\n\
 //	  third"
-//
-// The trailing `\<newline><indent>` between lines is YAML's flow-folding
-// indicator: the parser folds the newline-and-leading-whitespace away,
-// leaving only the literal `\n` escape's newline in the decoded value.
 func kyamlFlowFold(s string, contIndent int) string {
 	lines := strings.Split(s, "\n")
 	var b strings.Builder
@@ -702,7 +660,7 @@ func (e *kyamlEmitter) writeIndent(n int) {
 	}
 }
 
-// quoteKYAMLString produces a double-quoted KYAML string per R6.4 + R6.5.
+// quoteKYAMLString returns s wrapped in double quotes with R6.5 escapes applied.
 func quoteKYAMLString(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) + 2)
@@ -712,21 +670,19 @@ func quoteKYAMLString(s string) string {
 	return b.String()
 }
 
-// escapeKYAMLLine applies the R6.5 escape table to s. The result does not
-// include the surrounding quotes.
+// escapeKYAMLLine applies the R6.5 escape table to s and returns the body
+// without surrounding quotes.
 func escapeKYAMLLine(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		if r == utf8.RuneError && size == 1 {
-			// Invalid UTF-8 byte: replace with the literal UTF-8 bytes for
-			// U+FFFD (matches encoding/json's behavior). YAML's \xHH escape
-			// represents a Unicode code point, not a raw byte, so invalid
-			// bytes cannot round-trip exactly. Emitting U+FFFD as its
-			// literal UTF-8 (3 bytes) keeps Format idempotent on canonical
-			// KYAML — subsequent passes see valid UTF-8 and emit it
-			// literally.
+			// Invalid UTF-8 cannot round-trip through YAML's \xHH escape
+			// (which encodes a code point, not a raw byte). Replacing with
+			// the literal U+FFFD UTF-8 bytes matches encoding/json and
+			// keeps Format idempotent: subsequent passes see valid UTF-8
+			// and emit it unchanged.
 			b.WriteString("�")
 			i++
 			continue
@@ -772,9 +728,8 @@ func escapeKYAMLLine(s string) string {
 	return b.String()
 }
 
-// typeAmbiguousKeys is the set of keys that MUST be double-quoted under KYAML
-// even though they would otherwise be valid plain scalars (R5.2). Includes
-// every YAML 1.1 boolean alias and null literal.
+// typeAmbiguousKeys lists scalars that R5.2 requires be double-quoted
+// because YAML 1.1 would otherwise parse them as a boolean or null.
 var typeAmbiguousKeys = map[string]struct{}{
 	"y": {}, "Y": {}, "yes": {}, "Yes": {}, "YES": {},
 	"n": {}, "N": {}, "no": {}, "No": {}, "NO": {},
@@ -801,16 +756,13 @@ func needsKeyQuoting(key string) bool {
 	if _, err := strconv.ParseFloat(key, 64); err == nil {
 		return true
 	}
-	// Validate against the KYAML key character class. Unquoted keys must
-	// match [A-Za-z_][A-Za-z0-9_./-]* — no flow-context indicators
-	// (brackets, braces, comma, colon, etc.) which would corrupt parsing.
 	return !validKYAMLKey(key)
 }
 
-// validKYAMLKey reports whether key is a "safe" identifier that can be
-// emitted unquoted inside a KYAML flow mapping. The character class is
-// deliberately conservative — anything outside [A-Za-z0-9_./-] (with a
-// letter or underscore as the first byte) gets quoted.
+// validKYAMLKey reports whether key may be emitted unquoted inside a KYAML
+// flow mapping. The character class [A-Za-z_][A-Za-z0-9_./-]* is conservative
+// by design: any flow-context indicator (brackets, braces, comma, colon,
+// etc.) forces quoting to avoid parser ambiguity.
 func validKYAMLKey(key string) bool {
 	if key == "" {
 		return false
@@ -841,8 +793,8 @@ func isKYAMLKeyChar(c byte) bool {
 	return false
 }
 
-// mapKeyToString converts a reflect.Value map key to a string. Returns an
-// error if the key is not a string-typed value (R4.4).
+// mapKeyToString converts a reflect.Value map key to a string, or returns
+// an error if the key is not a string or [encoding.TextMarshaler] (R4.4).
 func mapKeyToString(k reflect.Value) (string, error) {
 	for k.Kind() == reflect.Pointer || k.Kind() == reflect.Interface {
 		if k.IsNil() {
@@ -902,7 +854,7 @@ func emitsAsCompound(v reflect.Value) bool {
 	}
 	switch v.Kind() {
 	case reflect.Slice, reflect.Array:
-		// []byte → string, not compound.
+		// []byte renders as a base64 string, not a sequence.
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			return false
 		}
@@ -957,10 +909,10 @@ func lastVisibleAfterCommaIsCloseBracket(buf []byte) bool {
 	return false
 }
 
-// getKYAMLStructFields returns a struct-field cache specialized for KYAML mode:
-// the json tag is primary (per R13.4), the yaml tag is secondary, and
-// lowercased fallback names are NOT used (matches encoding/json behavior:
-// the exact Go field name is used when no tag is present).
+// kyamlStructFieldCache memoizes the per-type KYAML struct-field layout.
+// Field resolution under KYAML follows R13.4: json tag primary, yaml tag
+// secondary, and the exact Go field name (no lowercasing) when neither tag
+// is present.
 var kyamlStructFieldCache sync.Map
 
 func getKYAMLStructFields(t reflect.Type) *structFields {
@@ -983,13 +935,12 @@ func collectKYAMLFields(t reflect.Type, index []int, sf *structFields) {
 			continue
 		}
 
-		// json tag wins under KYAML; yaml tag provides additional options
-		// (omitzero, inline, required, default=).
+		// json tag wins for the name; yaml tag may still contribute
+		// omitempty, inline, required, and default=.
 		jsonTag := f.Tag.Get("json")
 		yamlTag := f.Tag.Get("yaml")
 
 		var fi fieldInfo
-		// Parse both, then merge with json winning for the name.
 		if jsonTag != "" {
 			fi = parseTag(jsonTag)
 		}
@@ -998,7 +949,6 @@ func collectKYAMLFields(t reflect.Type, index []int, sf *structFields) {
 			if jsonTag == "" {
 				fi = y
 			} else {
-				// Merge yaml-tag-only options.
 				if y.omitEmpty {
 					fi.omitEmpty = true
 				}
@@ -1054,8 +1004,8 @@ func collectKYAMLFields(t reflect.Type, index []int, sf *structFields) {
 		}
 
 		if fi.name == "" {
-			// KYAML uses the exact Go field name when no tag is present
-			// (matches encoding/json, NOT the default yaml-mode lowercasing).
+			// Match encoding/json: untagged fields keep their exact Go
+			// name rather than the lowercased form yaml mode uses.
 			fi.name = f.Name
 		}
 
@@ -1113,8 +1063,8 @@ func Valid(data []byte) bool {
 	return err == nil
 }
 
-// ValidKYAML reports whether data is a valid KYAML document — strict KYAML, per
-// the rules of [KEP-5295]. ValidKYAML is equivalent to [ValidateKYAML](data) == nil.
+// ValidKYAML reports whether data conforms to strict KYAML as defined by
+// [KEP-5295]. It is equivalent to [ValidateKYAML](data) == nil.
 //
 // [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
 func ValidKYAML(data []byte) bool {
@@ -1423,18 +1373,16 @@ func isHexOctalBinaryInt(s string) bool {
 	return strings.HasPrefix(low, "0x") || strings.HasPrefix(low, "0o") || strings.HasPrefix(low, "0b")
 }
 
-// Format parses data as YAML (any subset, including non-KYAML constructs)
-// and re-emits it as canonical KYAML. Anchors and aliases are reified
-// (expanded inline by the decoder); merge keys are resolved into flat key
-// lists; explicit tags are stripped. Comments are preserved best-effort:
-// the AST is pre-walked to extract head/inline/foot comments by path
-// (R11.4) and re-inserted into the KYAML output via the existing comment
-// post-pass.
+// Format parses data as YAML, including non-KYAML constructs, and re-emits
+// it as canonical KYAML. Anchors and aliases are expanded inline, merge
+// keys are flattened, and explicit tags are stripped. Comments are
+// preserved best-effort per R11.4: head, line, and foot comments are
+// extracted by path and re-inserted via the comment post-pass.
 //
-// Format is idempotent on its output: Format(Format(x)) produces the same
-// bytes as Format(x) for any valid YAML x.
+// Format is idempotent on its output: Format(Format(x)) equals Format(x)
+// for any valid YAML x.
 func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
-	// Parse to AST first to extract comments before they're lost in decode.
+	// Parse to an AST first; the decoder discards comments.
 	scanData, err := detectAndConvertEncoding(data)
 	if err != nil {
 		return nil, err
@@ -1449,10 +1397,9 @@ func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
 		return nil, err
 	}
 
-	// Only extract comments from the first document — Format → Unmarshal
-	// only decodes docs[0] (multi-doc streams should use Encoder/Decoder),
-	// so picking up comments from later documents would feed the encoder
-	// a comments map that doesn't match the data being encoded, breaking
+	// Only docs[0] is encoded below (multi-doc streams should use
+	// Encoder/Decoder), so extracting comments from later documents would
+	// feed the encoder a map that does not match the data and break
 	// idempotence.
 	var firstDoc []*node
 	if len(docs) > 0 {
@@ -1460,7 +1407,6 @@ func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
 	}
 	comments := collectKYAMLComments(firstDoc)
 
-	// Decode to a generic any value (anchors and merge keys resolved here).
 	var v any
 	if err := UnmarshalWithOptions(data, &v, WithOrderedMap()); err != nil {
 		return nil, err
@@ -1473,17 +1419,15 @@ func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
 	return MarshalWithOptions(v, encOpts...)
 }
 
-// collectKYAMLComments walks the parsed AST and extracts every node's
-// head/inline/foot comments into a path-keyed map suitable for
-// [WithComment]. Paths use dotted notation for mapping keys
-// ("metadata.name") and `[i]` for sequence indices. Per R11.5, this is
-// best-effort — the post-pass inserter that consumes the map matches by
-// last-path-segment.
+// collectKYAMLComments walks the AST and extracts every node's head, line,
+// and foot comments into a path-keyed map suitable for [WithComment].
+// Paths use dotted notation for mapping keys ("metadata.name") and "[i]"
+// for sequence indices.
 //
-// To prevent ambiguous-anchor failures (which break idempotence), we
-// pre-walk the AST counting how often each key name occurs anywhere in
-// the document. Names appearing more than once are skipped during
-// extraction since the post-pass would match the wrong `key:` line.
+// Per R11.5, comment placement is best-effort: the post-pass that consumes
+// the map matches by last path segment. A pre-walk counts how often each
+// key name appears in the document; duplicates are dropped to avoid
+// mis-anchoring, which would break Format idempotence.
 func collectKYAMLComments(docs []*node) map[string][]Comment {
 	keyCounts := make(map[string]int)
 	for _, doc := range docs {
@@ -1505,8 +1449,8 @@ func collectKYAMLComments(docs []*node) map[string][]Comment {
 	return out
 }
 
-// countKYAMLKeys recursively counts how often each scalar key value
-// occurs across the AST. Used to skip extraction for ambiguous keys.
+// countKYAMLKeys counts how often each scalar key value appears in the AST,
+// so collectKYAMLComments can drop comments anchored on ambiguous keys.
 func countKYAMLKeys(n *node, counts map[string]int) {
 	if n == nil {
 		return
@@ -1535,19 +1479,17 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment, keyCounts
 	}
 
 	addComments := func(p string) {
+		// R11.5 permits dropping comments on paths the post-pass can't
+		// anchor (sequence-index-only paths, keys with special chars).
+		// Skipping here also avoids spurious cuddle suppression for a
+		// comment that would never be emitted.
 		if !pathIsAnchorable(p) {
-			// The post-pass can't place comments on paths whose final
-			// segment isn't a simple identifier (e.g., sequence-index-only
-			// paths like "[0]"). Skip extraction to avoid triggering
-			// spurious cuddle suppression for comments that won't appear.
-			// R11.5 explicitly allows comment loss in these edge cases.
 			return
 		}
-		// Skip if the path's last segment is an ambiguous key name
-		// (appears more than once anywhere in the document). The post-pass
-		// matches by last-segment, so duplicates would land at the first
-		// match — Format pass 2 might re-read from a different node and
-		// break idempotence.
+		// Drop comments anchored on a key name that appears more than once
+		// in the document. The post-pass matches by last segment, so a
+		// duplicate would land at the first occurrence; Format pass 2
+		// could then read it back at a different node and break idempotence.
 		last := p
 		if i := strings.LastIndex(p, "."); i >= 0 {
 			last = p[i+1:]
@@ -1555,10 +1497,9 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment, keyCounts
 		if keyCounts[last] > 1 {
 			return
 		}
-		// The scanner already strips the leading "#" and one optional space
-		// from each comment, so the stored text is the raw content. Pass it
-		// through verbatim — no further prefix stripping. Trim only trailing
-		// whitespace and skip lines that are empty after that trim.
+		// The scanner has already stripped the leading "#" and one optional
+		// space, so write the stored text through verbatim, trimming only
+		// trailing whitespace and skipping lines that become empty.
 		if n.headComment != "" {
 			for line := range strings.SplitSeq(n.headComment, "\n") {
 				line = strings.TrimRight(line, " \t")
@@ -1568,13 +1509,11 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment, keyCounts
 				out[p] = append(out[p], Comment{Position: HeadCommentPos, Text: line})
 			}
 		}
-		// Line and foot comments are only extracted for scalar nodes. On
-		// compound values (mappings, sequences), the post-pass anchors at
-		// the parent's `key:` line — but pass 1 places the comment there
-		// while pass 2 reads it back as a head comment on the compound's
-		// first child, breaking idempotence. Per R11.5, dropping line/foot
-		// comments on compound values is permitted and avoids the
-		// asymmetry.
+		// Only scalar nodes contribute line and foot comments. On compound
+		// values the post-pass would anchor at the parent's `key:` line in
+		// pass 1, then the parser would re-read the same text as a head
+		// comment on the first child in pass 2, breaking idempotence.
+		// R11.5 allows this loss.
 		if n.kind == nodeScalar {
 			if n.lineComment != "" {
 				line := strings.TrimRight(n.lineComment, " \t")
@@ -1604,17 +1543,11 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment, keyCounts
 			if keyNode == nil || keyNode.kind != nodeScalar {
 				continue
 			}
-			// Skip keys that can't be reliably anchored by the path-based
-			// comment lookup. The post-pass splits paths on `.` and uses
-			// the last segment to match `key:` lines; keys containing
-			// path-separator characters (or that are empty) would collide
-			// with the path scheme and silently mis-place — or trigger
-			// cuddle suppression for a comment that never gets emitted.
-			//
-			// We skip the ENTIRE subtree (no recursion into valNode):
-			// recursing with the parent's path would mis-attribute inner
-			// comments to the parent, breaking idempotence. R11.5
-			// explicitly allows comment loss in these edge cases.
+			// Skip keys whose value cannot serve as the last segment of a
+			// dotted path: empty, or containing path-separator characters.
+			// Skipping the entire subtree (no recursion into valNode) is
+			// required because recursing with the parent's path would
+			// mis-attribute inner comments. R11.5 allows the loss.
 			if keyContainsPathSpecial(keyNode.value) {
 				continue
 			}
@@ -1622,12 +1555,9 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment, keyCounts
 			if path != "" {
 				childPath = path + "." + keyNode.value
 			}
-			// Comments on the key node attach at the entry's path. The
-			// addComments closure (and walkKYAMLCommentsCollect, which
-			// shares the same ambiguity rules) filters by anchorability
-			// and key-name uniqueness, so we can pass through here
-			// unconditionally — ambiguous-path comments are dropped at
-			// the leaf write, not here.
+			// Forward all comments on the key node through walkKYAMLCommentsCollect,
+			// which applies the same anchorability and uniqueness filters
+			// before recording at the leaf.
 			if keyNode.headComment != "" || keyNode.lineComment != "" || keyNode.footComment != "" {
 				tmp := &node{
 					headComment: keyNode.headComment,
@@ -1646,11 +1576,10 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment, keyCounts
 	}
 }
 
-// pathIsAnchorable reports whether path's last `.`-separated segment is a
-// simple identifier — the only form that the comment post-pass can
-// reliably match against `key:` lines in the emitted output. Sequence-
-// index segments (`[N]`), empty segments, and keys with special chars
-// fail this check.
+// pathIsAnchorable reports whether path's last "."-separated segment is a
+// simple identifier the comment post-pass can match against a "key:" line
+// in the emitted output. Sequence-index segments ("[N]"), empty segments,
+// and keys with special characters all fail this check.
 func pathIsAnchorable(path string) bool {
 	if path == "" {
 		return false
@@ -1662,14 +1591,11 @@ func pathIsAnchorable(path string) bool {
 	return !keyContainsPathSpecial(last)
 }
 
-// keyContainsPathSpecial reports whether s is unsuitable for use as the
-// last segment of a comment-anchor path. The post-pass that places
-// comments uses path splitting on `.` and a literal-prefix match on the
-// emitted output, so any key that isn't a simple identifier
-// ([A-Za-z_][A-Za-z0-9_-]*) cannot be reliably anchored — the comment
-// would only trigger spurious cuddle suppression.
-//
-// Per R11.5, comment loss in these edge cases is permitted.
+// keyContainsPathSpecial reports whether s is unsuitable as the last
+// segment of a comment-anchor path. The post-pass uses "."-splitting and
+// literal-prefix matching, so any key that is not a simple identifier
+// ([A-Za-z_][A-Za-z0-9_-]*) is rejected. R11.5 allows the resulting
+// comment loss.
 func keyContainsPathSpecial(s string) bool {
 	if s == "" {
 		return true
@@ -1688,10 +1614,10 @@ func keyContainsPathSpecial(s string) bool {
 	return false
 }
 
-// walkKYAMLCommentsCollect records comments from a synthetic node onto the
-// given path. Used to merge a key node's comments into the same path as
-// the value node. Same anchorability/uniqueness filtering as
-// walkKYAMLComments's addComments helper.
+// walkKYAMLCommentsCollect records the comments on a synthetic node at
+// path, applying the same anchorability and uniqueness filters as the
+// addComments helper inside walkKYAMLComments. It is used to merge a key
+// node's comments onto its value node's path.
 func walkKYAMLCommentsCollect(n *node, path string, out map[string][]Comment, keyCounts map[string]int) {
 	if !pathIsAnchorable(path) {
 		return
@@ -1795,10 +1721,10 @@ func Lint(data []byte, opts ...DecodeOption) ([]LintIssue, error) {
 	return issues, nil
 }
 
-// validateKYAMLBytes is the internal hook called by the decoder when
-// WithStrictKYAML is set. The caller is responsible for token-level checks
-// (directive rejection) before parsing — this function operates purely on
-// the parsed AST. Returns a *KYAMLError if any violations are found.
+// validateKYAMLBytes is the decoder's internal hook for WithStrictKYAML.
+// It operates purely on the parsed AST; token-level checks such as
+// directive rejection are the caller's responsibility. Returns a
+// [*KYAMLError] if any violations are found.
 func validateKYAMLBytes(docs []*node) error {
 	if len(docs) == 0 {
 		return &KYAMLError{Errors: []KYAMLViolation{{
