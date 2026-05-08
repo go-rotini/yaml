@@ -42,18 +42,18 @@ lint:
 
 test: clone-test-suite
 	@go test -v -count=1 -coverprofile=test.out .
-	@go tool cover -func=test.out | tail -1
+	@go tool cover -func=test.out
 
 test-acceptance:
 	@go test -v -count=1 -run TestAcceptance -coverprofile=test_acceptance.out .
-	@go tool cover -func=test_acceptance.out | tail -1
+	@go tool cover -func=test_acceptance.out
 
 test-bench:
 	@go test -bench=. -benchmem -count=1 . | tee test_bench.out
 
 test-conformance: clone-test-suite
 	@go test -v -count=1 -run TestYAMLTestSuite -coverprofile=test_conformance.out .
-	@go tool cover -func=test_conformance.out | tail -1
+	@go tool cover -func=test_conformance.out
 
 test-fuzz:
 	@go test -fuzz='^FuzzUnmarshal$$' -fuzztime=60s -run='^$$' .
@@ -70,7 +70,7 @@ test-mutation: clone-test-suite
 
 test-race:
 	@go test -race -count=1 -coverprofile=test_race.out .
-	@go tool cover -func=test_race.out | tail -1
+	@go tool cover -func=test_race.out
 
 # Regenerate testdata/kyaml/kubectl/ against a live kubectl + cluster.
 # Requires kubectl >= 1.34 with KYAML enabled (KUBECTL_KYAML=true) and a
