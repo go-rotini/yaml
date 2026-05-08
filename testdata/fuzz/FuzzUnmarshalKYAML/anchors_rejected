@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("---\n{ a: &x 1, b: *x }\n")

@@ -76,11 +76,11 @@ func (recursiveSegment) match(n *Node) []*Node {
 // PathString compiles a JSONPath-like expression into a [Path].
 //
 // Supported syntax:
-//   - $ — root node
-//   - .key — child mapping key
-//   - [n] — sequence index (negative indexes count from the end)
-//   - .* or [*] — wildcard (all children)
-//   - .. — recursive descent
+//   - $       root node
+//   - .key    child mapping key
+//   - [n]     sequence index (negative indexes count from the end)
+//   - .*, [*] wildcard (all children)
+//   - ..      recursive descent
 //
 // Example: "$.servers[0].host" selects the host field of the first server.
 func PathString(expr string) (*Path, error) {

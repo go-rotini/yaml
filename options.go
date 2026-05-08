@@ -23,18 +23,22 @@ const (
 )
 
 type encoderOptions struct {
-	indent           int
-	lineWidth        int
-	indentSequence   bool
-	flow             bool
-	jsonCompat       bool
-	useLiteral       bool
-	useSingleQuote   bool
-	quoteAll         bool
-	omitEmpty        bool
-	autoInt          bool
-	comments         map[string][]Comment
-	customMarshalers map[reflect.Type]any
+	indent               int
+	lineWidth            int
+	indentSequence       bool
+	flow                 bool
+	flowExplicit         bool // true if WithFlow was called explicitly
+	jsonCompat           bool
+	useLiteral           bool
+	useSingleQuote       bool
+	quoteAll             bool
+	omitEmpty            bool
+	autoInt              bool
+	durationAsString     bool
+	comments             map[string][]Comment
+	customMarshalers     map[reflect.Type]any
+	kyaml                bool
+	kyamlAlwaysQuoteKeys bool
 }
 
 func defaultEncodeOptions() *encoderOptions {
@@ -60,7 +64,7 @@ func WithIndentSequence(b bool) EncodeOption {
 // WithFlow encodes all values in flow style (JSON-like inline notation)
 // when set to true.
 func WithFlow(b bool) EncodeOption {
-	return func(o *encoderOptions) { o.flow = b }
+	return func(o *encoderOptions) { o.flow = b; o.flowExplicit = true }
 }
 
 // WithJSON enables JSON-compatible output: all strings are double-quoted, keys
@@ -111,6 +115,47 @@ func WithLineWidth(n int) EncodeOption {
 	return func(o *encoderOptions) { o.lineWidth = n }
 }
 
+// WithKYAML enables KYAML output mode, a strict subset of YAML defined by
+// Kubernetes [KEP-5295]. KYAML output:
+//
+//   - always begins with a "---" document header
+//   - uses flow style ({} for mappings, [] for sequences) exclusively
+//   - double-quotes every string value with full escape handling
+//   - quotes keys only when they are type-ambiguous (the "Norway problem")
+//   - emits trailing commas (suppressed where brackets are cuddled)
+//   - sorts native map keys lexicographically
+//   - prefers the json struct tag and json.Marshaler over their yaml equivalents
+//   - never emits anchors, aliases, tags, merge keys, or block-style scalars
+//
+// KYAML is a subset of YAML 1.2.2, so output is always valid YAML.
+//
+// [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
+func WithKYAML() EncodeOption {
+	return func(o *encoderOptions) {
+		o.kyaml = true
+		o.flow = true
+	}
+}
+
+// WithKYAMLAlwaysQuoteKeys forces double-quoting of every map and struct key
+// under KYAML mode. Default is to quote only type-ambiguous keys.
+//
+// Has no effect unless [WithKYAML] is also set.
+func WithKYAMLAlwaysQuoteKeys() EncodeOption {
+	return func(o *encoderOptions) { o.kyamlAlwaysQuoteKeys = true }
+}
+
+// WithDurationAsString controls how [time.Duration] values are encoded.
+// When false (the default), durations encode as int64 nanoseconds, matching
+// [encoding/json]. When true, durations encode using their human-readable
+// String() form (e.g. "1h30m") wrapped as a quoted string under KYAML mode.
+//
+// The string form is more readable for config files; the int64 form is
+// stable for machine-to-machine interchange and matches stdlib behavior.
+func WithDurationAsString(b bool) EncodeOption {
+	return func(o *encoderOptions) { o.durationAsString = b }
+}
+
 // DecodeOption configures the behavior of [Unmarshal], [UnmarshalWithOptions],
 // and [Decoder].
 type DecodeOption func(*decoderOptions)
@@ -151,6 +196,8 @@ const (
 
 type decoderOptions struct {
 	strict             bool
+	strictKYAML        bool
+	kyamlLintCosmetic  bool
 	disallowDuplicates bool
 	useOrderedMap      bool
 	useJSONUnmarshaler bool
@@ -296,4 +343,31 @@ func WithTagResolver(resolver *TagResolver) DecodeOption {
 		}
 		o.tagResolvers[resolver.Tag] = resolver
 	}
+}
+
+// WithStrictKYAML rejects YAML constructs that fall outside the KYAML subset:
+// anchors, aliases, tags, merge keys, block-style scalars/mappings/sequences,
+// plain string scalars (except keys), single-quoted scalars, non-string keys,
+// hex/octal/binary numeric literals, YAML 1.1 boolean aliases, .nan/.inf
+// floats, the ? complex-key indicator, and YAML directives. Documents must
+// begin with the "---" header.
+//
+// Errors are returned as [*KYAMLError] carrying every violation with source
+// positions. Use [errors.Is](err, [ErrKYAML]) to test generically.
+//
+// See [KEP-5295] for the full KYAML format definition.
+//
+// [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
+func WithStrictKYAML() DecodeOption {
+	return func(o *decoderOptions) { o.strictKYAML = true }
+}
+
+// WithKYAMLLintCosmetic additionally enforces the cosmetic rules of KYAML:
+// indentation, bracket cuddling, trailing commas, key ordering, and key
+// quoting. Used primarily by linters that want to assert byte-equivalence
+// with kubectl's KYAML output.
+//
+// Has no effect unless [WithStrictKYAML] is also set.
+func WithKYAMLLintCosmetic() DecodeOption {
+	return func(o *decoderOptions) { o.kyamlLintCosmetic = true }
 }

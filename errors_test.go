@@ -349,3 +349,76 @@ func TestRepeatByteOne(t *testing.T) {
 		t.Errorf("repeatByte(1) should be 'x', got %q", result)
 	}
 }
+
+func TestKYAMLErrorErrorString(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     *KYAMLError
+		want    string
+		exactly bool
+	}{
+		{
+			name:    "empty",
+			err:     &KYAMLError{},
+			want:    "yaml: KYAML validation failed",
+			exactly: true,
+		},
+		{
+			name: "single-with-pos",
+			err: &KYAMLError{Errors: []KYAMLViolation{{
+				Rule:    "R12.1",
+				Message: "anchor not allowed",
+				Pos:     Position{Line: 5, Column: 7},
+			}}},
+			want: `yaml: line 5, column 7: anchor not allowed (R12.1)`,
+		},
+		{
+			name: "single-no-pos",
+			err: &KYAMLError{Errors: []KYAMLViolation{{
+				Rule:    "R3.1",
+				Message: "missing header",
+			}}},
+			want: `yaml: missing header (R3.1)`,
+		},
+		{
+			name: "multi-mixed",
+			err: &KYAMLError{Errors: []KYAMLViolation{
+				{Rule: "R12.1", Message: "anchor", Pos: Position{Line: 1, Column: 2}},
+				{Rule: "R12.2", Message: "tag"},
+			}},
+			want: "yaml: 2 KYAML violations:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.err.Error()
+			if tc.exactly && got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+			if !tc.exactly && !strings.Contains(got, tc.want) {
+				t.Errorf("Error() = %q, want to contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLintIssueString(t *testing.T) {
+	withPos := LintIssue{Rule: "R12.5", Message: "block style", Pos: Position{Line: 3, Column: 1}}
+	if got := withPos.String(); got != "line 3, column 1: block style (R12.5)" {
+		t.Errorf("String() with pos = %q", got)
+	}
+	noPos := LintIssue{Rule: "R3.1", Message: "no header"}
+	if got := noPos.String(); got != "no header (R3.1)" {
+		t.Errorf("String() no pos = %q", got)
+	}
+}
+
+func TestKYAMLErrorIsSentinel(t *testing.T) {
+	err := &KYAMLError{Errors: []KYAMLViolation{{Rule: "R3.1", Message: "x"}}}
+	if !errors.Is(err, ErrKYAML) {
+		t.Error("expected errors.Is(err, ErrKYAML) to be true")
+	}
+	if errors.Is(err, ErrSyntax) {
+		t.Error("expected errors.Is(err, ErrSyntax) to be false")
+	}
+}

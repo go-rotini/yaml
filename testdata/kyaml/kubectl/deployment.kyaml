@@ -1,0 +1,36 @@
+---
+{
+  apiVersion: "apps/v1",
+  kind: "Deployment",
+  metadata: {
+    name: "kyaml-test-deployment",
+    namespace: "default",
+    labels: {
+      app: "kyaml-test",
+    },
+  },
+  spec: {
+    replicas: 3,
+    selector: {
+      matchLabels: {
+        app: "kyaml-test",
+      },
+    },
+    template: {
+      metadata: {
+        labels: {
+          app: "kyaml-test",
+        },
+      },
+      spec: {
+        containers: [{
+          name: "nginx",
+          image: "nginx:1.20",
+          ports: [{
+            containerPort: 80,
+          }],
+        }],
+      },
+    },
+  },
+}

@@ -852,7 +852,7 @@ func scalarToAnyCore(val string) any {
 }
 
 func scalarToAnyJSON(val string) any {
-	if val == "null" {
+	if val == nullLiteral {
 		return nil
 	}
 
@@ -899,8 +899,11 @@ func isMergeKey(n *node) bool {
 	return n.kind == nodeScalar && n.value == "<<"
 }
 
+// nullLiteral is the canonical YAML 1.2 / KYAML representation of null.
+const nullLiteral = "null"
+
 func isNullValue(s string) bool {
-	return s == "" || s == "~" || s == "null" || s == "Null" || s == "NULL"
+	return s == "" || s == "~" || s == nullLiteral || s == "Null" || s == "NULL"
 }
 
 func parseBool(s string) (bool, error) {
