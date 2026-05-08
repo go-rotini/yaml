@@ -2,7 +2,9 @@ package yaml
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"os"
 	"reflect"
 )
 
@@ -18,8 +20,39 @@ func MarshalWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
 	for _, opt := range opts {
 		opt(o)
 	}
+	if o.kyaml && o.flowExplicit && !o.flow {
+		return nil, fmt.Errorf("yaml: WithFlow(false) cannot be combined with WithKYAML(): %w", ErrOptionConflict)
+	}
 	enc := newEncoder(o)
 	return enc.encode(reflect.ValueOf(v))
+}
+
+// MarshalKYAML is shorthand for [MarshalWithOptions](v, [WithKYAML]()).
+//
+// The output is a strict KYAML document per [KEP-5295]: a "---" header
+// followed by flow-style mappings/sequences, double-quoted string values,
+// trailing commas, and lexicographic key ordering for native maps.
+//
+// [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
+func MarshalKYAML(v any) ([]byte, error) {
+	return MarshalWithOptions(v, WithKYAML())
+}
+
+// MarshalKYAMLWithOptions is shorthand for [MarshalWithOptions](v, append(opts, [WithKYAML]())...).
+// Allows additional encoder options to be composed atop KYAML mode (for
+// example, [WithIndent](4) to change the indent step from 2 to 4).
+func MarshalKYAMLWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
+	return MarshalWithOptions(v, append(opts, WithKYAML())...)
+}
+
+// EncodeKYAMLFile encodes v as KYAML and atomically writes the result to path.
+// The destination file is created with mode 0644 if it does not exist.
+func EncodeKYAMLFile(path string, v any, opts ...EncodeOption) error {
+	data, err := MarshalKYAMLWithOptions(v, opts...)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }
 
 // Encoder writes YAML values to an output stream. When multiple values are

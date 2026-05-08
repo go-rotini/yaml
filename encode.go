@@ -26,6 +26,18 @@ func newEncoder(opts *encoderOptions) *encoder {
 }
 
 func (e *encoder) encode(v reflect.Value) ([]byte, error) {
+	if e.opts.kyaml {
+		ke := newKYAMLEmitter(e.opts)
+		ke.ctx = e.ctx
+		out, err := ke.encode(v)
+		if err != nil {
+			return nil, err
+		}
+		if e.opts.comments != nil {
+			out = applyComments(out, e.opts.comments)
+		}
+		return out, nil
+	}
 	e.buf = e.buf[:0]
 	if err := e.marshalValue(v, 0, false); err != nil {
 		return nil, err
