@@ -1489,7 +1489,12 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment) {
 	}
 
 	addComments := func(p string) {
-		if p == "" {
+		if !pathIsAnchorable(p) {
+			// The post-pass can't place comments on paths whose final
+			// segment isn't a simple identifier (e.g., sequence-index-only
+			// paths like "[0]"). Skip extraction to avoid triggering
+			// spurious cuddle suppression for comments that won't appear.
+			// R11.5 explicitly allows comment loss in these edge cases.
 			return
 		}
 		// The scanner already strips the leading "#" and one optional space
@@ -1505,19 +1510,28 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment) {
 				out[p] = append(out[p], Comment{Position: HeadCommentPos, Text: line})
 			}
 		}
-		if n.lineComment != "" {
-			line := strings.TrimRight(n.lineComment, " \t")
-			if line != "" {
-				out[p] = append(out[p], Comment{Position: LineCommentPos, Text: line})
-			}
-		}
-		if n.footComment != "" {
-			for line := range strings.SplitSeq(n.footComment, "\n") {
-				line = strings.TrimRight(line, " \t")
-				if line == "" {
-					continue
+		// Line and foot comments are only extracted for scalar nodes. On
+		// compound values (mappings, sequences), the post-pass anchors at
+		// the parent's `key:` line — but pass 1 places the comment there
+		// while pass 2 reads it back as a head comment on the compound's
+		// first child, breaking idempotence. Per R11.5, dropping line/foot
+		// comments on compound values is permitted and avoids the
+		// asymmetry.
+		if n.kind == nodeScalar {
+			if n.lineComment != "" {
+				line := strings.TrimRight(n.lineComment, " \t")
+				if line != "" {
+					out[p] = append(out[p], Comment{Position: LineCommentPos, Text: line})
 				}
-				out[p] = append(out[p], Comment{Position: FootCommentPos, Text: line})
+			}
+			if n.footComment != "" {
+				for line := range strings.SplitSeq(n.footComment, "\n") {
+					line = strings.TrimRight(line, " \t")
+					if line == "" {
+						continue
+					}
+					out[p] = append(out[p], Comment{Position: FootCommentPos, Text: line})
+				}
 			}
 		}
 	}
@@ -1538,9 +1552,12 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment) {
 			// path-separator characters (or that are empty) would collide
 			// with the path scheme and silently mis-place — or trigger
 			// cuddle suppression for a comment that never gets emitted.
-			// R11.5 explicitly allows comment loss in these edge cases.
+			//
+			// We skip the ENTIRE subtree (no recursion into valNode):
+			// recursing with the parent's path would mis-attribute inner
+			// comments to the parent, breaking idempotence. R11.5
+			// explicitly allows comment loss in these edge cases.
 			if keyContainsPathSpecial(keyNode.value) {
-				walkKYAMLComments(valNode, path, out)
 				continue
 			}
 			childPath := keyNode.value
@@ -1564,6 +1581,22 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment) {
 			walkKYAMLComments(child, childPath, out)
 		}
 	}
+}
+
+// pathIsAnchorable reports whether path's last `.`-separated segment is a
+// simple identifier — the only form that the comment post-pass can
+// reliably match against `key:` lines in the emitted output. Sequence-
+// index segments (`[N]`), empty segments, and keys with special chars
+// fail this check.
+func pathIsAnchorable(path string) bool {
+	if path == "" {
+		return false
+	}
+	last := path
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		last = path[i+1:]
+	}
+	return !keyContainsPathSpecial(last)
 }
 
 // keyContainsPathSpecial reports whether s is unsuitable for use as the

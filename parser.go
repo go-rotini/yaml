@@ -605,6 +605,18 @@ func (p *parser) parseMappingEntry() (*node, *node, error) {
 		value = &node{kind: nodeScalar, value: "", pos: key.pos, implicit: true}
 	}
 
+	// Detect an inline comment on the same source line as the value's last
+	// consumed token (R11.2 / R11.3 / R11.4). The next tokenComment, if its
+	// line matches the previously-consumed token's line, is the value's
+	// line comment rather than a head comment for the next entry.
+	if value != nil && p.pos > 0 && p.peek().kind == tokenComment {
+		prev := p.tokens[p.pos-1]
+		if p.peek().pos.Line == prev.pos.Line {
+			value.lineComment = p.peek().value
+			p.advance()
+		}
+	}
+
 	return key, value, nil
 }
 
@@ -745,11 +757,36 @@ func (p *parser) parseFlowMapping() (*node, error) {
 			value = &node{kind: nodeScalar, value: "", pos: key.pos, implicit: true}
 		}
 
+		// Detect an inline comment on the same source line as the value's
+		// last consumed token (R11.2/R11.3/R11.4). Mirrors the logic in
+		// parseMappingEntry; flow mappings can also have inline comments
+		// on entries (e.g., `{ k: v, # comment\n  ...}`).
+		if p.pos > 0 && p.peek().kind == tokenComment {
+			prev := p.tokens[p.pos-1]
+			if p.peek().pos.Line == prev.pos.Line {
+				value.lineComment = p.peek().value
+				p.advance()
+			}
+		}
+
 		mapping.children = append(mapping.children, key, value)
 
 		p.collectIntoPending()
 		if p.peek().kind == tokenFlowEntry {
 			p.advance()
+			// After the entry separator, an inline comment may appear on
+			// the same source line — also a line comment for the value
+			// just emitted.
+			if p.pos > 0 && p.peek().kind == tokenComment {
+				prev := p.tokens[p.pos-2]
+				if p.peek().pos.Line == prev.pos.Line && len(mapping.children) >= 2 {
+					tail := mapping.children[len(mapping.children)-1]
+					if tail.lineComment == "" {
+						tail.lineComment = p.peek().value
+						p.advance()
+					}
+				}
+			}
 			p.collectIntoPending()
 		} else if p.peek().kind != tokenFlowMappingEnd && p.peek().kind != tokenStreamEnd && p.peek().kind != tokenBlockEnd {
 			return nil, &SyntaxError{Message: "missing comma between flow mapping entries", Pos: p.peek().pos}

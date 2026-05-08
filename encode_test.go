@@ -3588,9 +3588,12 @@ func TestWalkKYAMLCommentsLineAndFoot(t *testing.T) {
 	if got := commentsAtPos(out["name"], HeadCommentPos); !contains(got, "before value") {
 		t.Errorf("head comment on value missing: %+v", out["name"])
 	}
-	// list[0] has line comment.
-	if got := commentsAtPos(out["list[0]"], LineCommentPos); !contains(got, "item line") {
-		t.Errorf("line comment on sequence element missing: %+v", out["list[0]"])
+	// Sequence-element paths ("list[0]") are not anchorable by the
+	// comment post-pass (they don't correspond to `key:` lines), so per
+	// R11.5 their comments are intentionally dropped to avoid spurious
+	// cuddle suppression. Verify the path is absent from the map.
+	if _, ok := out["list[0]"]; ok {
+		t.Errorf("sequence-element path should not be anchorable: %+v", out["list[0]"])
 	}
 }
 
