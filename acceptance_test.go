@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -731,5 +732,350 @@ func TestAcceptanceCustomMarshalerOption(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "v1.2") {
 		t.Errorf("expected custom marshaler output, got:\n%s", data)
+	}
+}
+
+// TestKYAMLAcceptance walks testdata/acceptance/kyaml/ and runs every golden
+// .kyaml file through Parse, Unmarshal (to map[string]any), Format, and
+// idempotence checks. It also formats the corresponding _fixtures/*.yaml
+// (if present) and asserts byte-equality with the golden.
+//
+// Real-world fixtures cover ingress, CRD, kustomization, and Helm values —
+// content shapes that exercise nested objects, lists of objects, lists of
+// strings, empty containers, deeply nested schemas, and quoted special
+// values like "true"/"yes".
+func TestKYAMLAcceptance(t *testing.T) {
+	root := filepath.Join("testdata", "acceptance", "kyaml")
+	matches, err := filepath.Glob(filepath.Join(root, "*.kyaml"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(matches) == 0 {
+		t.Skip("no acceptance kyaml goldens present")
+	}
+	for _, path := range matches {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			golden, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+
+			// 1. Golden is valid KYAML.
+			if err := ValidateKYAML(golden); err != nil {
+				t.Errorf("not valid KYAML:\n%s", FormatError(golden, err))
+				return
+			}
+
+			// 2. AST parse succeeds.
+			if _, err := Parse(golden); err != nil {
+				t.Errorf("Parse failed: %v", err)
+				return
+			}
+
+			// 3. Decode to a generic map and back.
+			var v any
+			if err := UnmarshalKYAML(golden, &v); err != nil {
+				t.Errorf("UnmarshalKYAML: %v", err)
+				return
+			}
+
+			// 4. Format is idempotent.
+			once, err := Format(golden)
+			if err != nil {
+				t.Errorf("Format: %v", err)
+				return
+			}
+			if !bytes.Equal(once, golden) {
+				t.Errorf("not idempotent against golden\n=== golden:\n%s=== formatted:\n%s", golden, once)
+				return
+			}
+
+			// 5. The corresponding block-style fixture (if any) Formats
+			// to the same bytes.
+			base := filepath.Base(path)
+			name := strings.TrimSuffix(base, filepath.Ext(base))
+			fxt := filepath.Join(root, "_fixtures", name+".yaml")
+			if src, err := os.ReadFile(fxt); err == nil {
+				got, err := Format(src)
+				if err != nil {
+					t.Errorf("Format fixture %s: %v", fxt, err)
+					return
+				}
+				if !bytes.Equal(got, golden) {
+					t.Errorf("Format(%s) does not match golden\n=== expected:\n%s=== got:\n%s", fxt, golden, got)
+				}
+			}
+		})
+	}
+}
+
+// TestKYAMLAcceptanceRoundTripGenericMap verifies that decoding any
+// acceptance fixture into map[string]any and re-marshaling produces valid
+// KYAML (though not necessarily byte-identical, since map ordering may
+// differ from struct declaration order — we only check structural validity).
+func TestKYAMLAcceptanceRoundTripGenericMap(t *testing.T) {
+	root := filepath.Join("testdata", "acceptance", "kyaml")
+	matches, _ := filepath.Glob(filepath.Join(root, "*.kyaml"))
+	for _, path := range matches {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var v any
+			if err := UnmarshalKYAML(data, &v); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			out, err := MarshalKYAML(v)
+			if err != nil {
+				t.Fatalf("re-marshal: %v", err)
+			}
+			if !ValidKYAML(out) {
+				var k *KYAMLError
+				if errors.As(ValidateKYAML(out), &k) {
+					t.Errorf("re-marshaled output is not KYAML: %d violations", len(k.Errors))
+				}
+			}
+		})
+	}
+}
+
+// TestKYAMLKubectlGoldens verifies that every golden file in
+// testdata/kyaml/kubectl/ is conformant KYAML and is byte-identical to
+// what the encoder produces when re-formatting it. This catches regressions
+// against the corpus shipped in this repository.
+//
+// To regenerate the corpus against actual kubectl output, run:
+//
+//	make refresh-kyaml-corpus
+//
+// (requires a working kubectl + cluster context, with KYAML enabled).
+func TestKYAMLKubectlGoldens(t *testing.T) {
+	root := filepath.Join("testdata", "kyaml", "kubectl")
+	matches, err := filepath.Glob(filepath.Join(root, "*.kyaml"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(matches) == 0 {
+		t.Skip("no kubectl golden files present; run scripts/refresh-kyaml-kubectl-corpus.sh to generate")
+	}
+	for _, path := range matches {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			golden, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+
+			// 1. Strip the leading header comment (if present) so we
+			// validate only the KYAML body.
+			body := stripHeaderComment(golden)
+
+			// 2. Body must be valid KYAML.
+			if err := ValidateKYAML(body); err != nil {
+				t.Errorf("golden %s is not valid KYAML:\n%s", path, FormatError(body, err))
+				return
+			}
+
+			// 3. Format(body) must equal body exactly (idempotence — no
+			// further normalization needed).
+			reformatted, err := Format(body)
+			if err != nil {
+				t.Fatalf("Format %s: %v", path, err)
+			}
+			if !bytes.Equal(reformatted, body) {
+				t.Errorf("golden %s drifted from canonical KYAML\n=== golden:\n%s=== reformatted:\n%s", path, body, reformatted)
+			}
+		})
+	}
+}
+
+// TestKYAMLKubectlFixtureFormatting verifies that block-style YAML fixtures
+// in testdata/kyaml/kubectl/_fixtures/ Format to the corresponding *.kyaml
+// golden files. This is the conversion-correctness check.
+func TestKYAMLKubectlFixtureFormatting(t *testing.T) {
+	root := filepath.Join("testdata", "kyaml", "kubectl")
+	fixtures, err := filepath.Glob(filepath.Join(root, "_fixtures", "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(fixtures) == 0 {
+		t.Skip("no kubectl fixtures present")
+	}
+	for _, fxt := range fixtures {
+		t.Run(filepath.Base(fxt), func(t *testing.T) {
+			src, err := os.ReadFile(fxt)
+			if err != nil {
+				t.Fatalf("read %s: %v", fxt, err)
+			}
+
+			// Find the corresponding .kyaml golden.
+			base := filepath.Base(fxt)
+			name := strings.TrimSuffix(base, filepath.Ext(base))
+			goldenPath := filepath.Join(root, name+".kyaml")
+			golden, err := os.ReadFile(goldenPath)
+			if err != nil {
+				t.Skipf("no golden for fixture %s", fxt)
+			}
+			expected := stripHeaderComment(golden)
+
+			// Format the source into KYAML and compare.
+			got, err := Format(src)
+			if err != nil {
+				t.Fatalf("Format %s: %v", fxt, err)
+			}
+			if !bytes.Equal(got, expected) {
+				t.Errorf("Format(%s) does not match golden\n=== expected (%s):\n%s=== got:\n%s", fxt, goldenPath, expected, got)
+			}
+		})
+	}
+}
+
+// stripHeaderComment removes a single leading run of "#"-prefixed comment
+// lines from data, returning the body. Used to skip the "Generated by"
+// header inserted by refresh-kyaml-kubectl-corpus.sh.
+func stripHeaderComment(data []byte) []byte {
+	lines := bytes.Split(data, []byte("\n"))
+	i := 0
+	for i < len(lines) && (len(lines[i]) == 0 || lines[i][0] == '#') {
+		i++
+	}
+	return bytes.Join(lines[i:], []byte("\n"))
+}
+
+// TestKYAMLFormatBlockToFlow verifies Format converts arbitrary YAML into
+// canonical KYAML.
+func TestKYAMLFormatBlockToFlow(t *testing.T) {
+	src := []byte(`apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+  labels:
+    app: demo
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.20
+`)
+	out, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ValidKYAML(out) {
+		t.Errorf("Format output is not valid KYAML:\n%s\nerrors: %v", out, ValidateKYAML(out))
+	}
+}
+
+// TestKYAMLFormatIdempotence verifies Format(Format(x)) == Format(x).
+func TestKYAMLFormatIdempotence(t *testing.T) {
+	inputs := [][]byte{
+		[]byte("apiVersion: v1\nkind: Pod\n"),
+		[]byte(`---
+{
+  name: "demo",
+  count: 42,
+}
+`),
+		[]byte(`shared: &x { a: 1 }
+copy: *x
+`),
+		[]byte(`base: &b
+  field1: hello
+  field2: world
+sub:
+  <<: *b
+  field3: extra
+`),
+	}
+	for i, src := range inputs {
+		t.Run("", func(t *testing.T) {
+			once, err := Format(src)
+			if err != nil {
+				t.Fatalf("case %d first format: %v\n%s", i, err, src)
+			}
+			twice, err := Format(once)
+			if err != nil {
+				t.Fatalf("case %d second format: %v\n%s", i, err, once)
+			}
+			if !bytes.Equal(once, twice) {
+				t.Errorf("case %d: Format is not idempotent\n=== once:\n%s=== twice:\n%s", i, once, twice)
+			}
+		})
+	}
+}
+
+// TestKYAMLFormatStripsAnchors verifies anchors and aliases are reified.
+func TestKYAMLFormatStripsAnchors(t *testing.T) {
+	src := []byte("shared: &x foo\ncopy: *x\n")
+	out, err := Format(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte("&")) || bytes.Contains(out, []byte("*x")) {
+		t.Errorf("anchors/aliases not reified:\n%s", out)
+	}
+	if !ValidKYAML(out) {
+		t.Errorf("Format output is not valid KYAML:\n%s", out)
+	}
+}
+
+// TestKYAMLLintReturnsAllIssues verifies Lint accumulates all violations.
+func TestKYAMLLintReturnsAllIssues(t *testing.T) {
+	src := []byte(`---
+{
+  shared: &x { a: 1 },
+  copy: *x,
+  port: 0x50,
+  enabled: yes,
+}
+`)
+	issues, err := Lint(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) < 4 {
+		t.Errorf("expected at least 4 issues (anchor, alias, hex, yes), got %d:\n%v", len(issues), issues)
+	}
+	for _, i := range issues {
+		if i.Severity != SeverityError {
+			t.Errorf("expected SeverityError for structural issue, got %v: %v", i.Severity, i)
+		}
+	}
+}
+
+// TestKYAMLLintCosmetic verifies the cosmetic check fires on non-canonical input.
+func TestKYAMLLintCosmetic(t *testing.T) {
+	// Valid KYAML structurally, but with extra whitespace that diverges from
+	// canonical formatting.
+	src := []byte(`---
+{a:1,b:2}
+`)
+	issues, err := Lint(src, WithStrictKYAML(), WithKYAMLLintCosmetic())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasWarning := false
+	for _, i := range issues {
+		if i.Severity == SeverityWarning {
+			hasWarning = true
+		}
+	}
+	if !hasWarning {
+		t.Errorf("expected cosmetic warning for non-canonical KYAML:\n%s\nissues: %v", src, issues)
+	}
+}
+
+// TestKYAMLFormatErrorRenders verifies FormatError handles KYAMLError.
+func TestKYAMLFormatErrorRenders(t *testing.T) {
+	src := []byte("---\n{ port: 0x50 }\n")
+	err := ValidateKYAML(src)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	rendered := FormatError(src, err)
+	if !strings.Contains(rendered, "R12.11") {
+		t.Errorf("expected rule ID R12.11 in formatted error:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "0x50") {
+		t.Errorf("expected source line in formatted error:\n%s", rendered)
 	}
 }

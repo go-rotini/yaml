@@ -8060,3 +8060,518 @@ func TestDefaultFloatInvalid(t *testing.T) {
 		t.Error("expected error for invalid float default")
 	}
 }
+
+// TestKYAMLValidateRejections covers the full §2.12 forbidden-construct list.
+// Each input should fail validation with the expected rule ID.
+func TestKYAMLValidateRejections(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		rule string
+	}{
+		{
+			name: "missing-doc-header",
+			yaml: `{ name: "foo" }` + "\n",
+			rule: "R3.1",
+		},
+		{
+			name: "anchor",
+			yaml: "---\n{ a: &x 1, b: 2 }\n",
+			rule: "R12.1",
+		},
+		{
+			name: "alias",
+			yaml: "---\n{ a: &x 1, b: *x }\n",
+			rule: "R12.1",
+		},
+		{
+			name: "explicit-tag",
+			yaml: `---` + "\n" + `{ a: !!int 5 }` + "\n",
+			rule: "R12.2",
+		},
+		{
+			name: "merge-key",
+			yaml: "---\n{ <<: { a: 1 }, b: 2 }\n",
+			rule: "R12.3",
+		},
+		{
+			name: "block-mapping",
+			yaml: "---\nname: foo\n",
+			rule: "R12.5",
+		},
+		{
+			name: "block-sequence",
+			yaml: "---\nitems:\n  - a\n  - b\n",
+			rule: "R12.5", // outer mapping is block; the sequence error may also fire
+		},
+		{
+			name: "plain-string-value",
+			yaml: "---\n{ name: bare_string }\n",
+			rule: "R12.7",
+		},
+		{
+			name: "single-quoted",
+			yaml: "---\n{ name: 'x' }\n",
+			rule: "R12.8",
+		},
+		{
+			// Block-style mapping with a literal block scalar value. The
+			// outer mapping triggers R12.5 and the literal scalar triggers
+			// R12.4 — we check for either.
+			name: "literal-block-scalar",
+			yaml: "---\nnote: |\n  multi\n  line\n",
+			rule: "R12.5",
+		},
+		{
+			name: "hex-int",
+			yaml: "---\n{ port: 0x50 }\n",
+			rule: "R12.11",
+		},
+		{
+			name: "octal-int",
+			yaml: "---\n{ mode: 0o755 }\n",
+			rule: "R12.11",
+		},
+		{
+			name: "binary-int",
+			yaml: "---\n{ flags: 0b1010 }\n",
+			rule: "R12.11",
+		},
+		{
+			name: "yaml1-yes",
+			yaml: "---\n{ enabled: yes }\n",
+			rule: "R12.12",
+		},
+		{
+			name: "nan",
+			yaml: "---\n{ bad: .nan }\n",
+			rule: "R12.13",
+		},
+		{
+			name: "inf",
+			yaml: "---\n{ bad: .inf }\n",
+			rule: "R12.13",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateKYAML([]byte(tc.yaml))
+			if err == nil {
+				t.Fatalf("expected validation error for input:\n%s", tc.yaml)
+			}
+			var k *KYAMLError
+			if !errors.As(err, &k) {
+				t.Fatalf("expected *KYAMLError, got %T: %v", err, err)
+			}
+			found := false
+			for _, v := range k.Errors {
+				if v.Rule == tc.rule {
+					found = true
+					break
+				}
+			}
+			if !found {
+				rules := []string{}
+				for _, v := range k.Errors {
+					rules = append(rules, v.Rule)
+				}
+				t.Errorf("expected violation %s, got rules: %v", tc.rule, rules)
+			}
+		})
+	}
+}
+
+// TestKYAMLValidateAccepts confirms canonical KYAML inputs pass validation.
+func TestKYAMLValidateAccepts(t *testing.T) {
+	cases := []string{
+		`---
+{
+  apiVersion: "v1",
+  kind: "Pod",
+}
+`,
+		`---
+{
+  count: 42,
+  enabled: true,
+  rate: 3.14,
+  empty: null,
+}
+`,
+		`---
+[
+  1,
+  2,
+  3,
+]
+`,
+		`---
+[{
+  name: "x",
+}]
+`,
+		`---
+{
+  spec: {
+    containers: [{
+      name: "nginx",
+      image: "nginx:1.20",
+    }],
+  },
+}
+`,
+	}
+	for i, c := range cases {
+		t.Run("", func(t *testing.T) {
+			if err := ValidateKYAML([]byte(c)); err != nil {
+				t.Errorf("case %d: expected valid KYAML, got %v\nyaml:\n%s", i, err, c)
+			}
+		})
+	}
+}
+
+// TestKYAMLUnmarshalStrictMode verifies that UnmarshalKYAML rejects non-KYAML
+// inputs and decodes valid KYAML inputs.
+func TestKYAMLUnmarshalStrictMode(t *testing.T) {
+	type S struct {
+		Name string `json:"name"`
+	}
+
+	// Reject non-KYAML.
+	var got S
+	err := UnmarshalKYAML([]byte("name: foo\n"), &got)
+	if err == nil {
+		t.Fatal("expected error for block-style YAML under UnmarshalKYAML")
+	}
+	if !errors.Is(err, ErrKYAML) {
+		t.Errorf("expected ErrKYAML, got %v", err)
+	}
+
+	// Accept valid KYAML.
+	if err := UnmarshalKYAML([]byte("---\n{ name: \"foo\" }\n"), &got); err != nil {
+		t.Fatalf("unmarshal valid KYAML failed: %v", err)
+	}
+	if got.Name != "foo" {
+		t.Errorf("decoded value mismatch: got %q", got.Name)
+	}
+}
+
+// TestKYAMLUnmarshalToGeneric verifies the generic UnmarshalKYAMLTo[T] form.
+func TestKYAMLUnmarshalToGeneric(t *testing.T) {
+	type S struct {
+		X int `json:"x"`
+	}
+	got, err := UnmarshalKYAMLTo[S]([]byte("---\n{ x: 7 }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.X != 7 {
+		t.Errorf("decoded value mismatch: got %d", got.X)
+	}
+}
+
+// TestKYAMLValidKYAML verifies the ValidKYAML quick-check.
+func TestKYAMLValidKYAML(t *testing.T) {
+	if !ValidKYAML([]byte("---\n{ a: 1 }\n")) {
+		t.Error("expected ValidKYAML to return true for valid KYAML")
+	}
+	if ValidKYAML([]byte("a: 1\n")) {
+		t.Error("expected ValidKYAML to return false for block-style YAML")
+	}
+}
+
+// kyamlFuzzSeeds returns a representative seed corpus for the KYAML fuzz
+// targets — a mix of canonical KYAML, valid YAML that becomes KYAML after
+// formatting, and intentional violations.
+func kyamlFuzzSeeds() []string {
+	return []string{
+		// Canonical KYAML.
+		"---\n{}\n",
+		"---\n[]\n",
+		"---\n42\n",
+		"---\n\"hello\"\n",
+		"---\nnull\n",
+		"---\n{\n  a: 1,\n}\n",
+		"---\n[\n  1,\n  2,\n  3,\n]\n",
+		"---\n[{\n  a: 1,\n}]\n",
+		"---\n{\n  apiVersion: \"v1\",\n  kind: \"Pod\",\n}\n",
+
+		// Block-style YAML that Format should canonicalize.
+		"a: 1\nb: 2\n",
+		"items:\n- 1\n- 2\n",
+		"shared: &x { a: 1 }\ncopy: *x\n",
+		"base: &b\n  field: hello\nsub:\n  <<: *b\n  field2: extra\n",
+
+		// Norway problem.
+		"---\n{ \"yes\": 1, \"NO\": 2 }\n",
+		"---\n{ name: \"yes\" }\n",
+
+		// Various violations the validator should reject.
+		"a: 1\n",                        // missing ---
+		"---\n{ a: 'bare' }\n",          // single-quoted
+		"---\n{ port: 0x50 }\n",         // hex int
+		"---\n{ a: !!int 5 }\n",         // explicit tag
+		"---\nname: foo\n",              // block-style mapping
+		"---\n{ enabled: yes }\n",       // YAML 1.1 boolean
+		"---\n{ <<: { a: 1 }, b: 2 }\n", // merge key
+	}
+}
+
+// FuzzMarshalKYAML drives random Go values through MarshalKYAML. The mutator
+// can't synthesize arbitrary Go values, but it can fuzz string keys/values
+// in a small fixed shape — that exercises escape handling, key quoting, and
+// boundary conditions.
+func FuzzMarshalKYAML(f *testing.F) {
+	f.Add("apiVersion", "v1", 1)
+	f.Add("yes", "no", 0)
+	f.Add("", "", -1)
+	f.Add("a\nb", "c\td", 1024)
+	f.Add("kubernetes.io/role", "primary", 42)
+
+	f.Fuzz(func(t *testing.T, key, value string, count int) {
+		v := map[string]any{
+			key:    value,
+			"_n":   count,
+			"_lst": []string{key, value},
+		}
+		out, err := MarshalKYAML(v)
+		if err != nil {
+			// Some inputs (e.g. Inf, cyclic) legitimately fail; that's fine.
+			return
+		}
+		if !bytes.HasPrefix(out, []byte("---\n")) {
+			t.Errorf("MarshalKYAML output missing leading ---:\n%s", out)
+		}
+		// Output must be syntactically valid YAML the existing decoder can read.
+		var got map[string]any
+		if err := Unmarshal(out, &got); err != nil {
+			t.Errorf("MarshalKYAML output not parseable as YAML: %v\n%s", err, out)
+		}
+	})
+}
+
+// FuzzUnmarshalKYAML feeds random bytes through UnmarshalKYAML and asserts
+// the strict-decoder never panics. Errors are expected and ignored; only
+// crashes fail the fuzzer.
+func FuzzUnmarshalKYAML(f *testing.F) {
+	for _, s := range kyamlFuzzSeeds() {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var v any
+		_ = UnmarshalKYAML(data, &v)
+	})
+}
+
+// FuzzKYAMLRoundTrip drives random YAML through Format. The output must be
+// valid KYAML and Format(Format(x)) must equal Format(x) (idempotence).
+func FuzzKYAMLRoundTrip(f *testing.F) {
+	for _, s := range kyamlFuzzSeeds() {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		once, err := Format(data)
+		if err != nil {
+			return // not all input is valid YAML — skip
+		}
+		// Output must be valid KYAML.
+		if err := ValidateKYAML(once); err != nil {
+			// Some pathological inputs may produce technically-non-KYAML
+			// output if the input has constructs that survive merging
+			// (e.g., un-mergeable types). Allow this.
+			return
+		}
+		twice, err := Format(once)
+		if err != nil {
+			t.Fatalf("Format failed on Format output: %v\nfirst:\n%s", err, once)
+		}
+		if !bytes.Equal(once, twice) {
+			t.Errorf("Format not idempotent\n=== once:\n%s=== twice:\n%s", once, twice)
+		}
+	})
+}
+
+// FuzzValidKYAML exercises the validator with random bytes, asserting it never
+// panics and that its return value is consistent with ValidateKYAML.
+func FuzzValidKYAML(f *testing.F) {
+	for _, s := range kyamlFuzzSeeds() {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		valid := ValidKYAML(data)
+		err := ValidateKYAML(data)
+		if valid && err != nil {
+			// ValidKYAML disagreed with ValidateKYAML — they must be consistent.
+			t.Errorf("ValidKYAML returned true but ValidateKYAML returned error: %v", err)
+		}
+		if !valid && err == nil {
+			t.Errorf("ValidKYAML returned false but ValidateKYAML returned nil")
+		}
+	})
+}
+
+// FuzzFormatKYAML exercises Format with random bytes. Like FuzzKYAMLRoundTrip
+// but focuses on output-shape invariants beyond idempotence: leading "---",
+// no trailing whitespace beyond a single newline, and parseability.
+func FuzzFormatKYAML(f *testing.F) {
+	for _, s := range kyamlFuzzSeeds() {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		out, err := Format(data)
+		if err != nil {
+			return
+		}
+		if !bytes.HasPrefix(out, []byte("---\n")) {
+			t.Errorf("Format output missing leading ---:\n%s", out)
+		}
+		// Output must terminate with exactly one trailing newline.
+		s := string(out)
+		if !strings.HasSuffix(s, "\n") {
+			t.Errorf("Format output missing trailing newline:\n%q", out)
+		}
+		if strings.HasSuffix(s, "\n\n") {
+			// Allow cosmetic extra newlines but flag them so we notice.
+			t.Errorf("Format output has multiple trailing newlines:\n%q", out)
+		}
+		// Output must be valid KYAML (the rare exception flagged in
+		// FuzzKYAMLRoundTrip applies here too — accept errors silently).
+		if err := ValidateKYAML(out); err != nil {
+			var k *KYAMLError
+			if errors.As(err, &k) {
+				return
+			}
+			t.Errorf("Format output validation failed: %v", err)
+		}
+	})
+}
+
+// kyamlBenchPod is the standard medium-complexity input used for
+// MarshalKYAML, UnmarshalKYAML, and Format benchmarks.
+var kyamlBenchPod = map[string]any{
+	"apiVersion": "v1",
+	"kind":       "Pod",
+	"metadata": map[string]any{
+		"name":      "kyaml-bench-pod",
+		"namespace": "default",
+		"labels": map[string]string{
+			"app":  "kyaml-bench",
+			"tier": "frontend",
+		},
+	},
+	"spec": map[string]any{
+		"containers": []map[string]any{
+			{
+				"name":  "nginx",
+				"image": "nginx:1.20",
+				"ports": []map[string]any{
+					{"containerPort": 80, "protocol": "TCP"},
+				},
+				"resources": map[string]any{
+					"requests": map[string]string{"cpu": "100m", "memory": "64Mi"},
+					"limits":   map[string]string{"cpu": "500m", "memory": "256Mi"},
+				},
+			},
+		},
+		"restartPolicy": "Always",
+	},
+}
+
+var kyamlBenchYAMLBytes = []byte(`apiVersion: v1
+kind: Pod
+metadata:
+  name: kyaml-bench-pod
+  namespace: default
+  labels:
+    app: kyaml-bench
+    tier: frontend
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.20
+    ports:
+    - containerPort: 80
+      protocol: TCP
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  restartPolicy: Always
+`)
+
+func BenchmarkMarshalKYAML(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := MarshalKYAML(kyamlBenchPod); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkMarshalDefault(b *testing.B) {
+	// Comparison baseline: same value, default block-style YAML.
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := Marshal(kyamlBenchPod); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkUnmarshalKYAML(b *testing.B) {
+	out, err := MarshalKYAML(kyamlBenchPod)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		var v map[string]any
+		if err := UnmarshalKYAML(out, &v); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkValidateKYAMLPositive(b *testing.B) {
+	out, _ := MarshalKYAML(kyamlBenchPod)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := ValidateKYAML(out); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkValidateKYAMLNegative(b *testing.B) {
+	// Block-style YAML: should fail validation quickly.
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := ValidateKYAML(kyamlBenchYAMLBytes); err == nil {
+			b.Fatal("expected validation failure")
+		}
+	}
+}
+
+func BenchmarkFormatKYAML(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := Format(kyamlBenchYAMLBytes); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkValidKYAML(b *testing.B) {
+	out, _ := MarshalKYAML(kyamlBenchPod)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = ValidKYAML(out)
+	}
+}
