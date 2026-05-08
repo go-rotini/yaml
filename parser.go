@@ -14,6 +14,12 @@ type parser struct {
 	nodeCount         int
 	seenYAMLDirective bool
 	warnings          []string
+
+	// pendingHead accumulates the text of comment tokens encountered
+	// between structural tokens. The next node-creation call site that
+	// accepts a head comment consumes it via attachPendingHead. Powers
+	// comment preservation through Format() for KYAML re-emission (R11.4).
+	pendingHead string
 }
 
 func newParser(tokens []token) *parser {
@@ -37,7 +43,8 @@ func (p *parser) parse() ([]*node, error) {
 
 	for p.peek().kind != tokenStreamEnd {
 		prevPos := p.pos
-		p.skipComments()
+		// R11.4: top-of-document comments attach to the first node.
+		p.collectIntoPending()
 		if p.peek().kind == tokenStreamEnd {
 			break
 		}
@@ -263,7 +270,9 @@ func (p *parser) parseDocument() (*node, error) {
 }
 
 func (p *parser) parseNode() (*node, error) {
-	p.skipComments()
+	// Collect any leading comments into pendingHead so the node we're
+	// about to parse can adopt them as its head comment (R11.4).
+	p.collectIntoPending()
 
 	p.nodeCount++
 	if p.maxNodes > 0 && p.nodeCount > p.maxNodes {
@@ -440,7 +449,8 @@ func (p *parser) parseBlockMapping() (*node, error) {
 		p.advance()
 	}
 
-	p.skipComments()
+	// R11.4: leading comments attach as a head comment to the first key.
+	p.collectIntoPending()
 	if p.peek().kind == tokenAnchor || p.peek().kind == tokenTag {
 		saved := p.pos
 		var mapAnchor, mapTag string
@@ -472,7 +482,8 @@ func (p *parser) parseBlockMapping() (*node, error) {
 	}
 
 	for {
-		p.skipComments()
+		// R11.4: comments before the next entry attach to its key.
+		p.collectIntoPending()
 		t := p.peek()
 
 		if t.kind == tokenBlockEnd || t.kind == tokenDocumentStart || t.kind == tokenDocumentEnd || t.kind == tokenStreamEnd {
@@ -486,12 +497,14 @@ func (p *parser) parseBlockMapping() (*node, error) {
 			if err != nil {
 				return nil, err
 			}
+			p.attachPendingHead(key)
 			mapping.children = append(mapping.children, key, val)
 			continue
 		}
 
 		if t.kind == tokenValue {
 			key := &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true}
+			p.attachPendingHead(key)
 			p.advance()
 			p.skipComments()
 			var val *node
@@ -534,6 +547,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 			if err != nil {
 				return nil, err
 			}
+			p.attachPendingHead(key)
 			mapping.children = append(mapping.children, key, val)
 			continue
 		}
@@ -560,11 +574,16 @@ func (p *parser) parseMappingEntry() (*node, *node, error) {
 		}
 	}
 
-	p.skipComments()
+	// Comments between key and `:` are uncommon but if present should
+	// carry forward to the value's head comment.
+	p.collectIntoPending()
 
 	if p.peek().kind == tokenValue {
 		p.advance()
-		p.skipComments()
+		// Comments between `:` and the value's content are common
+		// (e.g. `key:\n  # comment\n  value`); collect into pending so
+		// the next-parsed value node adopts them as head comment.
+		p.collectIntoPending()
 	}
 
 	var value *node
@@ -581,6 +600,18 @@ func (p *parser) parseMappingEntry() (*node, *node, error) {
 
 	if value == nil {
 		value = &node{kind: nodeScalar, value: "", pos: key.pos, implicit: true}
+	}
+
+	// Detect an inline comment on the same source line as the value's last
+	// consumed token (R11.2 / R11.3 / R11.4). The next tokenComment, if its
+	// line matches the previously-consumed token's line, is the value's
+	// line comment rather than a head comment for the next entry.
+	if value != nil && p.pos > 0 && p.peek().kind == tokenComment {
+		prev := p.tokens[p.pos-1]
+		if p.peek().pos.Line == prev.pos.Line {
+			value.lineComment = p.peek().value
+			p.advance()
+		}
 	}
 
 	return key, value, nil
@@ -673,23 +704,25 @@ func (p *parser) parseFlowMapping() (*node, error) {
 	}
 
 	p.advance()
-	p.skipComments()
+	// R11.4: comments before the first entry attach as a head comment to
+	// the first key, so [Format] can re-emit them.
+	p.collectIntoPending()
 
 	for p.peek().kind != tokenFlowMappingEnd {
 		if p.peek().kind == tokenStreamEnd || p.peek().kind == tokenBlockEnd {
 			return nil, &SyntaxError{Message: "unterminated flow mapping", Pos: mapping.pos}
 		}
 
-		p.skipComments()
+		p.collectIntoPending()
 
 		explicitKey := false
 		if p.peek().kind == tokenKey {
 			explicitKey = true
 			p.advance()
-			p.skipComments()
+			p.collectIntoPending()
 			if p.peek().kind == tokenKey {
 				p.advance()
-				p.skipComments()
+				p.collectIntoPending()
 			}
 		}
 
@@ -703,12 +736,13 @@ func (p *parser) parseFlowMapping() (*node, error) {
 				return nil, err
 			}
 		}
+		p.attachPendingHead(key)
 
-		p.skipComments()
+		p.collectIntoPending()
 		var value *node
 		if p.peek().kind == tokenValue {
 			p.advance()
-			p.skipComments()
+			p.collectIntoPending()
 			if p.peek().kind != tokenFlowMappingEnd && p.peek().kind != tokenFlowEntry {
 				value, err = p.parseNode()
 				if err != nil {
@@ -720,12 +754,36 @@ func (p *parser) parseFlowMapping() (*node, error) {
 			value = &node{kind: nodeScalar, value: "", pos: key.pos, implicit: true}
 		}
 
+		// Detect an inline comment on the same source line as the value's
+		// last consumed token (R11.2/R11.3/R11.4). Mirrors the logic in
+		// parseMappingEntry; flow mappings can also have inline comments
+		// on entries (e.g., `{ k: v, # comment\n  ...}`).
+		if p.pos > 0 && p.peek().kind == tokenComment {
+			prev := p.tokens[p.pos-1]
+			if p.peek().pos.Line == prev.pos.Line {
+				value.lineComment = p.peek().value
+				p.advance()
+			}
+		}
+
 		mapping.children = append(mapping.children, key, value)
 
-		p.skipComments()
+		p.collectIntoPending()
 		if p.peek().kind == tokenFlowEntry {
 			p.advance()
-			p.skipComments()
+			// An inline comment on the same source line as the entry
+			// separator also belongs to the value just emitted.
+			if p.pos > 0 && p.peek().kind == tokenComment {
+				prev := p.tokens[p.pos-2]
+				if p.peek().pos.Line == prev.pos.Line && len(mapping.children) >= 2 {
+					tail := mapping.children[len(mapping.children)-1]
+					if tail.lineComment == "" {
+						tail.lineComment = p.peek().value
+						p.advance()
+					}
+				}
+			}
+			p.collectIntoPending()
 		} else if p.peek().kind != tokenFlowMappingEnd && p.peek().kind != tokenStreamEnd && p.peek().kind != tokenBlockEnd {
 			return nil, &SyntaxError{Message: "missing comma between flow mapping entries", Pos: p.peek().pos}
 		}
@@ -819,6 +877,8 @@ func (p *parser) skipComments() {
 	}
 }
 
+// collectComments accumulates run-of-comment-tokens into a newline-joined
+// string and advances past them.
 func (p *parser) collectComments() string {
 	var comments []string
 	for p.peek().kind == tokenComment {
@@ -829,6 +889,34 @@ func (p *parser) collectComments() string {
 		return ""
 	}
 	return strings.Join(comments, "\n")
+}
+
+// collectIntoPending consumes any pending comment tokens and appends them to
+// p.pendingHead so the next node-attachment site can adopt them.
+func (p *parser) collectIntoPending() {
+	c := p.collectComments()
+	if c == "" {
+		return
+	}
+	if p.pendingHead == "" {
+		p.pendingHead = c
+	} else {
+		p.pendingHead += "\n" + c
+	}
+}
+
+// attachPendingHead transfers any accumulated head comment onto n and clears
+// the pending buffer. No-op when the buffer is empty or n is nil.
+func (p *parser) attachPendingHead(n *node) {
+	if n == nil || p.pendingHead == "" {
+		return
+	}
+	if n.headComment == "" {
+		n.headComment = p.pendingHead
+	} else {
+		n.headComment = p.pendingHead + "\n" + n.headComment
+	}
+	p.pendingHead = ""
 }
 
 func (p *parser) peek() token {

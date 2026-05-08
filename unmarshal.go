@@ -29,6 +29,45 @@ func UnmarshalTo[T any](data []byte, opts ...DecodeOption) (T, error) {
 	return v, nil
 }
 
+// UnmarshalKYAML is shorthand for [UnmarshalWithOptions](data, v, [WithStrictKYAML]()).
+// It parses data as strict KYAML and decodes the first document into v;
+// non-KYAML constructs (anchors, aliases, tags, merge keys, block-style
+// scalars/mappings/sequences, plain string values, single-quoted scalars,
+// non-string keys, hex/octal/binary numeric literals, YAML 1.1 boolean
+// aliases, .nan/.inf, the ? complex-key indicator, and YAML directives)
+// produce a [*KYAMLError].
+func UnmarshalKYAML(data []byte, v any) error {
+	return UnmarshalWithOptions(data, v, WithStrictKYAML())
+}
+
+// UnmarshalKYAMLWithOptions is shorthand for
+// [UnmarshalWithOptions](data, v, append(opts, [WithStrictKYAML]())...).
+func UnmarshalKYAMLWithOptions(data []byte, v any, opts ...DecodeOption) error {
+	return UnmarshalWithOptions(data, v, append(opts, WithStrictKYAML())...)
+}
+
+// UnmarshalKYAMLTo is the generic form of [UnmarshalKYAML], returning a value
+// of type T. Useful when the caller does not want to declare and pass a
+// pointer to a target variable.
+func UnmarshalKYAMLTo[T any](data []byte, opts ...DecodeOption) (T, error) {
+	var v T
+	if err := UnmarshalKYAMLWithOptions(data, &v, opts...); err != nil {
+		var zero T
+		return zero, err
+	}
+	return v, nil
+}
+
+// DecodeKYAMLFile reads path, validates as strict KYAML, and decodes the first
+// document into v.
+func DecodeKYAMLFile(path string, v any, opts ...DecodeOption) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("yaml: read file %q: %w", path, err)
+	}
+	return UnmarshalKYAMLWithOptions(data, v, opts...)
+}
+
 // UnmarshalWithOptions parses YAML data into v, applying the given
 // [DecodeOption] values to control strictness, limits, and custom resolvers.
 func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
@@ -55,11 +94,30 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 		return err
 	}
 
+	if o.strictKYAML {
+		for _, tok := range tokens {
+			if tok.kind == tokenDirective {
+				return &KYAMLError{Errors: []KYAMLViolation{{
+					Rule:    "R12.9",
+					Message: fmt.Sprintf("YAML directive %q not allowed in KYAML", tok.value),
+					Pos:     tok.pos,
+					Token:   tok.value,
+				}}}
+			}
+		}
+	}
+
 	p := newParser(tokens)
 	p.maxNodes = o.maxNodes
 	docs, err := p.parse()
 	if err != nil {
 		return err
+	}
+
+	if o.strictKYAML {
+		if err := validateKYAMLBytes(docs); err != nil {
+			return err
+		}
 	}
 
 	if len(docs) == 0 {

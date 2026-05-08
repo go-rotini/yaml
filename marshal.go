@@ -2,7 +2,9 @@ package yaml
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"os"
 	"reflect"
 )
 
@@ -18,8 +20,43 @@ func MarshalWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
 	for _, opt := range opts {
 		opt(o)
 	}
+	if o.kyaml && o.flowExplicit && !o.flow {
+		return nil, fmt.Errorf("yaml: WithFlow(false) cannot be combined with WithKYAML(): %w", ErrOptionConflict)
+	}
 	enc := newEncoder(o)
 	return enc.encode(reflect.ValueOf(v))
+}
+
+// MarshalKYAML is shorthand for [MarshalWithOptions](v, [WithKYAML]()).
+//
+// The output is a strict KYAML document per [KEP-5295]: a "---" header
+// followed by flow-style mappings/sequences, double-quoted string values,
+// trailing commas, and lexicographic key ordering for native maps.
+//
+// [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
+func MarshalKYAML(v any) ([]byte, error) {
+	return MarshalWithOptions(v, WithKYAML())
+}
+
+// MarshalKYAMLWithOptions is shorthand for [MarshalWithOptions](v, append(opts, [WithKYAML]())...).
+// Allows additional encoder options to be composed atop KYAML mode (for
+// example, [WithIndent](4) to change the indent step from 2 to 4).
+func MarshalKYAMLWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
+	return MarshalWithOptions(v, append(opts, WithKYAML())...)
+}
+
+// EncodeKYAMLFile encodes v as KYAML and writes the result to path. New
+// files are created with mode 0600 because configuration files often hold
+// secrets; callers needing wider permissions can chmod after writing.
+func EncodeKYAMLFile(path string, v any, opts ...EncodeOption) error {
+	data, err := MarshalKYAMLWithOptions(v, opts...)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("yaml: write file %q: %w", path, err)
+	}
+	return nil
 }
 
 // Encoder writes YAML values to an output stream. When multiple values are
@@ -56,7 +93,10 @@ func (enc *Encoder) EncodeContext(ctx context.Context, v any) error {
 	if err != nil {
 		return err
 	}
-	if enc.n > 0 {
+	// Block-style YAML separates documents with "---\n". KYAML already
+	// begins each document with its own "---\n" header (R3.1), so adding
+	// the separator again would produce a duplicate marker.
+	if enc.n > 0 && !enc.opts.kyaml {
 		if _, err := enc.w.Write([]byte("---\n")); err != nil {
 			return err
 		}

@@ -124,7 +124,7 @@ func (e *ValidationError) Is(target error) bool {
 }
 
 // DefaultError is returned when a default value from a struct tag cannot be
-// applied — for example, when the default string cannot be parsed into the
+// applied: for example, when the default string cannot be parsed into the
 // target type, or when default is combined with required.
 type DefaultError struct {
 	Field   string
@@ -141,6 +141,79 @@ func (e *DefaultError) Is(target error) bool {
 	return ok
 }
 
+// KYAMLError reports one or more KYAML conformance violations. Returned by
+// [UnmarshalKYAML], [ValidateKYAML], and any decode call configured with
+// [WithStrictKYAML].
+//
+// Use [errors.Is](err, [ErrKYAML]) to test for KYAML errors generically.
+type KYAMLError struct {
+	Errors []KYAMLViolation
+}
+
+// KYAMLViolation describes a single KYAML rule violation. Rule is a rule
+// identifier from the KYAML requirements document (e.g. "R12.1" for
+// "anchors not allowed").
+type KYAMLViolation struct {
+	Rule    string
+	Message string
+	Pos     Position
+	Token   string
+}
+
+func (e *KYAMLError) Error() string {
+	if len(e.Errors) == 0 {
+		return "yaml: KYAML validation failed"
+	}
+	if len(e.Errors) == 1 {
+		v := e.Errors[0]
+		if v.Pos.Line > 0 {
+			return fmt.Sprintf("yaml: line %d, column %d: %s (%s)", v.Pos.Line, v.Pos.Column, v.Message, v.Rule)
+		}
+		return fmt.Sprintf("yaml: %s (%s)", v.Message, v.Rule)
+	}
+	parts := make([]string, 0, len(e.Errors))
+	for _, v := range e.Errors {
+		if v.Pos.Line > 0 {
+			parts = append(parts, fmt.Sprintf("line %d, column %d: %s (%s)", v.Pos.Line, v.Pos.Column, v.Message, v.Rule))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s (%s)", v.Message, v.Rule))
+		}
+	}
+	return fmt.Sprintf("yaml: %d KYAML violations:\n  %s", len(e.Errors), strings.Join(parts, "\n  "))
+}
+
+func (e *KYAMLError) Is(target error) bool {
+	_, ok := target.(*KYAMLError)
+	return ok
+}
+
+// Severity classifies a [LintIssue] as either an error (KYAML structural
+// violation) or a warning (KYAML cosmetic deviation).
+type Severity int
+
+const (
+	SeverityError   Severity = iota // structural KYAML violation
+	SeverityWarning                 // cosmetic KYAML deviation (indentation, ordering, etc.)
+)
+
+// LintIssue describes a single KYAML conformance deviation reported by [Lint].
+type LintIssue struct {
+	Rule     string
+	Message  string
+	Pos      Position
+	Severity Severity
+}
+
+// String renders the issue with its source position and rule ID. LintIssue
+// is a finding rather than an error: it carries a Severity field, so the
+// type implements [fmt.Stringer] instead of error.
+func (i LintIssue) String() string {
+	if i.Pos.Line > 0 {
+		return fmt.Sprintf("line %d, column %d: %s (%s)", i.Pos.Line, i.Pos.Column, i.Message, i.Rule)
+	}
+	return fmt.Sprintf("%s (%s)", i.Message, i.Rule)
+}
+
 // Sentinel errors for use with [errors.Is].
 var (
 	ErrSyntax       = &SyntaxError{}
@@ -150,12 +223,15 @@ var (
 	ErrDuplicateKey = &DuplicateKeyError{}
 	ErrValidation   = &ValidationError{}
 	ErrDefault      = &DefaultError{}
+	ErrKYAML        = &KYAMLError{}
 
-	ErrPathSyntax   = errors.New("yaml: invalid path syntax")
-	ErrPathNotFound = errors.New("yaml: path not found")
-	ErrNilPointer   = errors.New("yaml: non-nil pointer required")
-	ErrDocumentSize = errors.New("yaml: document size exceeds limit")
-	ErrPathEscape   = errors.New("yaml: reference path escapes allowed directory")
+	ErrPathSyntax     = errors.New("yaml: invalid path syntax")
+	ErrPathNotFound   = errors.New("yaml: path not found")
+	ErrNilPointer     = errors.New("yaml: non-nil pointer required")
+	ErrDocumentSize   = errors.New("yaml: document size exceeds limit")
+	ErrPathEscape     = errors.New("yaml: reference path escapes allowed directory")
+	ErrOptionConflict = errors.New("yaml: option conflict")
+	ErrUnsupported    = errors.New("yaml: unsupported value")
 )
 
 var (
@@ -176,11 +252,41 @@ var (
 	errUnsupportedDefault     = errors.New("default tag is not supported for type")
 )
 
-// FormatError returns a human-readable string for a [SyntaxError] or
-// [ValidationError] that includes the offending source line and a column
-// pointer. For other error types it returns err.Error(). Set color to true
-// to include ANSI color escape sequences.
+// FormatError returns a human-readable rendering of err, including the
+// offending source line and a column pointer when err carries a position
+// ([SyntaxError], [ValidationError], or [KYAMLError]). For other errors,
+// FormatError returns err.Error(). Pass color=true to include ANSI color
+// escape sequences.
 func FormatError(data []byte, err error, color ...bool) string {
+	useColor := len(color) > 0 && color[0]
+
+	var kyamlErr *KYAMLError
+	if errors.As(err, &kyamlErr) && len(kyamlErr.Errors) > 0 {
+		lines := bytes.Split(data, []byte("\n"))
+		var buf bytes.Buffer
+		for i, v := range kyamlErr.Errors {
+			if i > 0 {
+				buf.WriteByte('\n')
+			}
+			msg := fmt.Sprintf("yaml: line %d, column %d: %s (%s)", v.Pos.Line, v.Pos.Column, v.Message, v.Rule)
+			if useColor {
+				fmt.Fprintf(&buf, "\x1b[1;31m%s\x1b[0m\n", msg)
+			} else {
+				fmt.Fprintf(&buf, "%s\n", msg)
+			}
+			lineIdx := v.Pos.Line - 1
+			if lineIdx >= 0 && lineIdx < len(lines) {
+				fmt.Fprintf(&buf, "  %s\n", string(lines[lineIdx]))
+				if useColor {
+					fmt.Fprintf(&buf, "  %s\x1b[1;31m^\x1b[0m\n", repeatByte(' ', v.Pos.Column-1))
+				} else {
+					fmt.Fprintf(&buf, "  %s^\n", repeatByte(' ', v.Pos.Column-1))
+				}
+			}
+		}
+		return buf.String()
+	}
+
 	var pos Position
 	var synErr *SyntaxError
 	var valErr *ValidationError
@@ -198,8 +304,6 @@ func FormatError(data []byte, err error, color ...bool) string {
 	if lineIdx < 0 || lineIdx >= len(lines) {
 		return err.Error()
 	}
-
-	useColor := len(color) > 0 && color[0]
 
 	var buf bytes.Buffer
 	if useColor {

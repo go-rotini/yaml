@@ -1577,18 +1577,3 @@ func (s *scanner) skipBOM() {
 func isBlank(ch byte) bool {
 	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
 }
-
-// Valid reports whether data is valid YAML.
-func Valid(data []byte) bool {
-	data, err := detectAndConvertEncoding(data)
-	if err != nil {
-		return false
-	}
-	tokens, err := newScanner(data).scan()
-	if err != nil {
-		return false
-	}
-	p := newParser(tokens)
-	_, err = p.parse()
-	return err == nil
-}

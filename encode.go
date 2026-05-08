@@ -26,6 +26,18 @@ func newEncoder(opts *encoderOptions) *encoder {
 }
 
 func (e *encoder) encode(v reflect.Value) ([]byte, error) {
+	if e.opts.kyaml {
+		ke := newKYAMLEmitter(e.opts)
+		ke.ctx = e.ctx
+		out, err := ke.encode(v)
+		if err != nil {
+			return nil, err
+		}
+		if e.opts.comments != nil {
+			out = applyComments(out, e.opts.comments)
+		}
+		return out, nil
+	}
 	e.buf = e.buf[:0]
 	if err := e.marshalValue(v, 0, false); err != nil {
 		return nil, err
@@ -55,6 +67,16 @@ func applyComments(buf []byte, comments map[string][]Comment) []byte {
 	return buf
 }
 
+// matchKeyLine reports whether trimmed (with leading spaces removed) begins
+// with `key:` or `"key":`. The quoted form is required because KYAML quotes
+// type-ambiguous, numeric, and otherwise-special keys.
+func matchKeyLine(trimmed, key string) bool {
+	if strings.HasPrefix(trimmed, key+":") {
+		return true
+	}
+	return strings.HasPrefix(trimmed, `"`+key+`":`)
+}
+
 func insertHeadComment(buf []byte, path, text string) []byte {
 	key := pathToKey(path)
 	if key == "" {
@@ -63,7 +85,7 @@ func insertHeadComment(buf []byte, path, text string) []byte {
 	lines := strings.Split(string(buf), "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " ")
-		if strings.HasPrefix(trimmed, key+":") {
+		if matchKeyLine(trimmed, key) {
 			indent := strings.Repeat(" ", len(line)-len(trimmed))
 			comment := indent + "# " + text
 			after := make([]string, 0, len(lines)+1)
@@ -84,7 +106,7 @@ func insertLineComment(buf []byte, path, text string) []byte {
 	lines := strings.Split(string(buf), "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " ")
-		if strings.HasPrefix(trimmed, key+":") {
+		if matchKeyLine(trimmed, key) {
 			lines[i] = line + " # " + text
 			return []byte(strings.Join(lines, "\n"))
 		}
@@ -100,7 +122,7 @@ func insertFootComment(buf []byte, path, text string) []byte {
 	lines := strings.Split(string(buf), "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " ")
-		if strings.HasPrefix(trimmed, key+":") {
+		if matchKeyLine(trimmed, key) {
 			indent := strings.Repeat(" ", len(line)-len(trimmed))
 			comment := indent + "# " + text
 			after := make([]string, 0, len(lines)+1)
@@ -650,12 +672,23 @@ func (e *encoder) emitNode(n *node, indent int) {
 	}
 }
 
+// yamlBoolLiterals is the set of bare-word boolean literals in YAML 1.2
+// Core. A plain scalar matching any of these must be quoted on emit to
+// preserve its string identity through round-trip.
+var yamlBoolLiterals = map[string]struct{}{
+	"true": {}, "True": {}, "TRUE": {},
+	"false": {}, "False": {}, "FALSE": {},
+}
+
 func needsQuoting(s string) bool {
 	if s == "" {
 		return true
 	}
 
-	if isNullValue(s) || s == "true" || s == "false" || s == "True" || s == "False" || s == "TRUE" || s == "FALSE" {
+	if isNullValue(s) {
+		return true
+	}
+	if _, ok := yamlBoolLiterals[s]; ok {
 		return true
 	}
 

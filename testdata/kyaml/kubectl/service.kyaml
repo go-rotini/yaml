@@ -1,0 +1,21 @@
+---
+{
+  apiVersion: "v1",
+  kind: "Service",
+  metadata: {
+    name: "kyaml-test-service",
+    namespace: "default",
+  },
+  spec: {
+    selector: {
+      app: "kyaml-test",
+    },
+    type: "ClusterIP",
+    ports: [{
+      name: "http",
+      port: 80,
+      targetPort: 8080,
+      protocol: "TCP",
+    }],
+  },
+}
