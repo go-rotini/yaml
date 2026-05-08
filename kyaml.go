@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// IsKYAML reports whether data is a valid KYAML document — strict KYAML, per
+// ValidKYAML reports whether data is a valid KYAML document — strict KYAML, per
 // the rules of [KEP-5295]. A document with anchors, aliases, tags, merge
 // keys, block-style scalars/mappings/sequences, plain string scalars in
 // non-key position, single-quoted scalars, non-string mapping keys, hex/oct/bin
@@ -15,10 +15,10 @@ import (
 // complex-key indicator, or YAML directives returns false. Documents must
 // begin with the "---" header.
 //
-// IsKYAML is equivalent to [ValidateKYAML](data) == nil.
+// ValidKYAML is equivalent to [ValidateKYAML](data) == nil.
 //
 // [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
-func IsKYAML(data []byte) bool {
+func ValidKYAML(data []byte) bool {
 	return ValidateKYAML(data) == nil
 }
 

@@ -24,7 +24,7 @@ spec:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !IsKYAML(out) {
+	if !ValidKYAML(out) {
 		t.Errorf("Format output is not valid KYAML:\n%s\nerrors: %v", out, ValidateKYAML(out))
 	}
 }
@@ -77,7 +77,7 @@ func TestKYAMLFormatStripsAnchors(t *testing.T) {
 	if bytes.Contains(out, []byte("&")) || bytes.Contains(out, []byte("*x")) {
 		t.Errorf("anchors/aliases not reified:\n%s", out)
 	}
-	if !IsKYAML(out) {
+	if !ValidKYAML(out) {
 		t.Errorf("Format output is not valid KYAML:\n%s", out)
 	}
 }

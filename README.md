@@ -19,7 +19,7 @@ This package is used as the default YAML support package for [rotini](https://gi
 - AST access via `Parse`, `Walk`, `Filter`, and `Node` tree manipulation
 - JSONPath-like query engine (`PathString`) with read, replace, append, and delete operations
 - Bidirectional JSON conversion (`ToJSON`/`FromJSON`) and `WithJSONUnmarshaler` fallback
-- `Valid` and `IsKYAML` functions for quick syntax validation without full decoding
+- `Valid` and `ValidKYAML` functions for quick syntax validation without full decoding
 - `FormatError` for human-readable error output with source line and column pointer (handles KYAML rule-ID violations)
 - Context-aware encoding/decoding via `EncodeContext`/`DecodeContext`
 - UTF-8, UTF-16 (LE/BE), and UTF-32 (LE/BE) encoding detection
@@ -123,7 +123,7 @@ func main() {
 
 ### Validation
 
-`yaml.IsKYAML(data)` reports whether a byte slice is strict KYAML. `yaml.ValidateKYAML(data)` returns a `*yaml.KYAMLError` with the full list of conformance violations and source positions.
+`yaml.ValidKYAML(data)` reports whether a byte slice is strict KYAML. `yaml.ValidateKYAML(data)` returns a `*yaml.KYAMLError` with the full list of conformance violations and source positions.
 
 ### Reformatting
 

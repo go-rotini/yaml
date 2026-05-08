@@ -64,7 +64,7 @@ test-fuzz:
 	@go test -fuzz=FuzzMarshalKYAML -fuzztime=60s -run='^$$' .
 	@go test -fuzz=FuzzUnmarshalKYAML -fuzztime=60s -run='^$$' .
 	@go test -fuzz=FuzzKYAMLRoundTrip -fuzztime=60s -run='^$$' .
-	@go test -fuzz=FuzzIsKYAML -fuzztime=60s -run='^$$' .
+	@go test -fuzz=FuzzValidKYAML -fuzztime=60s -run='^$$' .
 	@go test -fuzz=FuzzFormatKYAML -fuzztime=60s -run='^$$' .
 
 test-mutation: clone-test-suite
@@ -89,7 +89,7 @@ test-kyaml-fuzz:
 	@go test -fuzz=FuzzMarshalKYAML -fuzztime=10s -run='^$$' .
 	@go test -fuzz=FuzzUnmarshalKYAML -fuzztime=10s -run='^$$' .
 	@go test -fuzz=FuzzKYAMLRoundTrip -fuzztime=10s -run='^$$' .
-	@go test -fuzz=FuzzIsKYAML -fuzztime=10s -run='^$$' .
+	@go test -fuzz=FuzzValidKYAML -fuzztime=10s -run='^$$' .
 	@go test -fuzz=FuzzFormatKYAML -fuzztime=10s -run='^$$' .
 
 # Regenerate testdata/kyaml/kubectl/ against a live kubectl + cluster.

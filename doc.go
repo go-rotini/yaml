@@ -21,7 +21,7 @@
 //
 // [Format] re-emits arbitrary YAML as canonical KYAML; anchors and aliases
 // are reified, merge keys are resolved, and explicit tags are stripped.
-// [IsKYAML] and [ValidateKYAML] classify input as conformant or not. [Lint]
+// [ValidKYAML] and [ValidateKYAML] classify input as conformant or not. [Lint]
 // reports every conformance deviation, with optional cosmetic checks via
 // [WithKYAMLLintCosmetic].
 //

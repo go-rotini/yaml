@@ -214,12 +214,12 @@ func TestKYAMLUnmarshalToGeneric(t *testing.T) {
 	}
 }
 
-// TestKYAMLIsKYAML verifies the IsKYAML quick-check.
-func TestKYAMLIsKYAML(t *testing.T) {
-	if !IsKYAML([]byte("---\n{ a: 1 }\n")) {
-		t.Error("expected IsKYAML to return true for valid KYAML")
+// TestKYAMLValidKYAML verifies the ValidKYAML quick-check.
+func TestKYAMLValidKYAML(t *testing.T) {
+	if !ValidKYAML([]byte("---\n{ a: 1 }\n")) {
+		t.Error("expected ValidKYAML to return true for valid KYAML")
 	}
-	if IsKYAML([]byte("a: 1\n")) {
-		t.Error("expected IsKYAML to return false for block-style YAML")
+	if ValidKYAML([]byte("a: 1\n")) {
+		t.Error("expected ValidKYAML to return false for block-style YAML")
 	}
 }

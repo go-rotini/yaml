@@ -36,7 +36,7 @@ func TestKYAMLRoundTripPod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !IsKYAML(out) {
+	if !ValidKYAML(out) {
 		t.Fatalf("output is not valid KYAML:\n%s\n%v", out, ValidateKYAML(out))
 	}
 	var got Pod

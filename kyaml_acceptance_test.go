@@ -104,7 +104,7 @@ func TestKYAMLAcceptanceRoundTripGenericMap(t *testing.T) {
 			if err != nil {
 				t.Fatalf("re-marshal: %v", err)
 			}
-			if !IsKYAML(out) {
+			if !ValidKYAML(out) {
 				var k *KYAMLError
 				if errors.As(ValidateKYAML(out), &k) {
 					t.Errorf("re-marshaled output is not KYAML: %d violations", len(k.Errors))

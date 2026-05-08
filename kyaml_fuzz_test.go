@@ -118,21 +118,21 @@ func FuzzKYAMLRoundTrip(f *testing.F) {
 	})
 }
 
-// FuzzIsKYAML exercises the validator with random bytes, asserting it never
+// FuzzValidKYAML exercises the validator with random bytes, asserting it never
 // panics and that its return value is consistent with ValidateKYAML.
-func FuzzIsKYAML(f *testing.F) {
+func FuzzValidKYAML(f *testing.F) {
 	for _, s := range kyamlFuzzSeeds() {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		valid := IsKYAML(data)
+		valid := ValidKYAML(data)
 		err := ValidateKYAML(data)
 		if valid && err != nil {
-			// IsKYAML disagreed with ValidateKYAML — they must be consistent.
-			t.Errorf("IsKYAML returned true but ValidateKYAML returned error: %v", err)
+			// ValidKYAML disagreed with ValidateKYAML — they must be consistent.
+			t.Errorf("ValidKYAML returned true but ValidateKYAML returned error: %v", err)
 		}
 		if !valid && err == nil {
-			t.Errorf("IsKYAML returned false but ValidateKYAML returned nil")
+			t.Errorf("ValidKYAML returned false but ValidateKYAML returned nil")
 		}
 	})
 }

@@ -125,11 +125,11 @@ func BenchmarkFormatKYAML(b *testing.B) {
 	}
 }
 
-func BenchmarkIsKYAML(b *testing.B) {
+func BenchmarkValidKYAML(b *testing.B) {
 	out, _ := MarshalKYAML(kyamlBenchPod)
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = IsKYAML(out)
+		_ = ValidKYAML(out)
 	}
 }
