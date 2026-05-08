@@ -1469,21 +1469,58 @@ func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
 // [WithComment]. Paths use dotted notation for mapping keys
 // ("metadata.name") and `[i]` for sequence indices. Per R11.5, this is
 // best-effort — the post-pass inserter that consumes the map matches by
-// last-path-segment, so paths that share a final segment may collide.
+// last-path-segment.
+//
+// To prevent ambiguous-anchor failures (which break idempotence), we
+// pre-walk the AST counting how often each key name occurs anywhere in
+// the document. Names appearing more than once are skipped during
+// extraction since the post-pass would match the wrong `key:` line.
 func collectKYAMLComments(docs []*node) map[string][]Comment {
+	keyCounts := make(map[string]int)
+	for _, doc := range docs {
+		if doc != nil {
+			for _, child := range doc.children {
+				countKYAMLKeys(child, keyCounts)
+			}
+		}
+	}
 	out := make(map[string][]Comment)
 	for _, doc := range docs {
 		if doc == nil {
 			continue
 		}
 		for _, child := range doc.children {
-			walkKYAMLComments(child, "", out)
+			walkKYAMLComments(child, "", out, keyCounts)
 		}
 	}
 	return out
 }
 
-func walkKYAMLComments(n *node, path string, out map[string][]Comment) {
+// countKYAMLKeys recursively counts how often each scalar key value
+// occurs across the AST. Used to skip extraction for ambiguous keys.
+func countKYAMLKeys(n *node, counts map[string]int) {
+	if n == nil {
+		return
+	}
+	switch n.kind {
+	case nodeMapping:
+		for i := 0; i+1 < len(n.children); i += 2 {
+			k := n.children[i]
+			if k != nil && k.kind == nodeScalar && k.value != "" {
+				counts[k.value]++
+			}
+			if i+1 < len(n.children) {
+				countKYAMLKeys(n.children[i+1], counts)
+			}
+		}
+	case nodeSequence:
+		for _, c := range n.children {
+			countKYAMLKeys(c, counts)
+		}
+	}
+}
+
+func walkKYAMLComments(n *node, path string, out map[string][]Comment, keyCounts map[string]int) {
 	if n == nil {
 		return
 	}
@@ -1495,6 +1532,18 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment) {
 			// paths like "[0]"). Skip extraction to avoid triggering
 			// spurious cuddle suppression for comments that won't appear.
 			// R11.5 explicitly allows comment loss in these edge cases.
+			return
+		}
+		// Skip if the path's last segment is an ambiguous key name
+		// (appears more than once anywhere in the document). The post-pass
+		// matches by last-segment, so duplicates would land at the first
+		// match — Format pass 2 might re-read from a different node and
+		// break idempotence.
+		last := p
+		if i := strings.LastIndex(p, "."); i >= 0 {
+			last = p[i+1:]
+		}
+		if keyCounts[last] > 1 {
 			return
 		}
 		// The scanner already strips the leading "#" and one optional space
@@ -1564,21 +1613,26 @@ func walkKYAMLComments(n *node, path string, out map[string][]Comment) {
 			if path != "" {
 				childPath = path + "." + keyNode.value
 			}
-			// Comments on the key node attach to the entry path.
+			// Comments on the key node attach at the entry's path. The
+			// addComments closure (and walkKYAMLCommentsCollect, which
+			// shares the same ambiguity rules) filters by anchorability
+			// and key-name uniqueness, so we can pass through here
+			// unconditionally — ambiguous-path comments are dropped at
+			// the leaf write, not here.
 			if keyNode.headComment != "" || keyNode.lineComment != "" || keyNode.footComment != "" {
 				tmp := &node{
 					headComment: keyNode.headComment,
 					lineComment: keyNode.lineComment,
 					footComment: keyNode.footComment,
 				}
-				walkKYAMLCommentsCollect(tmp, childPath, out)
+				walkKYAMLCommentsCollect(tmp, childPath, out, keyCounts)
 			}
-			walkKYAMLComments(valNode, childPath, out)
+			walkKYAMLComments(valNode, childPath, out, keyCounts)
 		}
 	case nodeSequence:
 		for i, child := range n.children {
 			childPath := fmt.Sprintf("%s[%d]", path, i)
-			walkKYAMLComments(child, childPath, out)
+			walkKYAMLComments(child, childPath, out, keyCounts)
 		}
 	}
 }
@@ -1627,10 +1681,17 @@ func keyContainsPathSpecial(s string) bool {
 
 // walkKYAMLCommentsCollect records comments from a synthetic node onto the
 // given path. Used to merge a key node's comments into the same path as
-// the value node. Same trim semantics as walkKYAMLComments's addComments
-// helper — verbatim content with trailing-whitespace trim only.
-func walkKYAMLCommentsCollect(n *node, path string, out map[string][]Comment) {
-	if path == "" {
+// the value node. Same anchorability/uniqueness filtering as
+// walkKYAMLComments's addComments helper.
+func walkKYAMLCommentsCollect(n *node, path string, out map[string][]Comment, keyCounts map[string]int) {
+	if !pathIsAnchorable(path) {
+		return
+	}
+	last := path
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		last = path[i+1:]
+	}
+	if keyCounts[last] > 1 {
 		return
 	}
 	if n.headComment != "" {

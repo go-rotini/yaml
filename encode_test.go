@@ -3575,7 +3575,9 @@ func TestWalkKYAMLCommentsLineAndFoot(t *testing.T) {
 	}
 
 	out := make(map[string][]Comment)
-	walkKYAMLComments(mapping, "", out)
+	keyCounts := make(map[string]int)
+	countKYAMLKeys(mapping, keyCounts)
+	walkKYAMLComments(mapping, "", out, keyCounts)
 
 	// Verify line and foot for the key node.
 	if got := commentsAtPos(out["name"], LineCommentPos); !contains(got, "inline on key") {
