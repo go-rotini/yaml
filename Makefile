@@ -56,14 +56,14 @@ test-conformance: clone-test-suite
 	@go tool cover -func=test_conformance.out | tail -1
 
 test-fuzz:
-	@go test -fuzz=FuzzUnmarshal -fuzztime=60s -run='^$$' .
-	@go test -fuzz=FuzzScanner -fuzztime=60s -run='^$$' .
-	@go test -fuzz=FuzzRoundTrip -fuzztime=60s -run='^$$' .
-	@go test -fuzz=FuzzMarshalKYAML -fuzztime=60s -run='^$$' .
-	@go test -fuzz=FuzzUnmarshalKYAML -fuzztime=60s -run='^$$' .
-	@go test -fuzz=FuzzKYAMLRoundTrip -fuzztime=60s -run='^$$' .
-	@go test -fuzz=FuzzValidKYAML -fuzztime=60s -run='^$$' .
-	@go test -fuzz=FuzzFormatKYAML -fuzztime=60s -run='^$$' .
+	@go test -fuzz='^FuzzUnmarshal$$' -fuzztime=60s -run='^$$' .
+	@go test -fuzz='^FuzzScanner$$' -fuzztime=60s -run='^$$' .
+	@go test -fuzz='^FuzzRoundTrip$$' -fuzztime=60s -run='^$$' .
+	@go test -fuzz='^FuzzMarshalKYAML$$' -fuzztime=60s -run='^$$' .
+	@go test -fuzz='^FuzzUnmarshalKYAML$$' -fuzztime=60s -run='^$$' .
+	@go test -fuzz='^FuzzKYAMLRoundTrip$$' -fuzztime=60s -run='^$$' .
+	@go test -fuzz='^FuzzValidKYAML$$' -fuzztime=60s -run='^$$' .
+	@go test -fuzz='^FuzzFormatKYAML$$' -fuzztime=60s -run='^$$' .
 
 test-mutation: clone-test-suite
 	@go tool github.com/go-gremlins/gremlins/cmd/gremlins unleash --config .gremlins.yaml
