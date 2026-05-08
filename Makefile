@@ -19,12 +19,10 @@ KYAML_KUBECTL_FIXTURES := \
 
 .PHONY: all clean clone-test-suite lint test test-acceptance test-bench \
         test-conformance test-fuzz test-mutation test-race \
-        test-kyaml test-kyaml-acceptance test-kyaml-kubectl test-kyaml-fuzz \
         refresh-kyaml-corpus
 
 all: clean clone-test-suite lint test test-acceptance test-bench \
-     test-conformance test-fuzz test-mutation test-race \
-     test-kyaml test-kyaml-acceptance test-kyaml-kubectl test-kyaml-fuzz
+     test-conformance test-fuzz test-mutation test-race
 
 clean:
 	@rm -rf $(TEST_SUITE_DIR) *.out test_mutation.json
@@ -73,24 +71,6 @@ test-mutation: clone-test-suite
 test-race:
 	@go test -race -count=1 -coverprofile=test_race.out .
 	@go tool cover -func=test_race.out | tail -1
-
-# KYAML-specific test targets.
-test-kyaml:
-	@go test -v -count=1 -run 'TestKYAML' -coverprofile=test_kyaml.out .
-	@go tool cover -func=test_kyaml.out | tail -1
-
-test-kyaml-acceptance:
-	@go test -v -count=1 -run 'TestKYAMLAcceptance' .
-
-test-kyaml-kubectl:
-	@go test -v -count=1 -run 'TestKYAMLKubectl' .
-
-test-kyaml-fuzz:
-	@go test -fuzz=FuzzMarshalKYAML -fuzztime=10s -run='^$$' .
-	@go test -fuzz=FuzzUnmarshalKYAML -fuzztime=10s -run='^$$' .
-	@go test -fuzz=FuzzKYAMLRoundTrip -fuzztime=10s -run='^$$' .
-	@go test -fuzz=FuzzValidKYAML -fuzztime=10s -run='^$$' .
-	@go test -fuzz=FuzzFormatKYAML -fuzztime=10s -run='^$$' .
 
 # Regenerate testdata/kyaml/kubectl/ against a live kubectl + cluster.
 # Requires kubectl >= 1.34 with KYAML enabled (KUBECTL_KYAML=true) and a

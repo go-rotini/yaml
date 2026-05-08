@@ -1,6 +1,7 @@
 package yaml
 
 import (
+	"bytes"
 	"context"
 	"encoding"
 	"encoding/base64"
@@ -1029,4 +1030,445 @@ func FromJSON(jsonData []byte) ([]byte, error) {
 		return nil, fmt.Errorf("yaml: json decode: %w", err)
 	}
 	return Marshal(v)
+}
+
+// Valid reports whether data is valid YAML.
+func Valid(data []byte) bool {
+	data, err := detectAndConvertEncoding(data)
+	if err != nil {
+		return false
+	}
+	tokens, err := newScanner(data).scan()
+	if err != nil {
+		return false
+	}
+	p := newParser(tokens)
+	_, err = p.parse()
+	return err == nil
+}
+
+// ValidKYAML reports whether data is a valid KYAML document — strict KYAML, per
+// the rules of [KEP-5295]. ValidKYAML is equivalent to [ValidateKYAML](data) == nil.
+//
+// [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
+func ValidKYAML(data []byte) bool {
+	return ValidateKYAML(data) == nil
+}
+
+// ValidateKYAML parses data as YAML and reports any KYAML conformance
+// violations. Returns nil if data is a valid KYAML document, or a
+// [*KYAMLError] carrying every violation. Validation is structural per the
+// rules of [KEP-5295]; cosmetic deviations (indentation, bracket cuddling,
+// trailing commas, key ordering) are not checked here. Use [Lint] for
+// cosmetic validation.
+//
+// [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
+func ValidateKYAML(data []byte) error {
+	data, err := detectAndConvertEncoding(data)
+	if err != nil {
+		return err
+	}
+	tokens, err := newScanner(data).scan()
+	if err != nil {
+		return err
+	}
+	for _, tok := range tokens {
+		if tok.kind == tokenDirective {
+			return &KYAMLError{Errors: []KYAMLViolation{{
+				Rule:    "R12.9",
+				Message: fmt.Sprintf("YAML directive %q not allowed in KYAML", tok.value),
+				Pos:     tok.pos,
+				Token:   tok.value,
+			}}}
+		}
+	}
+	p := newParser(tokens)
+	docs, err := p.parse()
+	if err != nil {
+		return err
+	}
+	if len(docs) == 0 {
+		return &KYAMLError{Errors: []KYAMLViolation{{
+			Rule:    "R3.1",
+			Message: "KYAML document must contain at least one document with the \"---\" header",
+		}}}
+	}
+	var violations []KYAMLViolation
+	for _, doc := range docs {
+		validateKYAMLNode(doc, &violations)
+	}
+	if len(violations) > 0 {
+		return &KYAMLError{Errors: violations}
+	}
+	return nil
+}
+
+func validateKYAMLNode(n *node, out *[]KYAMLViolation) {
+	if n == nil {
+		return
+	}
+	if n.kind == nodeDocument {
+		if !n.docStartExplicit {
+			*out = append(*out, KYAMLViolation{
+				Rule:    "R3.1",
+				Message: "KYAML document must begin with the \"---\" header",
+				Pos:     n.pos,
+			})
+		}
+		for _, child := range n.children {
+			validateKYAMLNode(child, out)
+		}
+		return
+	}
+	if n.anchor != "" {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.1",
+			Message: fmt.Sprintf("anchor %q not allowed in KYAML", "&"+n.anchor),
+			Pos:     n.pos,
+			Token:   "&" + n.anchor,
+		})
+	}
+	if n.kind == nodeAlias {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.1",
+			Message: fmt.Sprintf("alias %q not allowed in KYAML", "*"+n.alias),
+			Pos:     n.pos,
+			Token:   "*" + n.alias,
+		})
+		return
+	}
+	if n.kind == nodeMergeKey {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.3",
+			Message: "merge key (<<) not allowed in KYAML",
+			Pos:     n.pos,
+			Token:   "<<",
+		})
+		return
+	}
+	if n.tag != "" {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.2",
+			Message: fmt.Sprintf("explicit tag %q not allowed in KYAML", n.tag),
+			Pos:     n.pos,
+			Token:   n.tag,
+		})
+	}
+	switch n.kind {
+	case nodeMapping:
+		if !n.flow {
+			*out = append(*out, KYAMLViolation{
+				Rule:    "R12.5",
+				Message: "block-style mapping not allowed in KYAML; use flow style {}",
+				Pos:     n.pos,
+			})
+		}
+		for i := 0; i+1 < len(n.children); i += 2 {
+			validateKYAMLKey(n.children[i], out)
+			validateKYAMLNode(n.children[i+1], out)
+		}
+	case nodeSequence:
+		if !n.flow {
+			*out = append(*out, KYAMLViolation{
+				Rule:    "R12.6",
+				Message: "block-style sequence not allowed in KYAML; use flow style []",
+				Pos:     n.pos,
+			})
+		}
+		for _, c := range n.children {
+			validateKYAMLNode(c, out)
+		}
+	case nodeScalar:
+		validateKYAMLScalar(n, false, out)
+	}
+}
+
+func validateKYAMLKey(n *node, out *[]KYAMLViolation) {
+	if n == nil {
+		return
+	}
+	if n.kind == nodeScalar && n.value == "<<" && n.style == scalarPlain {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.3",
+			Message: "merge key (<<) not allowed in KYAML",
+			Pos:     n.pos,
+			Token:   "<<",
+		})
+		return
+	}
+	if n.kind != nodeScalar {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R4.4",
+			Message: fmt.Sprintf("KYAML mapping key must be a string scalar, got %s", nodeKindName(n.kind)),
+			Pos:     n.pos,
+		})
+		return
+	}
+	if n.anchor != "" {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.1",
+			Message: fmt.Sprintf("anchor %q on key not allowed in KYAML", "&"+n.anchor),
+			Pos:     n.pos,
+			Token:   "&" + n.anchor,
+		})
+	}
+	if n.tag != "" {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.2",
+			Message: fmt.Sprintf("explicit tag %q on key not allowed in KYAML", n.tag),
+			Pos:     n.pos,
+			Token:   n.tag,
+		})
+	}
+	validateKYAMLScalar(n, true, out)
+}
+
+func validateKYAMLScalar(n *node, asKey bool, out *[]KYAMLViolation) {
+	switch n.style {
+	case scalarSingleQuoted:
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.8",
+			Message: "single-quoted scalar not allowed in KYAML; use double quotes",
+			Pos:     n.pos,
+			Token:   n.value,
+		})
+		return
+	case scalarLiteral, scalarFolded:
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.4",
+			Message: "block-style scalar (| or >) not allowed in KYAML; use double-quoted form",
+			Pos:     n.pos,
+			Token:   n.value,
+		})
+		return
+	case scalarDoubleQuoted:
+		return
+	}
+	val := n.value
+	switch val {
+	case "null", "true", "false", "":
+		return
+	case "Null", "NULL", "~":
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R6.3",
+			Message: fmt.Sprintf("YAML null variant %q not allowed in KYAML; use lowercase \"null\" or quote the value", val),
+			Pos:     n.pos,
+			Token:   val,
+		})
+		return
+	case "True", "TRUE", "False", "FALSE":
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R6.1",
+			Message: fmt.Sprintf("non-canonical boolean %q not allowed in KYAML; use lowercase \"true\"/\"false\" or quote the value", val),
+			Pos:     n.pos,
+			Token:   val,
+		})
+		return
+	}
+	if _, ambiguous := typeAmbiguousKeys[val]; ambiguous {
+		rule := "R12.12"
+		if asKey {
+			rule = "R5.2"
+		}
+		*out = append(*out, KYAMLViolation{
+			Rule:    rule,
+			Message: fmt.Sprintf("type-ambiguous word %q must be double-quoted in KYAML", val),
+			Pos:     n.pos,
+			Token:   val,
+		})
+		return
+	}
+	if isHexOctalBinaryInt(val) {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.11",
+			Message: fmt.Sprintf("non-decimal integer literal %q not allowed in KYAML; use decimal", val),
+			Pos:     n.pos,
+			Token:   val,
+		})
+		return
+	}
+	switch val {
+	case ".nan", ".NaN", ".NAN":
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.13",
+			Message: "NaN literal not allowed in KYAML",
+			Pos:     n.pos,
+			Token:   val,
+		})
+		return
+	case ".inf", ".Inf", ".INF", "-.inf", "-.Inf", "-.INF", "+.inf", "+.Inf", "+.INF":
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.13",
+			Message: "infinity literal not allowed in KYAML",
+			Pos:     n.pos,
+			Token:   val,
+		})
+		return
+	}
+	if _, err := strconv.ParseInt(val, 10, 64); err == nil {
+		return
+	}
+	if _, err := strconv.ParseFloat(val, 64); err == nil {
+		lower := strings.ToLower(val)
+		if strings.Contains(lower, "inf") || strings.Contains(lower, "nan") {
+			*out = append(*out, KYAMLViolation{
+				Rule:    "R12.13",
+				Message: fmt.Sprintf("non-finite float %q not allowed in KYAML", val),
+				Pos:     n.pos,
+				Token:   val,
+			})
+			return
+		}
+		if strings.HasPrefix(lower, "0x") {
+			*out = append(*out, KYAMLViolation{
+				Rule:    "R12.11",
+				Message: fmt.Sprintf("hex float literal %q not allowed in KYAML", val),
+				Pos:     n.pos,
+				Token:   val,
+			})
+			return
+		}
+		return
+	}
+	if !asKey {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R12.7",
+			Message: fmt.Sprintf("plain (unquoted) string scalar %q not allowed as a value in KYAML; use double quotes", val),
+			Pos:     n.pos,
+			Token:   val,
+		})
+		return
+	}
+	if needsKeyQuoting(val) {
+		*out = append(*out, KYAMLViolation{
+			Rule:    "R5",
+			Message: fmt.Sprintf("key %q must be double-quoted in KYAML", val),
+			Pos:     n.pos,
+			Token:   val,
+		})
+	}
+}
+
+func isHexOctalBinaryInt(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	low := strings.ToLower(s)
+	return strings.HasPrefix(low, "0x") || strings.HasPrefix(low, "0o") || strings.HasPrefix(low, "0b")
+}
+
+// Format parses data as YAML (any subset, including non-KYAML constructs)
+// and re-emits it as canonical KYAML. Anchors and aliases are reified
+// (expanded inline); merge keys are resolved into flat key lists; explicit
+// tags are stripped. Comments are preserved best-effort.
+//
+// Format is idempotent on its output: Format(Format(x)) produces the same
+// bytes as Format(x) for any valid YAML x.
+func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
+	var v any
+	if err := UnmarshalWithOptions(data, &v, WithOrderedMap()); err != nil {
+		return nil, err
+	}
+	encOpts := append([]EncodeOption{WithKYAML()}, opts...)
+	return MarshalWithOptions(v, encOpts...)
+}
+
+// Lint parses data as YAML and returns a slice of LintIssue values describing
+// every KYAML deviation. Unlike [ValidateKYAML], Lint always returns the full
+// list of issues. With [WithKYAMLLintCosmetic] in opts, Lint additionally
+// reports cosmetic deviations.
+func Lint(data []byte, opts ...DecodeOption) ([]LintIssue, error) {
+	o := defaultDecodeOptions()
+	for _, opt := range opts {
+		opt(o)
+	}
+	data, err := detectAndConvertEncoding(data)
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := newScanner(data).scan()
+	if err != nil {
+		return nil, err
+	}
+	var issues []LintIssue
+	for _, tok := range tokens {
+		if tok.kind == tokenDirective {
+			issues = append(issues, LintIssue{
+				Rule:     "R12.9",
+				Message:  fmt.Sprintf("YAML directive %q not allowed in KYAML", tok.value),
+				Pos:      tok.pos,
+				Severity: SeverityError,
+			})
+		}
+	}
+	p := newParser(tokens)
+	docs, err := p.parse()
+	if err != nil {
+		return nil, err
+	}
+	if len(docs) == 0 {
+		issues = append(issues, LintIssue{
+			Rule:     "R3.1",
+			Message:  "KYAML document must contain at least one document with the \"---\" header",
+			Severity: SeverityError,
+		})
+		return issues, nil
+	}
+	var violations []KYAMLViolation
+	for _, doc := range docs {
+		validateKYAMLNode(doc, &violations)
+	}
+	for _, v := range violations {
+		issues = append(issues, LintIssue{
+			Rule:     v.Rule,
+			Message:  v.Message,
+			Pos:      v.Pos,
+			Severity: SeverityError,
+		})
+	}
+	if o.kyamlLintCosmetic {
+		formatted, fErr := Format(data)
+		if fErr == nil && !bytes.Equal(formatted, data) {
+			issues = append(issues, LintIssue{
+				Rule:     "R8/R9",
+				Message:  "input does not match canonical KYAML formatting (run Format to apply)",
+				Severity: SeverityWarning,
+			})
+		}
+	}
+	return issues, nil
+}
+
+// validateKYAMLBytes is the internal hook called by the decoder when
+// WithStrictKYAML is set. Returns a *KYAMLError if any violations are found.
+func validateKYAMLBytes(data []byte, docs []*node) error {
+	if data != nil {
+		tokens, err := newScanner(data).scan()
+		if err == nil {
+			for _, tok := range tokens {
+				if tok.kind == tokenDirective {
+					return &KYAMLError{Errors: []KYAMLViolation{{
+						Rule:    "R12.9",
+						Message: fmt.Sprintf("YAML directive %q not allowed in KYAML", tok.value),
+						Pos:     tok.pos,
+						Token:   tok.value,
+					}}}
+				}
+			}
+		}
+	}
+	if len(docs) == 0 {
+		return &KYAMLError{Errors: []KYAMLViolation{{
+			Rule:    "R3.1",
+			Message: "KYAML document must contain at least one document with the \"---\" header",
+		}}}
+	}
+	var violations []KYAMLViolation
+	for _, doc := range docs {
+		validateKYAMLNode(doc, &violations)
+	}
+	if len(violations) > 0 {
+		return &KYAMLError{Errors: violations}
+	}
+	return nil
 }

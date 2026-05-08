@@ -735,7 +735,7 @@ func TestAcceptanceCustomMarshalerOption(t *testing.T) {
 	}
 }
 
-// TestKYAMLAcceptance walks testdata/acceptance/kyaml/ and runs every golden
+// TestAcceptanceKYAML walks testdata/acceptance/kyaml/ and runs every golden
 // .kyaml file through Parse, Unmarshal (to map[string]any), Format, and
 // idempotence checks. It also formats the corresponding _fixtures/*.yaml
 // (if present) and asserts byte-equality with the golden.
@@ -744,7 +744,7 @@ func TestAcceptanceCustomMarshalerOption(t *testing.T) {
 // content shapes that exercise nested objects, lists of objects, lists of
 // strings, empty containers, deeply nested schemas, and quoted special
 // values like "true"/"yes".
-func TestKYAMLAcceptance(t *testing.T) {
+func TestAcceptanceKYAML(t *testing.T) {
 	root := filepath.Join("testdata", "acceptance", "kyaml")
 	matches, err := filepath.Glob(filepath.Join(root, "*.kyaml"))
 	if err != nil {
@@ -809,11 +809,11 @@ func TestKYAMLAcceptance(t *testing.T) {
 	}
 }
 
-// TestKYAMLAcceptanceRoundTripGenericMap verifies that decoding any
+// TestAcceptanceKYAMLRoundTripGenericMap verifies that decoding any
 // acceptance fixture into map[string]any and re-marshaling produces valid
 // KYAML (though not necessarily byte-identical, since map ordering may
 // differ from struct declaration order — we only check structural validity).
-func TestKYAMLAcceptanceRoundTripGenericMap(t *testing.T) {
+func TestAcceptanceKYAMLRoundTripGenericMap(t *testing.T) {
 	root := filepath.Join("testdata", "acceptance", "kyaml")
 	matches, _ := filepath.Glob(filepath.Join(root, "*.kyaml"))
 	for _, path := range matches {
@@ -840,7 +840,7 @@ func TestKYAMLAcceptanceRoundTripGenericMap(t *testing.T) {
 	}
 }
 
-// TestKYAMLKubectlGoldens verifies that every golden file in
+// TestAcceptanceKYAMLKubectlGoldens verifies that every golden file in
 // testdata/kyaml/kubectl/ is conformant KYAML and is byte-identical to
 // what the encoder produces when re-formatting it. This catches regressions
 // against the corpus shipped in this repository.
@@ -850,7 +850,7 @@ func TestKYAMLAcceptanceRoundTripGenericMap(t *testing.T) {
 //	make refresh-kyaml-corpus
 //
 // (requires a working kubectl + cluster context, with KYAML enabled).
-func TestKYAMLKubectlGoldens(t *testing.T) {
+func TestAcceptanceKYAMLKubectlGoldens(t *testing.T) {
 	root := filepath.Join("testdata", "kyaml", "kubectl")
 	matches, err := filepath.Glob(filepath.Join(root, "*.kyaml"))
 	if err != nil {
@@ -889,10 +889,10 @@ func TestKYAMLKubectlGoldens(t *testing.T) {
 	}
 }
 
-// TestKYAMLKubectlFixtureFormatting verifies that block-style YAML fixtures
+// TestAcceptanceKYAMLKubectlFormatting verifies that block-style YAML fixtures
 // in testdata/kyaml/kubectl/_fixtures/ Format to the corresponding *.kyaml
 // golden files. This is the conversion-correctness check.
-func TestKYAMLKubectlFixtureFormatting(t *testing.T) {
+func TestAcceptanceKYAMLKubectlFormatting(t *testing.T) {
 	root := filepath.Join("testdata", "kyaml", "kubectl")
 	fixtures, err := filepath.Glob(filepath.Join(root, "_fixtures", "*.yaml"))
 	if err != nil {
