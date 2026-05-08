@@ -718,15 +718,16 @@ func needsKeyQuoting(key string) bool {
 	if _, err := strconv.ParseFloat(key, 64); err == nil {
 		return true
 	}
-	// Validate against the KYAML key character class. We accept
-	// [A-Za-z_][A-Za-z0-9_./-]* with an optional [A-Za-z0-9_./-]+ suffix in
-	// brackets (label-key prefix syntax e.g. "kubernetes.io/role").
-	if !validKYAMLKey(key) {
-		return true
-	}
-	return false
+	// Validate against the KYAML key character class. Unquoted keys must
+	// match [A-Za-z_][A-Za-z0-9_./-]* — no flow-context indicators
+	// (brackets, braces, comma, colon, etc.) which would corrupt parsing.
+	return !validKYAMLKey(key)
 }
 
+// validKYAMLKey reports whether key is a "safe" identifier that can be
+// emitted unquoted inside a KYAML flow mapping. The character class is
+// deliberately conservative — anything outside [A-Za-z0-9_./-] (with a
+// letter or underscore as the first byte) gets quoted.
 func validKYAMLKey(key string) bool {
 	if key == "" {
 		return false
@@ -735,31 +736,12 @@ func validKYAMLKey(key string) bool {
 	if first != '_' && (first < 'A' || first > 'Z') && (first < 'a' || first > 'z') {
 		return false
 	}
-	inBracket := false
 	for i := 1; i < len(key); i++ {
-		c := key[i]
-		if c == '[' {
-			if inBracket {
-				return false
-			}
-			inBracket = true
-			continue
-		}
-		if c == ']' {
-			if !inBracket {
-				return false
-			}
-			if i != len(key)-1 {
-				return false
-			}
-			inBracket = false
-			continue
-		}
-		if !isKYAMLKeyChar(c) {
+		if !isKYAMLKeyChar(key[i]) {
 			return false
 		}
 	}
-	return !inBracket
+	return true
 }
 
 func isKYAMLKeyChar(c byte) bool {
