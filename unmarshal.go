@@ -115,7 +115,7 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 	}
 
 	if o.strictKYAML {
-		if err := validateKYAMLBytes(nil, docs); err != nil {
+		if err := validateKYAMLBytes(docs); err != nil {
 			return err
 		}
 	}

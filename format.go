@@ -358,7 +358,7 @@ func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 			// else: cuddled open — emit element directly after `[`.
 		} else {
 			// Previous iteration appended ','.
-			if startsBracket && lastVisibleIsCloseBracket(e.buf, ',') {
+			if startsBracket && lastVisibleAfterCommaIsCloseBracket(e.buf) {
 				e.buf = append(e.buf, ' ')
 			} else {
 				e.buf = append(e.buf, '\n')
@@ -564,12 +564,13 @@ func (e *kyamlEmitter) formatKey(key string) string {
 	return key
 }
 
-// emitString renders a string value per R6.4 (always double-quoted).
+// emitString renders a string value per R6.4 (always double-quoted, single
+// line, with embedded \n escapes for newlines). Flow-folded multi-line form
+// (KEP-5295 R10) is intentionally not used in v0.2.0 — any length-based
+// trigger flips between encode passes and breaks Format idempotence under
+// fuzz. The single-line form is always valid KYAML.
 func (e *kyamlEmitter) emitString(s string, indent int) {
-	if shouldUseFlowFold(s, e.opts.lineWidth) {
-		e.buf = append(e.buf, kyamlFlowFold(s, indent+e.opts.indent)...)
-		return
-	}
+	_ = indent
 	e.buf = append(e.buf, quoteKYAMLString(s)...)
 }
 
@@ -577,46 +578,6 @@ func (e *kyamlEmitter) writeIndent(n int) {
 	for range n {
 		e.buf = append(e.buf, ' ')
 	}
-}
-
-// shouldUseFlowFold reports whether a string should be emitted using KYAML's
-// flow-folded multi-line form (R10) rather than a single-line double-quoted
-// scalar with embedded \n escapes.
-//
-// In v0.2.0 this always returns false: flow-fold output is valid KYAML, but
-// any length-based trigger is fundamentally unstable across encode passes
-// (input string length and output string length disagree as escapes are
-// applied), which breaks Format idempotence in fuzz testing. The single-line
-// form is always valid; flow-folding is purely cosmetic. A stable trigger
-// can be added in a future release.
-func shouldUseFlowFold(s string, lineWidth int) bool {
-	_ = s
-	_ = lineWidth
-	return false
-}
-
-// kyamlFlowFold renders s using the flow-folding form per R10. The output is
-// a multi-line double-quoted string with embedded \n escapes for actual
-// newlines and trailing-backslash continuations to wrap long lines.
-func kyamlFlowFold(s string, contIndent int) string {
-	lines := strings.Split(s, "\n")
-	var b strings.Builder
-	b.WriteByte('"')
-	indentStr := strings.Repeat(" ", contIndent)
-	for i, line := range lines {
-		// Escape this line's content.
-		escaped := escapeKYAMLLine(line)
-		b.WriteString(escaped)
-		// If not the final line, emit \n followed by a flow-fold continuation.
-		if i < len(lines)-1 {
-			b.WriteString(`\n`)
-			b.WriteByte('\\')
-			b.WriteByte('\n')
-			b.WriteString(indentStr)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
 }
 
 // quoteKYAMLString produces a double-quoted KYAML string per R6.4 + R6.5.
@@ -852,14 +813,16 @@ func lastIsCloseBracket(buf []byte) bool {
 	return false
 }
 
-// lastVisibleIsCloseBracket returns true if, after virtually skipping a
-// trailing skipChar, the most recent visible byte is `}` or `]`.
-func lastVisibleIsCloseBracket(buf []byte, skipChar byte) bool {
+// lastVisibleAfterCommaIsCloseBracket returns true when, after virtually
+// skipping a trailing comma separator, the most recent non-whitespace byte
+// is `}` or `]`. Used by the KYAML sequence emitter to decide whether to
+// cuddle a compound element following a previously-emitted compound.
+func lastVisibleAfterCommaIsCloseBracket(buf []byte) bool {
 	if len(buf) == 0 {
 		return false
 	}
 	end := len(buf) - 1
-	if buf[end] == skipChar {
+	if buf[end] == ',' {
 		end--
 	}
 	for i := end; i >= 0; i-- {
@@ -1421,23 +1384,10 @@ func Lint(data []byte, opts ...DecodeOption) ([]LintIssue, error) {
 }
 
 // validateKYAMLBytes is the internal hook called by the decoder when
-// WithStrictKYAML is set. Returns a *KYAMLError if any violations are found.
-func validateKYAMLBytes(data []byte, docs []*node) error {
-	if data != nil {
-		tokens, err := newScanner(data).scan()
-		if err == nil {
-			for _, tok := range tokens {
-				if tok.kind == tokenDirective {
-					return &KYAMLError{Errors: []KYAMLViolation{{
-						Rule:    "R12.9",
-						Message: fmt.Sprintf("YAML directive %q not allowed in KYAML", tok.value),
-						Pos:     tok.pos,
-						Token:   tok.value,
-					}}}
-				}
-			}
-		}
-	}
+// WithStrictKYAML is set. The caller is responsible for token-level checks
+// (directive rejection) before parsing — this function operates purely on
+// the parsed AST. Returns a *KYAMLError if any violations are found.
+func validateKYAMLBytes(docs []*node) error {
 	if len(docs) == 0 {
 		return &KYAMLError{Errors: []KYAMLViolation{{
 			Rule:    "R3.1",

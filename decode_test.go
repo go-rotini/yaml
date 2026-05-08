@@ -8575,3 +8575,135 @@ func BenchmarkValidKYAML(b *testing.B) {
 		_ = ValidKYAML(out)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// KYAML coverage: validators, file I/O, generic API error paths
+// ---------------------------------------------------------------------------
+
+func TestKYAMLUnmarshalKYAMLToError(t *testing.T) {
+	got, err := UnmarshalKYAMLTo[map[string]any]([]byte("a: 1\n"))
+	if err == nil {
+		t.Fatal("expected error for non-KYAML input")
+	}
+	if got != nil {
+		t.Errorf("expected zero value on error, got %v", got)
+	}
+}
+
+func TestKYAMLDecodeKYAMLFileMissing(t *testing.T) {
+	var v any
+	err := DecodeKYAMLFile("/nonexistent-path-xyz.kyaml", &v)
+	if err == nil {
+		t.Fatal("expected error reading missing file")
+	}
+}
+
+func TestKYAMLDecodeKYAMLFileInvalid(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/bad.kyaml"
+	if err := os.WriteFile(path, []byte("a: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var v any
+	err := DecodeKYAMLFile(path, &v)
+	if !errors.Is(err, ErrKYAML) {
+		t.Errorf("expected ErrKYAML for non-KYAML file, got %v", err)
+	}
+}
+
+func TestKYAMLValidateKYAMLEmpty(t *testing.T) {
+	err := ValidateKYAML([]byte("   \n\n"))
+	var k *KYAMLError
+	if !errors.As(err, &k) {
+		t.Fatalf("expected *KYAMLError, got %v", err)
+	}
+	if len(k.Errors) == 0 || k.Errors[0].Rule != "R3.1" {
+		t.Errorf("expected R3.1 violation, got %+v", k.Errors)
+	}
+}
+
+func TestKYAMLValidateKYAMLDirective(t *testing.T) {
+	src := []byte("%YAML 1.2\n---\n{ a: 1 }\n")
+	err := ValidateKYAML(src)
+	var k *KYAMLError
+	if !errors.As(err, &k) {
+		t.Fatalf("expected *KYAMLError for directive, got %v", err)
+	}
+	if len(k.Errors) != 1 || k.Errors[0].Rule != "R12.9" {
+		t.Errorf("expected single R12.9 violation, got %+v", k.Errors)
+	}
+}
+
+func TestKYAMLValidateKYAMLNullVariants(t *testing.T) {
+	for _, val := range []string{"~", "Null", "NULL"} {
+		t.Run(val, func(t *testing.T) {
+			src := []byte("---\n{ x: " + val + " }\n")
+			err := ValidateKYAML(src)
+			var k *KYAMLError
+			if !errors.As(err, &k) {
+				t.Fatalf("expected *KYAMLError for %s, got %v", val, err)
+			}
+			has := false
+			for _, v := range k.Errors {
+				if v.Rule == "R6.3" {
+					has = true
+				}
+			}
+			if !has {
+				t.Errorf("expected R6.3 for %s, got %+v", val, k.Errors)
+			}
+		})
+	}
+}
+
+func TestKYAMLValidateKYAMLBoolVariants(t *testing.T) {
+	for _, val := range []string{"True", "TRUE", "False", "FALSE"} {
+		t.Run(val, func(t *testing.T) {
+			src := []byte("---\n{ x: " + val + " }\n")
+			err := ValidateKYAML(src)
+			var k *KYAMLError
+			if !errors.As(err, &k) {
+				t.Fatalf("expected *KYAMLError for %s, got %v", val, err)
+			}
+			has := false
+			for _, v := range k.Errors {
+				if v.Rule == "R6.1" {
+					has = true
+				}
+			}
+			if !has {
+				t.Errorf("expected R6.1 for %s, got %+v", val, k.Errors)
+			}
+		})
+	}
+}
+
+func TestKYAMLLastIsCloseBracketBranches(t *testing.T) {
+	if lastIsCloseBracket(nil) {
+		t.Error("nil buf should return false")
+	}
+	if lastIsCloseBracket([]byte("   \n\t")) {
+		t.Error("whitespace-only buf should return false")
+	}
+	if !lastIsCloseBracket([]byte("...}")) {
+		t.Error("buf ending in } should return true")
+	}
+	if !lastIsCloseBracket([]byte("...]   ")) {
+		t.Error("buf ending in ] (after whitespace) should return true")
+	}
+	if lastIsCloseBracket([]byte("abc")) {
+		t.Error("buf ending in non-bracket should return false")
+	}
+}
+
+func TestKYAMLLastVisibleAfterCommaBranches(t *testing.T) {
+	if lastVisibleAfterCommaIsCloseBracket(nil) {
+		t.Error("nil buf should return false")
+	}
+	if !lastVisibleAfterCommaIsCloseBracket([]byte("xyz},")) {
+		t.Error("buf ending in '},' (skipping ',') should detect '}'")
+	}
+	if lastVisibleAfterCommaIsCloseBracket([]byte("abc,")) {
+		t.Error("buf ending in 'c,' should return false")
+	}
+}

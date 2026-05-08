@@ -3,10 +3,13 @@ package yaml
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -3141,5 +3144,842 @@ func TestKYAMLMarshalIdempotence(t *testing.T) {
 
 	if !bytes.Equal(first, second) {
 		t.Errorf("MarshalKYAML round-trip not byte-identical:\n=== first:\n%s=== second:\n%s", first, second)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// KYAML coverage: file I/O, marshaler dispatch, special types, options
+// ---------------------------------------------------------------------------
+
+func TestKYAMLMarshalKYAMLWithOptions(t *testing.T) {
+	v := map[string]int{"a": 1}
+	out, err := MarshalKYAMLWithOptions(v, WithIndent(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "    a: 1,") {
+		t.Errorf("WithIndent(4) did not take effect under KYAML:\n%s", out)
+	}
+	if !ValidKYAML(out) {
+		t.Errorf("MarshalKYAMLWithOptions output is not valid KYAML:\n%s", out)
+	}
+}
+
+func TestKYAMLEncodeKYAMLFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.kyaml")
+	v := map[string]int{"port": 8080}
+	if err := EncodeKYAMLFile(path, v); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ValidKYAML(got) {
+		t.Errorf("EncodeKYAMLFile output is not valid KYAML:\n%s", got)
+	}
+	if !strings.Contains(string(got), "port: 8080,") {
+		t.Errorf("expected port: 8080 in output:\n%s", got)
+	}
+
+	// Round-trip via DecodeKYAMLFile (covers the read path too).
+	var back map[string]int
+	if err := DecodeKYAMLFile(path, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back["port"] != 8080 {
+		t.Errorf("DecodeKYAMLFile mismatch: got %v", back)
+	}
+}
+
+func TestKYAMLEncodeKYAMLFileError(t *testing.T) {
+	// Write to a directory that doesn't exist — surface the error path.
+	err := EncodeKYAMLFile("/nonexistent-dir-xyz/foo.kyaml", 1)
+	if err == nil {
+		t.Fatal("expected EncodeKYAMLFile to fail on bad path")
+	}
+}
+
+// kyamlJSONMarshalerType implements json.Marshaler — under KYAML mode this
+// path takes precedence over yaml.Marshaler (KEP-5295 R13.2).
+type kyamlJSONMarshalerType struct {
+	X int
+}
+
+func (t kyamlJSONMarshalerType) MarshalJSON() ([]byte, error) {
+	return fmt.Appendf(nil, `{"json_x":%d}`, t.X*2), nil
+}
+
+func (t kyamlJSONMarshalerType) MarshalYAML() (any, error) {
+	return map[string]int{"yaml_x": t.X * 100}, nil
+}
+
+func TestKYAMLDispatchJSONMarshalerWins(t *testing.T) {
+	out, err := MarshalKYAML(kyamlJSONMarshalerType{X: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "json_x:") || !strings.Contains(s, "10,") {
+		t.Errorf("expected json.Marshaler path under KYAML, got:\n%s", s)
+	}
+	if strings.Contains(s, "yaml_x") {
+		t.Errorf("yaml.Marshaler should not be used under KYAML when json.Marshaler exists:\n%s", s)
+	}
+}
+
+// kyamlYAMLOnlyMarshaler implements only yaml.Marshaler — KYAML falls back
+// to it when json.Marshaler is not implemented.
+type kyamlYAMLOnlyMarshaler struct{ V string }
+
+func (k kyamlYAMLOnlyMarshaler) MarshalYAML() (any, error) {
+	return map[string]string{"v": k.V}, nil
+}
+
+func TestKYAMLDispatchYAMLMarshalerFallback(t *testing.T) {
+	out, err := MarshalKYAML(kyamlYAMLOnlyMarshaler{V: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `v: "hello",`) {
+		t.Errorf("yaml.Marshaler fallback did not produce expected output:\n%s", out)
+	}
+}
+
+// kyamlBytesMarshaler implements BytesMarshaler returning JSON bytes.
+type kyamlBytesMarshaler struct{ S string }
+
+func (k kyamlBytesMarshaler) MarshalYAML() ([]byte, error) {
+	return fmt.Appendf(nil, `{"s":"%s"}`, k.S), nil
+}
+
+func TestKYAMLDispatchBytesMarshaler(t *testing.T) {
+	out, err := MarshalKYAML(kyamlBytesMarshaler{S: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `s: "hi"`) {
+		t.Errorf("BytesMarshaler path did not produce expected output:\n%s", out)
+	}
+}
+
+// kyamlTextMarshaler implements only encoding.TextMarshaler.
+type kyamlTextMarshaler struct{ N int }
+
+func (k kyamlTextMarshaler) MarshalText() ([]byte, error) {
+	return fmt.Appendf(nil, "n=%d", k.N), nil
+}
+
+func TestKYAMLDispatchTextMarshaler(t *testing.T) {
+	out, err := MarshalKYAML(kyamlTextMarshaler{N: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"n=7"`) {
+		t.Errorf("TextMarshaler path did not produce expected output:\n%s", out)
+	}
+}
+
+func TestKYAMLDispatchCustomMarshaler(t *testing.T) {
+	type custom struct{ N int }
+	custFn := func(c custom) ([]byte, error) {
+		return fmt.Appendf(nil, "%d", c.N*3), nil
+	}
+	out, err := MarshalWithOptions(custom{N: 4}, WithKYAML(), WithCustomMarshaler[custom](custFn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "12") {
+		t.Errorf("custom marshaler path did not produce expected output:\n%s", out)
+	}
+}
+
+func TestKYAMLDispatchCustomMarshalerError(t *testing.T) {
+	type custom struct{}
+	want := errors.New("boom")
+	custFn := func(c custom) ([]byte, error) { return nil, want }
+	_, err := MarshalWithOptions(custom{}, WithKYAML(), WithCustomMarshaler[custom](custFn))
+	if !errors.Is(err, want) {
+		t.Errorf("expected custom marshaler error, got %v", err)
+	}
+}
+
+func TestKYAMLEncodeJSONNumber(t *testing.T) {
+	v := map[string]any{
+		"a": json.Number("3.10"),
+		"b": json.Number(""),
+		"c": json.Number("12345"),
+	}
+	out, err := MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "a: 3.10,") {
+		t.Errorf("json.Number 3.10 not preserved verbatim:\n%s", s)
+	}
+	if !strings.Contains(s, "b: 0,") {
+		t.Errorf("empty json.Number should emit as 0:\n%s", s)
+	}
+	if !strings.Contains(s, "c: 12345,") {
+		t.Errorf("json.Number 12345 not preserved:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeJSONRawMessage(t *testing.T) {
+	raw := json.RawMessage(`{"port":80,"name":"x"}`)
+	out, err := MarshalKYAML(map[string]any{"r": raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "name: ") || !strings.Contains(s, "port: 80,") {
+		t.Errorf("json.RawMessage not re-emitted as KYAML:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeJSONRawMessageInvalid(t *testing.T) {
+	raw := json.RawMessage(`not valid json`)
+	_, err := MarshalKYAML(map[string]any{"r": raw})
+	if err == nil {
+		t.Error("expected error for invalid json.RawMessage")
+	}
+}
+
+func TestKYAMLEncodeBigByValue(t *testing.T) {
+	bi := big.NewInt(99999)
+	bf := big.NewFloat(3.14)
+	v := map[string]any{
+		"i":     *bi, // value, not pointer
+		"f":     *bf, // value
+		"i_ptr": bi,
+		"f_ptr": bf,
+	}
+	out, err := MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "i: 99999,") || !strings.Contains(s, "i_ptr: 99999,") {
+		t.Errorf("big.Int not rendered:\n%s", s)
+	}
+	if !strings.Contains(s, "f: 3.14,") || !strings.Contains(s, "f_ptr: 3.14,") {
+		t.Errorf("big.Float not rendered:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeTimeAndDuration(t *testing.T) {
+	tt := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	v := map[string]any{
+		"t": tt,
+		"d": time.Hour + 30*time.Minute,
+	}
+	out, err := MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, `"2026-05-07T12:00:00Z"`) {
+		t.Errorf("time.Time not RFC 3339-quoted:\n%s", s)
+	}
+	if !strings.Contains(s, "d: 5400000000000,") {
+		t.Errorf("time.Duration not int64 nanoseconds:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeUnsupportedTypes(t *testing.T) {
+	cases := []struct {
+		name string
+		v    any
+	}{
+		{"chan", make(chan int)},
+		{"func", func() {}},
+		{"complex", complex(1, 2)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := MarshalKYAML(tc.v)
+			if !errors.Is(err, ErrUnsupported) {
+				t.Errorf("expected ErrUnsupported for %s, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestKYAMLEncodeCyclic(t *testing.T) {
+	type cell struct {
+		Name string `json:"name"`
+		Next *cell  `json:"next"`
+	}
+	a := &cell{Name: "a"}
+	b := &cell{Name: "b"}
+	a.Next = b
+	b.Next = a
+	_, err := MarshalKYAML(a)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Errorf("expected ErrUnsupported for cyclic value, got %v", err)
+	}
+}
+
+func TestKYAMLEncodeBase64BytesAndArray(t *testing.T) {
+	v := map[string]any{
+		"sl":  []byte("hi"),
+		"arr": [2]byte{'h', 'i'},
+	}
+	out, err := MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, `sl: "aGk=",`) {
+		t.Errorf("[]byte not base64-encoded:\n%s", s)
+	}
+	if !strings.Contains(s, `arr: "aGk=",`) {
+		t.Errorf("[N]byte not base64-encoded:\n%s", s)
+	}
+}
+
+// kyamlTextMarshalerKey implements TextMarshaler so it can be used as a
+// non-string mapping key — exercises mapKeyToString's TextMarshaler branch.
+type kyamlTextMarshalerKey struct{ ID int }
+
+func (k kyamlTextMarshalerKey) MarshalText() ([]byte, error) {
+	return fmt.Appendf(nil, "id-%d", k.ID), nil
+}
+
+func TestKYAMLEncodeMapTextMarshalerKey(t *testing.T) {
+	v := map[kyamlTextMarshalerKey]string{
+		{ID: 1}: "one",
+		{ID: 2}: "two",
+	}
+	out, err := MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	// id-1 is a safe identifier under the unquoted-key predicate (alphanumeric
+	// + dash), so the TextMarshaler-derived key emits unquoted.
+	if !strings.Contains(s, `id-1: "one"`) || !strings.Contains(s, `id-2: "two"`) {
+		t.Errorf("TextMarshaler map key not used:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeMapSliceOrdered(t *testing.T) {
+	ms := MapSlice{
+		{Key: "z", Value: 1},
+		{Key: "a", Value: 2},
+		{Key: "m", Value: 3},
+	}
+	out, err := MarshalKYAML(ms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	posZ := strings.Index(s, "z:")
+	posA := strings.Index(s, "a:")
+	posM := strings.Index(s, "m:")
+	if !(posZ < posA && posA < posM) {
+		t.Errorf("MapSlice should preserve insertion order, got:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeMapSliceEmpty(t *testing.T) {
+	out, err := MarshalKYAML(MapSlice{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "{}") {
+		t.Errorf("empty MapSlice should render as {}:\n%s", out)
+	}
+}
+
+func TestKYAMLEncodeStructInlineMap(t *testing.T) {
+	type S struct {
+		Name  string         `json:"name"`
+		Extra map[string]int `yaml:",inline"`
+	}
+	v := S{Name: "x", Extra: map[string]int{"a": 1, "b": 2}}
+	out, err := MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "name:") || !strings.Contains(s, "a: 1,") || !strings.Contains(s, "b: 2,") {
+		t.Errorf("inline-map struct field not flattened:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeStructEmbedded(t *testing.T) {
+	type Inner struct {
+		Alpha int `json:"alpha"`
+		Beta  int `json:"beta"`
+	}
+	type Outer struct {
+		Inner
+		Z int `json:"z"`
+	}
+	out, err := MarshalKYAML(Outer{Inner: Inner{Alpha: 1, Beta: 2}, Z: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{"alpha: 1,", "beta: 2,", "z: 3,"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expected %q in:\n%s", want, s)
+		}
+	}
+}
+
+func TestKYAMLEncodeStructOmitEmpty(t *testing.T) {
+	type S struct {
+		Name string `json:"name,omitempty"`
+		Age  int    `json:"age,omitempty"`
+	}
+	out, err := MarshalKYAML(S{Name: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "age:") {
+		t.Errorf("zero age should be omitted with omitempty:\n%s", s)
+	}
+	if !strings.Contains(s, `name: "x",`) {
+		t.Errorf("non-zero name should be present:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeStructSkipDash(t *testing.T) {
+	type S struct {
+		Public  string `json:"public"`
+		Private string `json:"-"`
+	}
+	out, err := MarshalKYAML(S{Public: "p", Private: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "secret") {
+		t.Errorf("dash-tagged field should be skipped:\n%s", out)
+	}
+}
+
+func TestKYAMLEncodeStructPointerToStruct(t *testing.T) {
+	type Inner struct {
+		X int `json:"x"`
+	}
+	type Outer struct {
+		I *Inner `json:"i"`
+	}
+	out, err := MarshalKYAML(Outer{I: &Inner{X: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "x: 7,") {
+		t.Errorf("nested pointer struct not encoded:\n%s", out)
+	}
+}
+
+func TestKYAMLEncodeStructFlowOnly(t *testing.T) {
+	// Even when a field has yaml:",flow" tag, KYAML mode is already flow,
+	// so the tag is moot but should not error.
+	type S struct {
+		L []int `yaml:"l,flow"`
+	}
+	out, err := MarshalKYAML(S{L: []int{1, 2, 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ValidKYAML(out) {
+		t.Errorf("output not valid KYAML: %v\n%s", ValidateKYAML(out), out)
+	}
+}
+
+func TestKYAMLEncodeYAMLTagOnly(t *testing.T) {
+	// Field with only a yaml tag (no json tag) — fallback path under KYAML.
+	type S struct {
+		Name string `yaml:"my_name"`
+	}
+	out, err := MarshalKYAML(S{Name: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "my_name:") {
+		t.Errorf("yaml-only tag not honored under KYAML:\n%s", out)
+	}
+}
+
+// kyamlYAMLContextMarshaler implements MarshalerContext.
+type kyamlYAMLContextMarshaler struct{ Tag string }
+
+func (k kyamlYAMLContextMarshaler) MarshalYAML(ctx context.Context) (any, error) {
+	if ctx == nil {
+		return nil, errors.New("nil ctx")
+	}
+	return map[string]string{"tag": k.Tag}, nil
+}
+
+func TestKYAMLDispatchContextMarshaler(t *testing.T) {
+	var buf bytes.Buffer
+	enc := NewEncoder(&buf, WithKYAML())
+	if err := enc.EncodeContext(context.Background(), kyamlYAMLContextMarshaler{Tag: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `tag: "v1",`) {
+		t.Errorf("MarshalerContext path did not render:\n%s", buf.String())
+	}
+}
+
+// kyamlEscapeStruct exercises every branch of escapeKYAMLLine: control
+// characters (\b, \f, \v, \e, \0, \a, generic \xHH), the YAML 1.2 special
+// chars NEL (U+0085), Line Separator (U+2028), Paragraph Separator (U+2029),
+// and high-7F controls.
+func TestKYAMLEscapeAllSpecials(t *testing.T) {
+	cases := map[string]string{
+		"\x00": `\0`,
+		"\x07": `\a`,
+		"\x08": `\b`,
+		"\x0b": `\v`,
+		"\x0c": `\f`,
+		"\x1b": `\e`,
+		"\x05": `\x05`,
+		"\x7f": `\x7f`,
+		// "" is the C1 PAD control char encoded as proper UTF-8 (\xc2\x80)
+		// — escapes to \x80 per the C1 control range.
+		"":        `\x80`,
+		"":        `\N`,
+		" ":        `\L`,
+		" ":        `\P`,
+		"\xff\x30": `\xef\xbf\xbd0`, // invalid UTF-8 → U+FFFD literal
+	}
+	for in, want := range cases {
+		t.Run(fmt.Sprintf("%q", in), func(t *testing.T) {
+			out, err := MarshalKYAML(map[string]string{"k": in})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := string(out)
+			// For the invalid-UTF-8 case, the literal U+FFFD UTF-8 (3 bytes)
+			// is emitted directly rather than as an escape sequence — accept
+			// either the escape form or the literal form.
+			if in == "\xff\x30" {
+				if !strings.Contains(s, "�") && !strings.Contains(s, want) {
+					t.Errorf("expected U+FFFD literal or %q in:\n%s", want, s)
+				}
+				return
+			}
+			if !strings.Contains(s, want) {
+				t.Errorf("expected escape %q for input %q in:\n%s", want, in, s)
+			}
+		})
+	}
+}
+
+func TestKYAMLEncodeMapNonStringKeyRejected(t *testing.T) {
+	// Map with int key (no TextMarshaler) must be rejected under KYAML
+	// (R4.4: only string-typed keys allowed).
+	v := map[int]string{1: "one"}
+	_, err := MarshalKYAML(v)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Errorf("expected ErrUnsupported for int-keyed map, got %v", err)
+	}
+}
+
+// kyamlNilTextMarshalerKey is a pointer-typed key that may be nil.
+type kyamlNilTextMarshalerKey struct{ Name string }
+
+func (k *kyamlNilTextMarshalerKey) MarshalText() ([]byte, error) {
+	if k == nil {
+		return nil, errors.New("nil")
+	}
+	return []byte(k.Name), nil
+}
+
+func TestKYAMLEncodeMapNilKeyRejected(t *testing.T) {
+	v := map[*kyamlNilTextMarshalerKey]int{nil: 1}
+	_, err := MarshalKYAML(v)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Errorf("expected ErrUnsupported for nil map key, got %v", err)
+	}
+}
+
+// kyamlBadTextMarshalerKey returns an error from MarshalText.
+type kyamlBadTextMarshalerKey struct{}
+
+func (k kyamlBadTextMarshalerKey) MarshalText() ([]byte, error) {
+	return nil, errors.New("kyamlBadTextMarshalerKey: marshaltext failed")
+}
+
+func TestKYAMLEncodeMapTextMarshalerKeyError(t *testing.T) {
+	v := map[kyamlBadTextMarshalerKey]int{{}: 1}
+	_, err := MarshalKYAML(v)
+	if err == nil || !strings.Contains(err.Error(), "marshaltext failed") {
+		t.Errorf("expected MarshalText error to bubble up, got %v", err)
+	}
+}
+
+func TestKYAMLEncodeMapSliceKeyTypes(t *testing.T) {
+	// MapSlice supports any-typed keys; mapKeyAnyToString routes through
+	// type switch for string/TextMarshaler/reflect fallback.
+	cases := []struct {
+		name string
+		ms   MapSlice
+		want string
+	}{
+		{
+			name: "string-key",
+			ms:   MapSlice{{Key: "name", Value: 1}},
+			want: "name:",
+		},
+		{
+			name: "text-marshaler-key",
+			ms:   MapSlice{{Key: kyamlTextMarshalerKey{ID: 5}, Value: "x"}},
+			want: "id-5:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := MarshalKYAML(tc.ms)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Errorf("expected %q in:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+func TestKYAMLEncodeMapSliceNilKeyRejected(t *testing.T) {
+	ms := MapSlice{{Key: nil, Value: 1}}
+	_, err := MarshalKYAML(ms)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Errorf("expected ErrUnsupported for nil MapSlice key, got %v", err)
+	}
+}
+
+func TestKYAMLEncodeMapSliceUnsupportedKeyType(t *testing.T) {
+	// A non-string non-TextMarshaler value as MapSlice key.
+	type opaque struct{ X int }
+	ms := MapSlice{{Key: opaque{X: 1}, Value: 2}}
+	_, err := MarshalKYAML(ms)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Errorf("expected ErrUnsupported for opaque MapSlice key, got %v", err)
+	}
+}
+
+// kyamlPlainBytesMarshaler returns non-JSON, non-YAML bytes — exercises the
+// emitRawJSONOrText fallback path that wraps the bytes as a quoted string.
+type kyamlPlainBytesMarshaler struct{ S string }
+
+func (k kyamlPlainBytesMarshaler) MarshalYAML() ([]byte, error) {
+	return []byte(k.S), nil
+}
+
+func TestKYAMLDispatchBytesMarshalerPlainString(t *testing.T) {
+	// MarshalYAML returns plain text that's not parseable as JSON. The
+	// emitRawJSONOrText fallback should quote it as a KYAML string.
+	out, err := MarshalKYAML(kyamlPlainBytesMarshaler{S: "not json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"not json"`) {
+		t.Errorf("BytesMarshaler plain-text fallback did not quote string:\n%s", out)
+	}
+}
+
+func TestKYAMLDispatchCustomMarshalerPlainText(t *testing.T) {
+	// Custom marshaler returning non-JSON bytes — same fallback path.
+	type plain struct{ V string }
+	custFn := func(p plain) ([]byte, error) { return []byte(p.V), nil }
+	out, err := MarshalWithOptions(plain{V: "free text"}, WithKYAML(),
+		WithCustomMarshaler[plain](custFn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"free text"`) {
+		t.Errorf("custom marshaler plain-text fallback did not quote:\n%s", out)
+	}
+}
+
+func TestKYAMLEncodeFloat32(t *testing.T) {
+	// Exercise emitFloat's 32-bit path.
+	v := map[string]float32{"a": float32(1.5), "b": float32(2.0)}
+	out, err := MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "a: 1.5,") || !strings.Contains(s, "b: 2,") {
+		t.Errorf("float32 not rendered correctly:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeInterfaceNil(t *testing.T) {
+	type S struct {
+		I any `json:"i"`
+	}
+	out, err := MarshalKYAML(S{I: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "i: null,") {
+		t.Errorf("nil interface should render as null:\n%s", out)
+	}
+}
+
+func TestKYAMLEncodeUnsignedAndSignedInts(t *testing.T) {
+	v := map[string]any{
+		"i8":  int8(-12),
+		"i16": int16(-300),
+		"i32": int32(-99999),
+		"u8":  uint8(255),
+		"u16": uint16(65535),
+		"u32": uint32(4294967295),
+		"u64": uint64(1 << 63),
+	}
+	out, err := MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"i8: -12,", "u8: 255,", "u64: 9223372036854775808,"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("expected %q in:\n%s", want, out)
+		}
+	}
+}
+
+// kyamlYAMLMarshalerError returns an error from MarshalYAML — exercises the
+// dispatchMarshaler error-return branch for yaml.Marshaler.
+type kyamlYAMLMarshalerError struct{}
+
+func (kyamlYAMLMarshalerError) MarshalYAML() (any, error) {
+	return nil, errors.New("yaml marshaler boom")
+}
+
+func TestKYAMLDispatchYAMLMarshalerError(t *testing.T) {
+	_, err := MarshalKYAML(kyamlYAMLMarshalerError{})
+	if err == nil || !strings.Contains(err.Error(), "yaml marshaler boom") {
+		t.Errorf("expected yaml.Marshaler error to bubble up, got %v", err)
+	}
+}
+
+// kyamlBytesMarshalerError returns an error from BytesMarshaler.
+type kyamlBytesMarshalerError struct{}
+
+func (kyamlBytesMarshalerError) MarshalYAML() ([]byte, error) {
+	return nil, errors.New("bytes marshaler boom")
+}
+
+func TestKYAMLDispatchBytesMarshalerError(t *testing.T) {
+	_, err := MarshalKYAML(kyamlBytesMarshalerError{})
+	if err == nil || !strings.Contains(err.Error(), "bytes marshaler boom") {
+		t.Errorf("expected BytesMarshaler error to bubble up, got %v", err)
+	}
+}
+
+// kyamlTextMarshalerError returns an error from MarshalText.
+type kyamlTextMarshalerError struct{}
+
+func (kyamlTextMarshalerError) MarshalText() ([]byte, error) {
+	return nil, errors.New("text marshaler boom")
+}
+
+func TestKYAMLDispatchTextMarshalerError(t *testing.T) {
+	_, err := MarshalKYAML(kyamlTextMarshalerError{})
+	if err == nil || !strings.Contains(err.Error(), "text marshaler boom") {
+		t.Errorf("expected TextMarshaler error to bubble up, got %v", err)
+	}
+}
+
+func TestKYAMLEncodeStructJSONAndYAMLTagMerge(t *testing.T) {
+	// Both json and yaml tags present — under KYAML, json wins for the
+	// name but yaml-only options (omitempty, etc.) merge in.
+	type S struct {
+		A string `json:"a" yaml:"a,omitempty"`
+		B string `json:"b" yaml:"b,inline"`
+		C string `json:"c" yaml:"c,required"`
+	}
+	v := S{A: "", B: "x", C: "y"}
+	out, err := MarshalKYAML(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "a:") {
+		t.Errorf("yaml omitempty should suppress empty string A:\n%s", out)
+	}
+	if !strings.Contains(string(out), `b: "x"`) || !strings.Contains(string(out), `c: "y"`) {
+		t.Errorf("non-omitted fields missing:\n%s", out)
+	}
+}
+
+func TestKYAMLEncodeStructInlineStruct(t *testing.T) {
+	type Inner struct {
+		Alpha int `json:"alpha"`
+	}
+	type Outer struct {
+		Inner Inner `yaml:",inline"`
+		Beta  int   `json:"beta"`
+	}
+	out, err := MarshalKYAML(Outer{Inner: Inner{Alpha: 1}, Beta: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "alpha: 1,") || !strings.Contains(s, "beta: 2,") {
+		t.Errorf("inline struct fields not flattened:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeStructEmbeddedPointer(t *testing.T) {
+	// Anonymous embedded *struct (pointer) — exercises the pointer-unwrap
+	// branch in collectKYAMLFields.
+	type Inner struct {
+		Alpha int `json:"alpha"`
+	}
+	type Outer struct {
+		*Inner
+		Beta int `json:"beta"`
+	}
+	out, err := MarshalKYAML(Outer{Inner: &Inner{Alpha: 1}, Beta: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "alpha: 1,") {
+		t.Errorf("embedded pointer struct field not flattened:\n%s", s)
+	}
+}
+
+func TestKYAMLEncodeStructConflict(t *testing.T) {
+	// Two fields at the same depth resolving to the same effective name.
+	// One uses json:"alpha"; the other uses yaml:"alpha" without a json
+	// tag (under KYAML the yaml tag is the fallback). Both end up named
+	// "alpha" — the field collector flags a conflict that surfaces as
+	// an encode error. (Constructed this way to avoid the go vet
+	// `structtag` warning on literally-repeated json tags.)
+	type S struct {
+		A int `json:"alpha"`
+		B int `yaml:"alpha"`
+	}
+	_, err := MarshalKYAML(S{A: 1, B: 2})
+	if err == nil {
+		t.Error("expected error for conflicting field names")
+	}
+}
+
+func TestKYAMLEncodeNilSliceAndMap(t *testing.T) {
+	// nil slice/map render as null per KYAML semantics. Empty (non-nil)
+	// render as [] / {}.
+	type S struct {
+		L1 []int          `json:"l1"`
+		M1 map[string]int `json:"m1"`
+	}
+	out, err := MarshalKYAML(S{L1: nil, M1: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "l1: null,") || !strings.Contains(s, "m1: null,") {
+		t.Errorf("nil slice/map should render as null:\n%s", s)
 	}
 }
