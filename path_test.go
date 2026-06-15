@@ -1,6 +1,7 @@
 package yaml
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -798,5 +799,91 @@ func TestPathWildcardMatch(t *testing.T) {
 	}
 	if len(nodes) != 3 {
 		t.Errorf("expected 3 matches from wildcard, got %d", len(nodes))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PathPointer (RFC 6901)
+// ---------------------------------------------------------------------------
+
+func TestPathPointerObjectAndIndex(t *testing.T) {
+	input := "foo:\n  bar:\n    - name: a\n    - name: b\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := PathPointer("/foo/bar/1/name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := p.Read(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Value != "b" {
+		t.Errorf("got %+v, want scalar b", nodes)
+	}
+}
+
+func TestPathPointerPositions(t *testing.T) {
+	input := "items:\n  - name: a\n  - name: b\n"
+	file, _ := Parse([]byte(input))
+	p, _ := PathPointer("/items/0/name")
+	positions, err := p.ReadPositions(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(positions) != 1 || positions[0].Line == 0 {
+		t.Errorf("got positions %+v", positions)
+	}
+}
+
+func TestPathPointerEmptySelectsRoot(t *testing.T) {
+	file, _ := Parse([]byte("foo: bar\n"))
+	p, err := PathPointer("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := p.Read(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Kind != MappingNode {
+		t.Errorf("empty pointer should select the document root, got %+v", nodes)
+	}
+}
+
+func TestPathPointerEscapes(t *testing.T) {
+	// Keys containing "/" and "~" are encoded as ~1 and ~0 in the pointer.
+	input := "\"a/b\":\n  \"c~d\": 42\n"
+	file, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := PathPointer("/a~1b/c~0d")
+	nodes, err := p.Read(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Value != "42" {
+		t.Errorf("escape decoding wrong: %+v", nodes)
+	}
+}
+
+func TestPathPointerInvalid(t *testing.T) {
+	if _, err := PathPointer("foo"); !errors.Is(err, ErrPointerSyntax) {
+		t.Errorf("expected ErrPointerSyntax, got %v", err)
+	}
+}
+
+func TestPathPointerNotFound(t *testing.T) {
+	file, _ := Parse([]byte("foo: bar\n"))
+	p, _ := PathPointer("/missing")
+	nodes, err := p.Read(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 0 {
+		t.Errorf("expected no matches, got %+v", nodes)
 	}
 }

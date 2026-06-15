@@ -227,6 +227,7 @@ var (
 
 	ErrPathSyntax     = errors.New("yaml: invalid path syntax")
 	ErrPathNotFound   = errors.New("yaml: path not found")
+	ErrPointerSyntax  = errors.New("yaml: invalid JSON Pointer syntax")
 	ErrNilPointer     = errors.New("yaml: non-nil pointer required")
 	ErrDocumentSize   = errors.New("yaml: document size exceeds limit")
 	ErrPathEscape     = errors.New("yaml: reference path escapes allowed directory")

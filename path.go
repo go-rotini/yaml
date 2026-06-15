@@ -149,6 +149,63 @@ func PathString(expr string) (*Path, error) {
 	return p, nil
 }
 
+// PathPointer compiles an RFC 6901 JSON Pointer into a [Path]. The empty
+// string selects the document root; any other pointer must begin with "/".
+// Reference tokens are unescaped per RFC 6901 ("~1" → "/", then "~0" → "~").
+//
+// A JSON Pointer token can address either a mapping key or a sequence index —
+// the document decides which — so each token compiles to a segment that
+// resolves as a child key on a [MappingNode] and, when the token is a
+// non-negative integer, as an index on a [SequenceNode].
+//
+// Returns [ErrPointerSyntax] (wrapped) when a non-empty pointer does not begin
+// with "/".
+func PathPointer(ptr string) (*Path, error) {
+	p := &Path{segments: []pathSegment{rootSegment{}}}
+	if ptr == "" {
+		return p, nil
+	}
+	if ptr[0] != '/' {
+		return nil, fmt.Errorf("%w: pointer must start with /", ErrPointerSyntax)
+	}
+	for tok := range strings.SplitSeq(ptr[1:], "/") {
+		name := decodePointerToken(tok)
+		seg := pointerSegment{name: name}
+		if i, err := strconv.Atoi(name); err == nil && i >= 0 {
+			seg.index, seg.hasIndex = i, true
+		}
+		p.segments = append(p.segments, seg)
+	}
+	return p, nil
+}
+
+// decodePointerToken applies the RFC 6901 unescaping rules to one reference
+// token: "~1" → "/" then "~0" → "~" (order matters).
+func decodePointerToken(tok string) string {
+	tok = strings.ReplaceAll(tok, "~1", "/")
+	tok = strings.ReplaceAll(tok, "~0", "~")
+	return tok
+}
+
+// pointerSegment resolves a single RFC 6901 reference token. A JSON Pointer
+// leaves array-vs-mapping resolution to the document, so the token matches a
+// mapping key first and falls back to a sequence index when it is numeric.
+type pointerSegment struct {
+	name     string
+	index    int
+	hasIndex bool
+}
+
+func (s pointerSegment) match(n *Node) []*Node {
+	if matches := (childSegment{name: s.name}).match(n); len(matches) > 0 {
+		return matches
+	}
+	if s.hasIndex {
+		return indexSegment{idx: s.index}.match(n)
+	}
+	return nil
+}
+
 // Read evaluates the path against the [Node] tree rooted at n and returns
 // all matching nodes.
 func (p *Path) Read(n *Node) ([]*Node, error) {
