@@ -445,7 +445,10 @@ func (p *parser) parseBlockMapping() (*node, error) {
 		pos:  p.peek().pos,
 	}
 
-	if p.peek().kind == tokenBlockMappingStart {
+	// A mapping reached without a start token opened no indentation level
+	// of its own, so the next BlockEnd belongs to an enclosing collection.
+	started := p.peek().kind == tokenBlockMappingStart
+	if started {
 		p.advance()
 	}
 
@@ -555,7 +558,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 		break
 	}
 
-	if p.peek().kind == tokenBlockEnd {
+	if started && p.peek().kind == tokenBlockEnd {
 		p.advance()
 	}
 
@@ -636,11 +639,16 @@ func (p *parser) parseBlockSequence() (*node, error) {
 		if p.peek().kind != tokenBlockEntry {
 			break
 		}
+		entry := p.peek()
 		p.advance()
 		p.skipComments()
 
 		t := p.peek()
-		if t.kind == tokenBlockEntry || t.kind == tokenBlockEnd ||
+		// In an indentless sequence, a key on a later line that is no deeper
+		// than the `-` belongs to the parent mapping, so the entry is empty.
+		siblingKey := !started && (t.kind == tokenKey || t.kind == tokenValue) &&
+			t.pos.Line > entry.pos.Line && t.pos.Column <= entry.pos.Column
+		if siblingKey || t.kind == tokenBlockEntry || t.kind == tokenBlockEnd ||
 			t.kind == tokenDocumentStart || t.kind == tokenDocumentEnd ||
 			t.kind == tokenStreamEnd {
 			seq.children = append(seq.children, &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true})

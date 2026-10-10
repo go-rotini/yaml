@@ -97,7 +97,7 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 	// style). Re-parse and re-emit so they don't flow through verbatim.
 	// Must run before dispatchMarshaler since RawValue implements BytesMarshaler.
 	if v.CanInterface() {
-		if rv, ok := v.Interface().(RawValue); ok {
+		if rv, ok := reflect.TypeAssert[RawValue](v); ok {
 			return e.emitRawValue(rv, indent)
 		}
 	}
@@ -162,9 +162,9 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 		return nil
 	case reflect.Bool:
 		if v.Bool() {
-			e.buf = append(e.buf, "true"...)
+			e.buf = append(e.buf, trueLiteral...)
 		} else {
-			e.buf = append(e.buf, "false"...)
+			e.buf = append(e.buf, falseLiteral...)
 		}
 		return nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -181,7 +181,7 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 			return nil
 		}
 		if v.Type() == reflect.TypeFor[MapSlice]() {
-			ms, _ := v.Interface().(MapSlice)
+			ms, _ := reflect.TypeAssert[MapSlice](v)
 			return e.emitMapSlice(ms, indent)
 		}
 		if v.Type().Elem().Kind() == reflect.Uint8 {
@@ -223,10 +223,10 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 		if fn, ok := e.opts.customMarshalers[v.Type()]; ok {
 			out := reflect.ValueOf(fn).Call([]reflect.Value{v})
 			if !out[1].IsNil() {
-				e2, _ := out[1].Interface().(error)
+				e2, _ := reflect.TypeAssert[error](out[1])
 				return true, e2
 			}
-			data, _ := out[0].Interface().([]byte)
+			data, _ := reflect.TypeAssert[[]byte](out[0])
 			// The custom marshaler may have produced YAML or JSON; re-parse
 			// and re-emit to keep the output strictly KYAML.
 			return true, e.emitRawJSONOrText(data, indent)
@@ -234,7 +234,7 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 	}
 
 	if v.CanInterface() {
-		if m, ok := v.Interface().(json.Marshaler); ok {
+		if m, ok := reflect.TypeAssert[json.Marshaler](v); ok {
 			data, mErr := m.MarshalJSON()
 			if mErr != nil {
 				return true, fmt.Errorf("yaml: %T.MarshalJSON: %w", v.Interface(), mErr)
@@ -243,7 +243,7 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 		}
 	}
 	if v.CanAddr() {
-		if m, ok := v.Addr().Interface().(json.Marshaler); ok {
+		if m, ok := reflect.TypeAssert[json.Marshaler](v.Addr()); ok {
 			data, mErr := m.MarshalJSON()
 			if mErr != nil {
 				return true, fmt.Errorf("yaml: %T.MarshalJSON: %w", v.Addr().Interface(), mErr)
@@ -733,8 +733,8 @@ func escapeKYAMLLine(s string) string {
 var typeAmbiguousKeys = map[string]struct{}{
 	"y": {}, "Y": {}, "yes": {}, "Yes": {}, "YES": {},
 	"n": {}, "N": {}, "no": {}, "No": {}, "NO": {},
-	"true": {}, "True": {}, "TRUE": {},
-	"false": {}, "False": {}, "FALSE": {},
+	trueLiteral: {}, "True": {}, "TRUE": {},
+	falseLiteral: {}, "False": {}, "FALSE": {},
 	"on": {}, "On": {}, "ON": {},
 	"off": {}, "Off": {}, "OFF": {},
 	"null": {}, "Null": {}, "NULL": {},
@@ -806,7 +806,7 @@ func mapKeyToString(k reflect.Value) (string, error) {
 		return k.String(), nil
 	}
 	if k.CanInterface() {
-		if tm, ok := k.Interface().(encoding.TextMarshaler); ok {
+		if tm, ok := reflect.TypeAssert[encoding.TextMarshaler](k); ok {
 			data, err := tm.MarshalText()
 			if err != nil {
 				return "", err
@@ -1262,7 +1262,7 @@ func validateKYAMLScalar(n *node, asKey bool, out *[]KYAMLViolation) {
 	}
 	val := n.value
 	switch val {
-	case "null", "true", "false", "":
+	case nullLiteral, trueLiteral, falseLiteral, "":
 		return
 	case "Null", "NULL", "~":
 		*out = append(*out, KYAMLViolation{
