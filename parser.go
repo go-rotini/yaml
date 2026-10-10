@@ -623,7 +623,11 @@ func (p *parser) parseBlockSequence() (*node, error) {
 		pos:  p.peek().pos,
 	}
 
-	if p.peek().kind == tokenBlockSequenceStart {
+	// An indentless sequence (entries at the same column as the parent
+	// mapping key) opens no indentation level, so the scanner emits no
+	// start token and the next BlockEnd belongs to the enclosing mapping.
+	started := p.peek().kind == tokenBlockSequenceStart
+	if started {
 		p.advance()
 	}
 
@@ -689,7 +693,7 @@ func (p *parser) parseBlockSequence() (*node, error) {
 		}
 	}
 
-	if p.peek().kind == tokenBlockEnd {
+	if started && p.peek().kind == tokenBlockEnd {
 		p.advance()
 	}
 

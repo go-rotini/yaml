@@ -36,12 +36,12 @@
           },
         }],
       },
-      tls: [{
-        hosts: [
-          "example.com",
-        ],
-        secretName: "example-tls",
-      }],
+    }],
+    tls: [{
+      hosts: [
+        "example.com",
+      ],
+      secretName: "example-tls",
     }],
   },
 }
