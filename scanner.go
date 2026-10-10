@@ -8,6 +8,8 @@ import (
 	"unicode/utf8"
 )
 
+const msgTabIndent = "tab character used for indentation"
+
 type scanner struct {
 	src               []byte
 	pos               int
@@ -167,7 +169,7 @@ func (s *scanner) scanNext() error {
 					spaces++
 				case '\t':
 					if spaces <= s.flowBlockIndent || spaces <= 0 {
-						return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
+						return &SyntaxError{Message: msgTabIndent, Pos: s.position()}
 					}
 					goto doneFlowIndent
 				default:
@@ -195,7 +197,7 @@ func (s *scanner) scanBlockToken() error {
 				if spaces > s.indent && spaces > 0 {
 					goto doneBlockIndent
 				}
-				return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
+				return &SyntaxError{Message: msgTabIndent, Pos: s.position()}
 			default:
 				goto doneBlockIndent
 			}
@@ -754,7 +756,7 @@ headerLoop:
 
 		if lineCol < blockIndent {
 			if !s.atEnd() && s.peek() == '\t' {
-				return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
+				return &SyntaxError{Message: msgTabIndent, Pos: s.position()}
 			}
 			s.pos = lineStart
 			s.col -= lineCol
@@ -1065,7 +1067,7 @@ func (s *scanner) scanDoubleQuotedScalar() error {
 			}
 			if s.flow == 0 && !s.atEnd() && leadingSpaces <= s.indent {
 				if hadTab {
-					return &SyntaxError{Message: "tab character used for indentation", Pos: s.position()}
+					return &SyntaxError{Message: msgTabIndent, Pos: s.position()}
 				}
 				return &SyntaxError{Message: "quoted scalar continuation not indented enough", Pos: s.position()}
 			}
@@ -1339,7 +1341,7 @@ func (s *scanner) checkTabIndentAt(p Position) {
 	for i := p.Offset - 1; i >= lineStart; i-- {
 		ch := s.src[i]
 		if ch == '\t' {
-			s.scanErr = &SyntaxError{Message: "tab character used for indentation", Pos: p}
+			s.scanErr = &SyntaxError{Message: msgTabIndent, Pos: p}
 			return
 		}
 		if ch != ' ' {

@@ -28,16 +28,16 @@
                     "green",
                     "blue",
                   ],
-                  size: {
-                    type: "integer",
-                    minimum: 1,
-                    maximum: 100,
-                  },
-                  metadata: {
-                    type: "object",
-                    additionalProperties: {
-                      type: "string",
-                    },
+                },
+                size: {
+                  type: "integer",
+                  minimum: 1,
+                  maximum: 100,
+                },
+                metadata: {
+                  type: "object",
+                  additionalProperties: {
+                    type: "string",
                   },
                 },
               },
@@ -45,15 +45,15 @@
           },
         },
       },
-      scope: "Namespaced",
-      names: {
-        plural: "widgets",
-        singular: "widget",
-        kind: "Widget",
-        shortNames: [
-          "wd",
-        ],
-      },
     }],
+    scope: "Namespaced",
+    names: {
+      plural: "widgets",
+      singular: "widget",
+      kind: "Widget",
+      shortNames: [
+        "wd",
+      ],
+    },
   },
 }

@@ -90,7 +90,7 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 			ptr.Elem().Set(v)
 			out := reflect.ValueOf(fn).Call([]reflect.Value{ptr, reflect.ValueOf(raw)})
 			if !out[0].IsNil() {
-				if e, ok := out[0].Interface().(error); ok {
+				if e, ok := reflect.TypeAssert[error](out[0]); ok {
 					return e
 				}
 			}
@@ -100,7 +100,7 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 	}
 
 	if v.CanAddr() {
-		if u, ok := v.Addr().Interface().(UnmarshalerContext); ok {
+		if u, ok := reflect.TypeAssert[UnmarshalerContext](v.Addr()); ok {
 			return u.UnmarshalYAML(d.ctx, func(target any) error {
 				rv := reflect.ValueOf(target)
 				if rv.Kind() == reflect.Pointer {
@@ -109,7 +109,7 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 				return d.decode(n, rv)
 			})
 		}
-		if u, ok := v.Addr().Interface().(Unmarshaler); ok {
+		if u, ok := reflect.TypeAssert[Unmarshaler](v.Addr()); ok {
 			return u.UnmarshalYAML(func(target any) error {
 				rv := reflect.ValueOf(target)
 				if rv.Kind() == reflect.Pointer {
@@ -118,7 +118,7 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 				return d.decode(n, rv)
 			})
 		}
-		if u, ok := v.Addr().Interface().(BytesUnmarshaler); ok {
+		if u, ok := reflect.TypeAssert[BytesUnmarshaler](v.Addr()); ok {
 			raw, err := marshalNode(n)
 			if err != nil {
 				return err
@@ -128,7 +128,7 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 	}
 
 	if v.CanAddr() && v.Type() != reflect.TypeFor[time.Time]() {
-		if u, ok := v.Addr().Interface().(encoding.TextUnmarshaler); ok {
+		if u, ok := reflect.TypeAssert[encoding.TextUnmarshaler](v.Addr()); ok {
 			if n.kind == nodeScalar {
 				return u.UnmarshalText([]byte(n.value))
 			}
@@ -136,7 +136,7 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 	}
 
 	if d.opts.useJSONUnmarshaler && v.CanAddr() {
-		if u, ok := v.Addr().Interface().(jsonUnmarshaler); ok {
+		if u, ok := reflect.TypeAssert[jsonUnmarshaler](v.Addr()); ok {
 			raw, err := marshalNode(n)
 			if err != nil {
 				return err
@@ -856,10 +856,10 @@ func scalarToAnyJSON(val string) any {
 		return nil
 	}
 
-	if val == "true" {
+	if val == trueLiteral {
 		return true
 	}
-	if val == "false" {
+	if val == falseLiteral {
 		return false
 	}
 
@@ -899,8 +899,12 @@ func isMergeKey(n *node) bool {
 	return n.kind == nodeScalar && n.value == "<<"
 }
 
-// nullLiteral is the canonical YAML 1.2 / KYAML representation of null.
-const nullLiteral = "null"
+// Canonical YAML 1.2 / KYAML representations of null and the booleans.
+const (
+	nullLiteral  = "null"
+	trueLiteral  = "true"
+	falseLiteral = "false"
+)
 
 func isNullValue(s string) bool {
 	return s == "" || s == "~" || s == nullLiteral || s == "Null" || s == "NULL"
@@ -908,9 +912,9 @@ func isNullValue(s string) bool {
 
 func parseBool(s string) (bool, error) {
 	switch s {
-	case "true", "True", "TRUE":
+	case trueLiteral, "True", "TRUE":
 		return true, nil
-	case "false", "False", "FALSE":
+	case falseLiteral, "False", "FALSE":
 		return false, nil
 	}
 	return false, fmt.Errorf("not a bool %q: %w", s, errNotBool)

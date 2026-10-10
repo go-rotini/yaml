@@ -25,6 +25,7 @@ linters:
 
     # Too opinionated for a parser/encoder library
     - exhaustruct
+    - exhaustruct_v5 # the v2.13 rename; disabled for the same reason as exhaustruct
     - varnamelen
     - wsl_v5
     - nlreturn

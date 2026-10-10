@@ -171,7 +171,7 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		if fn, ok := e.opts.customMarshalers[t]; ok {
 			out := reflect.ValueOf(fn).Call([]reflect.Value{v})
 			if !out[1].IsNil() {
-				err, _ := out[1].Interface().(error)
+				err, _ := reflect.TypeAssert[error](out[1])
 				return err
 			}
 			e.buf = append(e.buf, out[0].Bytes()...)
@@ -245,13 +245,13 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		e.writeScalar(v.String(), indent)
 	case reflect.Bool:
 		if v.Bool() {
-			e.buf = append(e.buf, "true"...)
+			e.buf = append(e.buf, trueLiteral...)
 		} else {
-			e.buf = append(e.buf, "false"...)
+			e.buf = append(e.buf, falseLiteral...)
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if v.Type() == reflect.TypeFor[time.Duration]() {
-			d, _ := v.Interface().(time.Duration)
+			d, _ := reflect.TypeAssert[time.Duration](v)
 			e.buf = append(e.buf, d.String()...)
 		} else {
 			e.buf = strconv.AppendInt(e.buf, v.Int(), 10)
@@ -292,15 +292,15 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 	case reflect.Struct:
 		switch v.Type() {
 		case reflect.TypeFor[big.Int]():
-			bi, _ := v.Interface().(big.Int)
+			bi, _ := reflect.TypeAssert[big.Int](v)
 			e.buf = append(e.buf, bi.String()...)
 			return nil
 		case reflect.TypeFor[big.Float]():
-			bf, _ := v.Interface().(big.Float)
+			bf, _ := reflect.TypeAssert[big.Float](v)
 			e.buf = append(e.buf, bf.Text('g', -1)...)
 			return nil
 		case reflect.TypeFor[big.Rat]():
-			br, _ := v.Interface().(big.Rat)
+			br, _ := reflect.TypeAssert[big.Rat](v)
 			e.buf = append(e.buf, br.RatString()...)
 			return nil
 		}
@@ -676,8 +676,8 @@ func (e *encoder) emitNode(n *node, indent int) {
 // Core. A plain scalar matching any of these must be quoted on emit to
 // preserve its string identity through round-trip.
 var yamlBoolLiterals = map[string]struct{}{
-	"true": {}, "True": {}, "TRUE": {},
-	"false": {}, "False": {}, "FALSE": {},
+	trueLiteral: {}, "True": {}, "TRUE": {},
+	falseLiteral: {}, "False": {}, "FALSE": {},
 }
 
 func needsQuoting(s string) bool {
@@ -770,16 +770,16 @@ func isEmpty(v reflect.Value) bool {
 	case reflect.Struct:
 		switch v.Type() {
 		case reflect.TypeFor[time.Time]():
-			t, _ := v.Interface().(time.Time)
+			t, _ := reflect.TypeAssert[time.Time](v)
 			return t.IsZero()
 		case reflect.TypeFor[big.Int]():
-			bi, _ := v.Interface().(big.Int)
+			bi, _ := reflect.TypeAssert[big.Int](v)
 			return bi.Sign() == 0
 		case reflect.TypeFor[big.Float]():
-			bf, _ := v.Interface().(big.Float)
+			bf, _ := reflect.TypeAssert[big.Float](v)
 			return bf.Sign() == 0
 		case reflect.TypeFor[big.Rat]():
-			br, _ := v.Interface().(big.Rat)
+			br, _ := reflect.TypeAssert[big.Rat](v)
 			return br.Sign() == 0
 		}
 		return false
