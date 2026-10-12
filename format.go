@@ -335,7 +335,10 @@ func (e *kyamlEmitter) emitFloat(f float64, bits int) error {
 	if math.IsInf(f, 0) {
 		return fmt.Errorf("yaml: Inf is not representable in KYAML: %w", ErrUnsupported)
 	}
-	// Whole-valued floats with magnitude below 1e16 render as integers.
+	// Whole-valued floats with magnitude below 1e16 render as integers. A
+	// whole float64 below 2^63 is an exact integer, so its decimal form
+	// reads back as the same float64, beyond 2^53 too; the cutoff only
+	// chooses where the exponent form takes over.
 	if f == math.Trunc(f) && !math.IsInf(f, 0) && math.Abs(f) < 1e16 {
 		e.buf = strconv.AppendInt(e.buf, int64(f), 10)
 		return nil
@@ -443,6 +446,9 @@ func (e *kyamlEmitter) emitMap(v reflect.Value, indent int) error {
 	keys := v.MapKeys()
 	entries := make([]mapEntry, 0, len(keys))
 	for _, k := range keys {
+		if e.opts.omitEmpty && isEmpty(v.MapIndex(k)) {
+			continue
+		}
 		ks, err := mapKeyToString(k)
 		if err != nil {
 			return err
@@ -466,6 +472,9 @@ func (e *kyamlEmitter) emitMapSlice(ms MapSlice, indent int) error {
 	}
 	entries := make([]mapEntry, 0, len(ms))
 	for _, item := range ms {
+		if e.opts.omitEmpty && (item.Value == nil || isEmpty(reflect.ValueOf(item.Value))) {
+			continue
+		}
 		ks, err := mapKeyAnyToString(item.Key)
 		if err != nil {
 			return err
@@ -489,18 +498,22 @@ func (e *kyamlEmitter) emitStruct(v reflect.Value, indent int) error {
 	}
 
 	entries := make([]mapEntry, 0, len(sf.fields))
-	for _, fi := range sf.fields {
+	for i := range sf.fields {
+		fi := &sf.fields[i]
 		field := fieldByIndex(v, fi.index)
 		if !field.IsValid() {
 			continue
 		}
-		if fi.omitEmpty && isEmpty(field) {
+		if omitField(e.opts, fi, field) {
 			continue
 		}
 		if fi.inline && field.Kind() == reflect.Map {
 			mapKeys := field.MapKeys()
 			subEntries := make([]mapEntry, 0, len(mapKeys))
 			for _, k := range mapKeys {
+				if e.opts.omitEmpty && isEmpty(field.MapIndex(k)) {
+					continue
+				}
 				ks, err := mapKeyToString(k)
 				if err != nil {
 					return err

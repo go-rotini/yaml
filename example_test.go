@@ -414,8 +414,8 @@ func ExampleWithSingleQuote() {
 func ExampleWithOmitEmpty() {
 	type Config struct {
 		Name  string   `yaml:"name"`
-		Tags  []string `yaml:"tags,omitempty"`
-		Debug bool     `yaml:"debug,omitempty"`
+		Tags  []string `yaml:"tags"`
+		Debug bool     `yaml:"debug"`
 	}
 	data, _ := yaml.MarshalWithOptions(Config{Name: "app"}, yaml.WithOmitEmpty(true))
 	fmt.Print(string(data))

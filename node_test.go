@@ -1,6 +1,7 @@
 package yaml
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -215,6 +216,47 @@ func TestNodeToBytesSequence(t *testing.T) {
 	s := string(data)
 	if !strings.Contains(s, "- a") || !strings.Contains(s, "- b") {
 		t.Errorf("expected sequence output, got %q", s)
+	}
+}
+
+func TestNodeToBytesAnchorsAndAliases(t *testing.T) {
+	input := "base: &b\n  x: y\nlist: &l\n  - &s one\n  - *s\nempty: &e {}\nref: *b\nlrefs:\n  - *l\n  - *e\n"
+	f, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := NodeToBytes(f.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "base: &b\n  x: y\nlist: &l\n  - &s one\n  - *s\nempty: &e {}\nref: *b\nlrefs:\n  - *l\n  - *e"
+	if string(data) != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", data, want)
+	}
+
+	var got, orig any
+	if err := Unmarshal(data, &got); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	if err := Unmarshal([]byte(input), &orig); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(orig) {
+		t.Fatalf("round trip: got %v, want %v", got, orig)
+	}
+
+	top := &Node{Kind: SequenceNode, Anchor: "top", Children: []*Node{
+		{Kind: MappingNode, Anchor: "m", Children: []*Node{
+			{Kind: ScalarNode, Value: "k"}, {Kind: ScalarNode, Value: "v"},
+		}},
+		{Kind: AliasNode, Alias: "m"},
+	}}
+	data, err = NodeToBytes(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "&top\n- &m\n  k: v\n- *m"; string(data) != want {
+		t.Fatalf("got %q, want %q", data, want)
 	}
 }
 

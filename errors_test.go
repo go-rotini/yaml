@@ -184,6 +184,18 @@ func TestFormatError(t *testing.T) {
 	}
 }
 
+func TestFormatErrorKYAMLWithoutPosition(t *testing.T) {
+	err := &KYAMLError{Errors: []KYAMLViolation{
+		{Message: "document must begin with ---"},
+		{Message: "plain scalar", Pos: Position{Line: 1, Column: 4}},
+	}}
+	got := FormatError([]byte("a: b\n"), err)
+	want := "yaml: document must begin with ---\n\nyaml: line 1, column 4: plain scalar\n  a: b\n     ^\n"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestFormatErrorNonSyntaxError(t *testing.T) {
 	err := fmt.Errorf("some error")
 	got := FormatError([]byte("test"), err)

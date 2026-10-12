@@ -80,24 +80,53 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 		return fmt.Errorf("yaml: unmarshal requires a non-nil pointer, got %T: %w", v, ErrNilPointer)
 	}
 
+	docs, anchors, nodes, err := parseStream(data, o)
+	if err != nil {
+		return err
+	}
+
+	if len(docs) == 0 {
+		return nil
+	}
+
+	d := newDecoder(o)
+	d.anchors = anchors
+	d.aliasLimit = aliasNodeLimit(o, nodes)
+
+	if err := d.decode(docs[0], rv.Elem()); err != nil {
+		return err
+	}
+
+	if len(d.typeErrors) > 0 {
+		return &TypeError{Errors: d.typeErrors}
+	}
+
+	return nil
+}
+
+// parseStream applies the size limit, scans and parses data, validates it
+// when strict KYAML is on, and loads reference anchors. It returns the
+// documents, the anchors available to aliases, and the number of nodes
+// parsed (input plus reference files).
+func parseStream(data []byte, o *decoderOptions) ([]*node, map[string]*node, int, error) {
 	if o.maxDocumentSize > 0 && len(data) > o.maxDocumentSize {
-		return fmt.Errorf("yaml: document size %d exceeds maximum %d: %w", len(data), o.maxDocumentSize, ErrDocumentSize)
+		return nil, nil, 0, fmt.Errorf("yaml: document size %d exceeds maximum %d: %w", len(data), o.maxDocumentSize, ErrDocumentSize)
 	}
 
 	data, err := detectAndConvertEncoding(data)
 	if err != nil {
-		return err
+		return nil, nil, 0, err
 	}
 
 	tokens, err := newScanner(data).scan()
 	if err != nil {
-		return err
+		return nil, nil, 0, err
 	}
 
 	if o.strictKYAML {
 		for _, tok := range tokens {
 			if tok.kind == tokenDirective {
-				return &KYAMLError{Errors: []KYAMLViolation{{
+				return nil, nil, 0, &KYAMLError{Errors: []KYAMLViolation{{
 					Rule:    "R12.9",
 					Message: fmt.Sprintf("YAML directive %q not allowed in KYAML", tok.value),
 					Pos:     tok.pos,
@@ -111,35 +140,33 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 	p.maxNodes = o.maxNodes
 	docs, err := p.parse()
 	if err != nil {
-		return err
+		return nil, nil, 0, err
 	}
 
 	if o.strictKYAML {
 		if err := validateKYAMLBytes(docs); err != nil {
-			return err
+			return nil, nil, 0, err
 		}
 	}
 
-	if len(docs) == 0 {
-		return nil
+	refNodes, err := loadReferences(p.anchors, o)
+	if err != nil {
+		return nil, nil, 0, err
 	}
 
-	d := newDecoder(o)
-	d.anchors = p.anchors
+	return docs, p.anchors, p.nodeCount + refNodes, nil
+}
 
-	if err := loadReferences(d, o); err != nil {
-		return err
+// aliasNodeLimit returns the alias expansion node limit for an input of
+// parsed nodes, or zero for no limit.
+func aliasNodeLimit(o *decoderOptions, parsed int) int {
+	switch {
+	case o.maxAliasNodes > 0:
+		return o.maxAliasNodes
+	case o.maxAliasNodes < 0:
+		return 0
 	}
-
-	if err := d.decode(docs[0], rv.Elem()); err != nil {
-		return err
-	}
-
-	if len(d.typeErrors) > 0 {
-		return &TypeError{Errors: d.typeErrors}
-	}
-
-	return nil
+	return max(10_000, 100*parsed)
 }
 
 // Decoder reads and decodes YAML documents from an input stream. Use
@@ -154,12 +181,13 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 // A Decoder is not safe for concurrent use. Callers that need to decode
 // from multiple goroutines must provide their own synchronization.
 type Decoder struct {
-	r    io.Reader
-	opts *decoderOptions
-	docs []*node
-	pos  int
-	init bool
-	anch map[string]*node
+	r     io.Reader
+	opts  *decoderOptions
+	docs  []*node
+	pos   int
+	init  bool
+	anch  map[string]*node
+	nodes int
 }
 
 // NewDecoder returns a new [Decoder] that reads from r.
@@ -186,27 +214,10 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 			return fmt.Errorf("yaml: read input: %w", err)
 		}
 
-		if dec.opts.maxDocumentSize > 0 && len(data) > dec.opts.maxDocumentSize {
-			return fmt.Errorf("yaml: document size %d exceeds maximum %d: %w", len(data), dec.opts.maxDocumentSize, ErrDocumentSize)
-		}
-
-		data, err = detectAndConvertEncoding(data)
+		dec.docs, dec.anch, dec.nodes, err = parseStream(data, dec.opts)
 		if err != nil {
 			return err
 		}
-
-		tokens, err := newScanner(data).scan()
-		if err != nil {
-			return err
-		}
-
-		p := newParser(tokens)
-		p.maxNodes = dec.opts.maxNodes
-		dec.docs, err = p.parse()
-		if err != nil {
-			return err
-		}
-		dec.anch = p.anchors
 		dec.init = true
 	}
 
@@ -222,6 +233,7 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 	d := newDecoder(dec.opts)
 	d.ctx = ctx
 	d.anchors = dec.anch
+	d.aliasLimit = aliasNodeLimit(dec.opts, dec.nodes)
 
 	doc := dec.docs[dec.pos]
 	dec.pos++
@@ -237,17 +249,18 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 	return nil
 }
 
-func loadReferences(d *decoder, o *decoderOptions) error {
+func loadReferences(anchors map[string]*node, o *decoderOptions) (int, error) {
 	files := o.referenceFiles
+	nodes := 0
 
 	for _, dir := range o.referenceDirs {
 		clean := filepath.Clean(dir)
 		realClean, err := filepath.EvalSymlinks(clean)
 		if err != nil {
-			return fmt.Errorf("yaml: cannot resolve reference dir %q: %w", dir, err)
+			return 0, fmt.Errorf("yaml: cannot resolve reference dir %q: %w", dir, err)
 		}
 		if o.recursiveDir {
-			err = filepath.WalkDir(realClean, func(path string, d os.DirEntry, err error) error {
+			err = filepath.WalkDir(realClean, func(path string, d os.DirEntry, err error) error { //nolint:gosec // G703: the directory is the caller's reference option
 				if err != nil {
 					return err
 				}
@@ -268,12 +281,12 @@ func loadReferences(d *decoder, o *decoderOptions) error {
 				return nil
 			})
 			if err != nil {
-				return fmt.Errorf("yaml: walk reference dir: %w", err)
+				return 0, fmt.Errorf("yaml: walk reference dir: %w", err)
 			}
 		} else {
 			entries, err := os.ReadDir(realClean)
 			if err != nil {
-				return fmt.Errorf("yaml: cannot read reference dir %q: %w", dir, err)
+				return 0, fmt.Errorf("yaml: cannot read reference dir %q: %w", dir, err)
 			}
 			for _, e := range entries {
 				if e.IsDir() {
@@ -284,10 +297,10 @@ func loadReferences(d *decoder, o *decoderOptions) error {
 					full := filepath.Join(realClean, name)
 					resolved, err := filepath.EvalSymlinks(full)
 					if err != nil {
-						return fmt.Errorf("yaml: cannot resolve symlink %q: %w", full, err)
+						return 0, fmt.Errorf("yaml: cannot resolve symlink %q: %w", full, err)
 					}
 					if !strings.HasPrefix(resolved, realClean) {
-						return fmt.Errorf("yaml: reference file %q escapes directory %q: %w", resolved, realClean, ErrPathEscape)
+						return 0, fmt.Errorf("yaml: reference file %q escapes directory %q: %w", resolved, realClean, ErrPathEscape)
 					}
 					files = append(files, full)
 				}
@@ -296,37 +309,38 @@ func loadReferences(d *decoder, o *decoderOptions) error {
 	}
 
 	for _, file := range files {
-		data, err := os.ReadFile(file)
+		data, err := os.ReadFile(file) //nolint:gosec // G703: the file is the caller's reference option
 		if err != nil {
-			return fmt.Errorf("yaml: cannot read reference file %q: %w", file, err)
+			return 0, fmt.Errorf("yaml: cannot read reference file %q: %w", file, err)
 		}
 
 		data, err = detectAndConvertEncoding(data)
 		if err != nil {
-			return err
+			return 0, err
 		}
 
 		tokens, err := newScanner(data).scan()
 		if err != nil {
-			return fmt.Errorf("yaml: error scanning reference file %q: %w", file, err)
+			return 0, fmt.Errorf("yaml: error scanning reference file %q: %w", file, err)
 		}
 
 		p := newParser(tokens)
 		_, err = p.parse()
 		if err != nil {
-			return fmt.Errorf("yaml: error parsing reference file %q: %w", file, err)
+			return 0, fmt.Errorf("yaml: error parsing reference file %q: %w", file, err)
 		}
+		nodes += p.nodeCount
 
 		for name, node := range p.anchors {
-			if _, exists := d.anchors[name]; exists {
-				return &DuplicateKeyError{
+			if _, exists := anchors[name]; exists {
+				return 0, &DuplicateKeyError{
 					Key: name,
 					Pos: node.pos,
 				}
 			}
-			d.anchors[name] = node
+			anchors[name] = node
 		}
 	}
 
-	return nil
+	return nodes, nil
 }

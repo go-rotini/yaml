@@ -213,6 +213,7 @@ type decoderOptions struct {
 	maxAliasExpansion  int
 	maxDocumentSize    int
 	maxNodes           int
+	maxAliasNodes      int
 	recursiveDir       bool
 	schema             Schema
 	validator          StructValidator
@@ -280,9 +281,21 @@ func WithMaxDepth(n int) DecodeOption {
 // decoding (default 1000): an alias inside an anchored value that is itself
 // being expanded counts one level deeper. Exceeding the limit, which a
 // cyclic alias always does, fails with a [CycleError]. The limit applies to
-// nesting depth, not to the total number of expansions.
+// nesting depth; [WithMaxAliasNodes] limits the total number of expanded
+// nodes.
 func WithMaxAliasExpansion(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxAliasExpansion = n }
+}
+
+// WithMaxAliasNodes limits the total number of nodes that alias expansion may
+// produce while decoding one document; exceeding it fails with an
+// [AliasExpansionError]. This stops "billion laughs" documents, where a few
+// nested aliases expand to an enormous value. The default, also selected by
+// zero, scales with the input: 100 times the number of nodes parsed
+// (including reference files), and at least 10,000. A negative n means no
+// limit.
+func WithMaxAliasNodes(n int) DecodeOption {
+	return func(o *decoderOptions) { o.maxAliasNodes = n }
 }
 
 // WithValidator registers a [StructValidator] that is called after each struct
@@ -293,8 +306,8 @@ func WithValidator(v StructValidator) DecodeOption {
 
 // WithReferenceFiles loads the given YAML files and makes their anchors
 // available for alias resolution in the primary document. An anchor name
-// defined in more than one place fails with a [DuplicateKeyError]. Reference
-// files apply to [UnmarshalWithOptions], not to [Decoder].
+// defined in more than one place fails with a [DuplicateKeyError]. With a
+// [Decoder], the anchors are available to every document in the stream.
 func WithReferenceFiles(files ...string) DecodeOption {
 	return func(o *decoderOptions) { o.referenceFiles = append(o.referenceFiles, files...) }
 }
@@ -367,9 +380,8 @@ func WithTagResolver(resolver *TagResolver) DecodeOption {
 // begin with the "---" header.
 //
 // Errors are returned as [*KYAMLError] carrying every violation with source
-// positions. Use [errors.Is](err, [ErrKYAML]) to test generically. The check
-// applies to [UnmarshalWithOptions] and its KYAML shorthands, not to
-// [Decoder].
+// positions. Use [errors.Is](err, [ErrKYAML]) to test generically. A
+// [Decoder] checks the whole stream on its first Decode call.
 //
 // See [KEP-5295] for the full KYAML format definition.
 //

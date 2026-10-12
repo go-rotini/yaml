@@ -8780,3 +8780,131 @@ func TestKYAMLLastVisibleAfterCommaBranches(t *testing.T) {
 		t.Error("buf ending in 'c,' should return false")
 	}
 }
+
+const billionLaughs = `
+a: &a ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]
+b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
+c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]
+d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]
+e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d]
+f: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e]
+g: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f]
+h: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g]
+i: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h]
+`
+
+func TestBillionLaughsDefaultLimit(t *testing.T) {
+	targets := map[string]func() any{
+		"any":     func() any { return new(any) },
+		"map":     func() any { return new(map[string][]any) },
+		"ordered": func() any { return new(any) },
+	}
+	for name, mk := range targets {
+		t.Run(name, func(t *testing.T) {
+			var opts []DecodeOption
+			if name == "ordered" {
+				opts = append(opts, WithOrderedMap())
+			}
+			start := time.Now()
+			err := UnmarshalWithOptions([]byte(billionLaughs), mk(), opts...)
+			if !errors.Is(err, ErrAliasExpansion) {
+				t.Fatalf("err = %v, want ErrAliasExpansion", err)
+			}
+			var ae *AliasExpansionError
+			if !errors.As(err, &ae) || ae.Limit <= 0 {
+				t.Fatalf("err = %#v, want *AliasExpansionError with a limit", err)
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Fatalf("took %v, want fast failure", d)
+			}
+
+			dec := NewDecoder(strings.NewReader(billionLaughs), opts...)
+			if err := dec.Decode(mk()); !errors.Is(err, ErrAliasExpansion) {
+				t.Fatalf("Decoder err = %v, want ErrAliasExpansion", err)
+			}
+		})
+	}
+}
+
+func TestBillionLaughsMergeKeys(t *testing.T) {
+	input := `
+a: &a {k0: x, k1: x, k2: x, k3: x, k4: x, k5: x, k6: x, k7: x, k8: x}
+b: &b {k0: *a, k1: *a, k2: *a, k3: *a, k4: *a, k5: *a, k6: *a, k7: *a, k8: *a}
+c: &c {k0: *b, k1: *b, k2: *b, k3: *b, k4: *b, k5: *b, k6: *b, k7: *b, k8: *b}
+d: &d {k0: *c, k1: *c, k2: *c, k3: *c, k4: *c, k5: *c, k6: *c, k7: *c, k8: *c}
+e: &e {k0: *d, k1: *d, k2: *d, k3: *d, k4: *d, k5: *d, k6: *d, k7: *d, k8: *d}
+f: &f {k0: *e, k1: *e, k2: *e, k3: *e, k4: *e, k5: *e, k6: *e, k7: *e, k8: *e}
+g: &g {k0: *f, k1: *f, k2: *f, k3: *f, k4: *f, k5: *f, k6: *f, k7: *f, k8: *f}
+h: &h {k0: *g, k1: *g, k2: *g, k3: *g, k4: *g, k5: *g, k6: *g, k7: *g, k8: *g}
+z:
+  <<: *h
+`
+	var out struct {
+		Z map[string]any `yaml:"z"`
+	}
+	if err := UnmarshalWithOptions([]byte(input), &out); !errors.Is(err, ErrAliasExpansion) {
+		t.Fatalf("err = %v, want ErrAliasExpansion", err)
+	}
+}
+
+func TestMaxAliasNodesOption(t *testing.T) {
+	input := `
+a: &a [1, 2, 3]
+b: [*a, *a, *a]
+`
+	var out any
+	if err := UnmarshalWithOptions([]byte(input), &out); err != nil {
+		t.Fatalf("default limit: %v", err)
+	}
+	if err := UnmarshalWithOptions([]byte(input), &out, WithMaxAliasNodes(5)); !errors.Is(err, ErrAliasExpansion) {
+		t.Fatalf("limit 5: err = %v, want ErrAliasExpansion", err)
+	}
+	if err := UnmarshalWithOptions([]byte(input), &out, WithMaxAliasNodes(12)); err != nil {
+		t.Fatalf("limit 12: %v", err)
+	}
+	if err := UnmarshalWithOptions([]byte(billionLaughs[:strings.Index(billionLaughs, "\nf:")]), &out, WithMaxAliasNodes(-1)); err != nil {
+		t.Fatalf("no limit: %v", err)
+	}
+}
+
+func TestDecoderStrictKYAML(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("a: plain\n"), WithStrictKYAML())
+	var out any
+	if err := dec.Decode(&out); !errors.Is(err, ErrKYAML) {
+		t.Fatalf("err = %v, want ErrKYAML", err)
+	}
+
+	dec = NewDecoder(strings.NewReader("---\n{\n  a: \"x\",\n}\n"), WithStrictKYAML())
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("valid KYAML: %v", err)
+	}
+}
+
+func TestDecoderReferences(t *testing.T) {
+	dir := t.TempDir()
+	file := dir + "/file.yaml"
+	if err := os.WriteFile(file, []byte("f: &fromfile 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := t.TempDir()
+	if err := os.WriteFile(sub+"/dir.yaml", []byte("d: &fromdir 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dec := NewDecoder(strings.NewReader("a: *fromfile\nb: *fromdir\n---\nc: *fromfile\n"),
+		WithReferenceFiles(file), WithReferenceDirs(sub))
+	var first map[string]int
+	if err := dec.Decode(&first); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if first["a"] != 1 || first["b"] != 2 {
+		t.Fatalf("first = %v", first)
+	}
+	var second map[string]int
+	if err := dec.Decode(&second); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if second["c"] != 1 {
+		t.Fatalf("second = %v", second)
+	}
+}

@@ -93,6 +93,24 @@ func (e *CycleError) Is(target error) bool {
 	return ok
 }
 
+// AliasExpansionError is returned when alias expansion produces more nodes
+// than the limit set by [WithMaxAliasNodes], as a "billion laughs" document
+// does.
+type AliasExpansionError struct {
+	Limit int
+	Pos   Position
+}
+
+func (e *AliasExpansionError) Error() string {
+	return fmt.Sprintf("yaml: line %d: alias expansion exceeds %d nodes", e.Pos.Line, e.Limit)
+}
+
+// Is reports whether target is an [*AliasExpansionError], so any such error matches [ErrAliasExpansion].
+func (e *AliasExpansionError) Is(target error) bool {
+	_, ok := target.(*AliasExpansionError)
+	return ok
+}
+
 // DuplicateKeyError is returned when decoding with [WithDisallowDuplicateKey]
 // and a mapping contains the same key more than once.
 type DuplicateKeyError struct {
@@ -232,14 +250,15 @@ func (i LintIssue) String() string {
 
 // Sentinel errors for use with [errors.Is].
 var (
-	ErrSyntax       = &SyntaxError{}
-	ErrType         = &TypeError{}
-	ErrUnknownField = &UnknownFieldError{}
-	ErrCycle        = &CycleError{}
-	ErrDuplicateKey = &DuplicateKeyError{}
-	ErrValidation   = &ValidationError{}
-	ErrDefault      = &DefaultError{}
-	ErrKYAML        = &KYAMLError{}
+	ErrSyntax         = &SyntaxError{}
+	ErrType           = &TypeError{}
+	ErrUnknownField   = &UnknownFieldError{}
+	ErrCycle          = &CycleError{}
+	ErrAliasExpansion = &AliasExpansionError{}
+	ErrDuplicateKey   = &DuplicateKeyError{}
+	ErrValidation     = &ValidationError{}
+	ErrDefault        = &DefaultError{}
+	ErrKYAML          = &KYAMLError{}
 
 	ErrPathSyntax     = errors.New("yaml: invalid path syntax")
 	ErrPathNotFound   = errors.New("yaml: path not found")
@@ -285,7 +304,10 @@ func FormatError(data []byte, err error, color ...bool) string {
 			if i > 0 {
 				buf.WriteByte('\n')
 			}
-			msg := fmt.Sprintf("yaml: line %d, column %d: %s", v.Pos.Line, v.Pos.Column, v.Message)
+			msg := "yaml: " + v.Message
+			if v.Pos.Line > 0 {
+				msg = fmt.Sprintf("yaml: line %d, column %d: %s", v.Pos.Line, v.Pos.Column, v.Message)
+			}
 			if useColor {
 				fmt.Fprintf(&buf, "\x1b[1;31m%s\x1b[0m\n", msg)
 			} else {

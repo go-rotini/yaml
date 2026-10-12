@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -356,20 +357,35 @@ func (e *encoder) marshalFlowSequence(v reflect.Value, indent int) error {
 	return nil
 }
 
+// mapKeys returns the keys of map v to encode, sorted, leaving out entries
+// with empty values when [WithOmitEmpty] is set.
+func (e *encoder) mapKeys(v reflect.Value) []reflect.Value {
+	keys := v.MapKeys()
+	if e.opts.omitEmpty {
+		keys = slices.DeleteFunc(keys, func(k reflect.Value) bool { return isEmpty(v.MapIndex(k)) })
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface())
+	})
+	return keys
+}
+
+// omitField reports whether a struct field is left out: it is empty and
+// tagged omitempty, or [WithOmitEmpty] is set.
+func omitField(opts *encoderOptions, fi *fieldInfo, field reflect.Value) bool {
+	return (fi.omitEmpty || opts.omitEmpty) && isEmpty(field)
+}
+
 func (e *encoder) marshalMap(v reflect.Value, indent int, inline bool) error {
-	if v.Len() == 0 {
+	keys := e.mapKeys(v)
+	if len(keys) == 0 {
 		e.buf = append(e.buf, "{}"...)
 		return nil
 	}
 
 	if e.opts.flow || inline {
-		return e.marshalFlowMapping(v, indent)
+		return e.marshalFlowMapping(v, keys, indent)
 	}
-
-	keys := v.MapKeys()
-	sort.Slice(keys, func(i, j int) bool {
-		return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface())
-	})
 
 	for i, key := range keys {
 		val := v.MapIndex(key)
@@ -403,13 +419,8 @@ func (e *encoder) marshalMap(v reflect.Value, indent int, inline bool) error {
 	return nil
 }
 
-func (e *encoder) marshalFlowMapping(v reflect.Value, indent int) error {
+func (e *encoder) marshalFlowMapping(v reflect.Value, keys []reflect.Value, indent int) error {
 	e.buf = append(e.buf, '{')
-
-	keys := v.MapKeys()
-	sort.Slice(keys, func(i, j int) bool {
-		return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface())
-	})
 
 	for i, key := range keys {
 		if i > 0 {
@@ -440,19 +451,16 @@ func (e *encoder) marshalStruct(v reflect.Value, indent int, inline bool) error 
 	}
 
 	first := true
-	for _, fi := range sf.fields {
+	for i := range sf.fields {
+		fi := &sf.fields[i]
 		field := fieldByIndex(v, fi.index)
 
-		if fi.omitEmpty && isEmpty(field) {
+		if omitField(e.opts, fi, field) {
 			continue
 		}
 
 		if fi.inline && field.Kind() == reflect.Map {
-			keys := field.MapKeys()
-			sort.Slice(keys, func(i, j int) bool {
-				return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface())
-			})
-			for _, key := range keys {
+			for _, key := range e.mapKeys(field) {
 				val := field.MapIndex(key)
 				if !first {
 					e.buf = append(e.buf, '\n')
@@ -514,9 +522,10 @@ func (e *encoder) marshalStruct(v reflect.Value, indent int, inline bool) error 
 func (e *encoder) marshalFlowStruct(v reflect.Value, sf *structFields, indent int) error {
 	e.buf = append(e.buf, '{')
 	first := true
-	for _, fi := range sf.fields {
+	for i := range sf.fields {
+		fi := &sf.fields[i]
 		field := fieldByIndex(v, fi.index)
-		if fi.omitEmpty && isEmpty(field) {
+		if omitField(e.opts, fi, field) {
 			continue
 		}
 		if !first {
@@ -635,28 +644,64 @@ func (e *encoder) encodeNode(n *node) ([]byte, error) {
 	return append([]byte(nil), e.buf...), nil
 }
 
+// isBlockCollection reports whether n is a non-empty mapping or sequence,
+// which emitNode writes in block style on lines of its own.
+func isBlockCollection(n *node) bool {
+	return (n.kind == nodeMapping || n.kind == nodeSequence) && len(n.children) > 0
+}
+
 func (e *encoder) emitNode(n *node, indent int) {
+	if n.anchor != "" && n.kind != nodeAlias {
+		e.buf = append(e.buf, '&')
+		e.buf = append(e.buf, n.anchor...)
+		if isBlockCollection(n) {
+			e.buf = append(e.buf, '\n')
+			e.writeIndent(indent)
+		} else {
+			e.buf = append(e.buf, ' ')
+		}
+	}
+	e.emitNodeBody(n, indent)
+}
+
+func (e *encoder) emitNodeBody(n *node, indent int) {
 	switch n.kind {
 	case nodeScalar:
 		e.writeScalar(n.value, indent)
+	case nodeAlias:
+		e.buf = append(e.buf, '*')
+		e.buf = append(e.buf, n.alias...)
 	case nodeMapping:
+		if len(n.children) == 0 {
+			e.buf = append(e.buf, "{}"...)
+			return
+		}
 		for i := 0; i < len(n.children)-1; i += 2 {
 			if i > 0 {
 				e.buf = append(e.buf, '\n')
 				e.writeIndent(indent)
 			}
 			e.emitNode(n.children[i], indent)
-			e.buf = append(e.buf, ": "...)
 			child := n.children[i+1]
-			if child.kind == nodeMapping || child.kind == nodeSequence {
+			if isBlockCollection(child) {
+				e.buf = append(e.buf, ':')
+				if child.anchor != "" {
+					e.buf = append(e.buf, " &"...)
+					e.buf = append(e.buf, child.anchor...)
+				}
 				e.buf = append(e.buf, '\n')
 				e.writeIndent(indent + e.opts.indent)
-				e.emitNode(child, indent+e.opts.indent)
+				e.emitNodeBody(child, indent+e.opts.indent)
 			} else {
+				e.buf = append(e.buf, ": "...)
 				e.emitNode(child, indent+e.opts.indent)
 			}
 		}
 	case nodeSequence:
+		if len(n.children) == 0 {
+			e.buf = append(e.buf, "[]"...)
+			return
+		}
 		for i, child := range n.children {
 			if i > 0 {
 				e.buf = append(e.buf, '\n')

@@ -19,21 +19,40 @@ type decoder struct {
 	ctx        context.Context
 	anchors    map[string]*node
 	aliasDepth int
+	aliasNodes int // nodes decoded inside alias expansions
+	aliasLimit int // limit on aliasNodes; zero means no limit
 	depth      int
 	typeErrors []string
 }
 
 func newDecoder(opts *decoderOptions) *decoder {
 	return &decoder{
-		opts:    opts,
-		ctx:     context.Background(),
-		anchors: make(map[string]*node),
+		opts:       opts,
+		ctx:        context.Background(),
+		anchors:    make(map[string]*node),
+		aliasLimit: aliasNodeLimit(opts, 0),
 	}
+}
+
+// countAliasNode counts n toward the alias expansion limit when it is being
+// decoded as part of an alias expansion.
+func (d *decoder) countAliasNode(n *node) error {
+	if d.aliasDepth == 0 {
+		return nil
+	}
+	d.aliasNodes++
+	if d.aliasLimit > 0 && d.aliasNodes > d.aliasLimit {
+		return &AliasExpansionError{Limit: d.aliasLimit, Pos: n.pos}
+	}
+	return nil
 }
 
 func (d *decoder) decode(n *node, v reflect.Value) error {
 	if n == nil {
 		return nil
+	}
+	if err := d.countAliasNode(n); err != nil {
+		return err
 	}
 
 	d.depth++
@@ -545,6 +564,8 @@ func (d *decoder) decodeMerge(n *node, v reflect.Value) error {
 				Pos:     n.pos,
 			}
 		}
+		d.aliasDepth++
+		defer func() { d.aliasDepth-- }()
 		return d.decodeMappingMerge(target, v)
 	}
 
@@ -661,6 +682,9 @@ func (d *decoder) decodeSequence(n *node, v reflect.Value) error {
 func (d *decoder) decodeToAny(n *node) (any, error) {
 	if n == nil {
 		return nil, nil
+	}
+	if err := d.countAliasNode(n); err != nil {
+		return nil, err
 	}
 
 	if n.anchor != "" {

@@ -10,6 +10,7 @@ import (
 // YAML [Node] tree. Create one with [PathString] or [PathPointer].
 type Path struct {
 	segments []pathSegment
+	pointer  bool // compiled by PathPointer
 }
 
 type pathSegment interface {
@@ -80,8 +81,8 @@ func (recursiveSegment) match(n *Node) []*Node {
 //   - .key    child mapping key
 //   - [n]     sequence index (negative indexes count from the end)
 //   - .*, [*] wildcard (all children)
-//   - ..      recursive descent (every node below); follow it with .key or
-//     [n], as in "$...host"
+//   - ..      recursive descent (the node and every node below it); follow
+//     it with a key, *, or [n], as in "$..host"
 //
 // Example: "$.servers[0].host" selects the host field of the first server.
 // Invalid expressions return an error wrapping [ErrPathSyntax].
@@ -104,6 +105,10 @@ func PathString(expr string) (*Path, error) {
 		case strings.HasPrefix(expr, ".."):
 			p.segments = append(p.segments, recursiveSegment{})
 			expr = expr[2:]
+			if expr != "" && expr[0] != '.' && expr[0] != '[' {
+				// "..name" and "..*" read as ".." followed by ".name" or ".*".
+				expr = "." + expr
+			}
 
 		case expr[0] == '.':
 			expr = expr[1:]
@@ -163,7 +168,7 @@ func PathString(expr string) (*Path, error) {
 // Returns [ErrPointerSyntax] (wrapped) when a non-empty pointer does not begin
 // with "/".
 func PathPointer(ptr string) (*Path, error) {
-	p := &Path{segments: []pathSegment{rootSegment{}}}
+	p := &Path{segments: []pathSegment{rootSegment{}}, pointer: true}
 	if ptr == "" {
 		return p, nil
 	}
@@ -268,46 +273,86 @@ func (p *Path) ReadPositions(n *Node) ([]Position, error) {
 
 // Replace finds all nodes matching the path within the tree rooted at n and
 // replaces each with replacement. The path must have at least two segments
-// (root + child), and its last segment must be a .key or [n] from
-// [PathString]; other last segments match nothing.
+// (root + child), and its last segment must address a mapping key or a
+// sequence index (.key, [n], or a [PathPointer] token); a path ending in a
+// wildcard or recursive descent returns an error wrapping [ErrPathSyntax].
 func (p *Path) Replace(n, replacement *Node) error {
 	if len(p.segments) < 2 {
 		return errPathTooShortReplace
 	}
-
-	parentSegs := p.segments[:len(p.segments)-1]
-	lastSeg := p.segments[len(p.segments)-1]
-
-	parentPath := &Path{segments: parentSegs}
-	parents, err := parentPath.Read(n)
+	parents, last, err := p.splitLast(n, "Replace")
 	if err != nil {
 		return err
 	}
 
 	for _, parent := range parents {
-		switch seg := lastSeg.(type) {
-		case childSegment:
-			if parent.Kind == MappingNode {
-				for i := 0; i+1 < len(parent.Children); i += 2 {
-					if parent.Children[i].Value == seg.name {
-						parent.Children[i+1] = replacement
-					}
+		switch parent.Kind {
+		case MappingNode:
+			name, ok := last.key()
+			if !ok {
+				continue
+			}
+			for i := 0; i+1 < len(parent.Children); i += 2 {
+				if parent.Children[i].Value == name {
+					parent.Children[i+1] = replacement
 				}
 			}
-		case indexSegment:
-			if parent.Kind == SequenceNode {
-				idx := seg.idx
-				if idx < 0 {
-					idx = len(parent.Children) + idx
-				}
-				if idx >= 0 && idx < len(parent.Children) {
-					parent.Children[idx] = replacement
-				}
+		case SequenceNode:
+			if idx, ok := last.indexIn(parent); ok {
+				parent.Children[idx] = replacement
 			}
 		}
 	}
 
 	return nil
+}
+
+// editSegment is the last segment of a path given to Replace or Delete.
+type editSegment struct{ seg pathSegment }
+
+// splitLast reads the parents of the nodes p addresses and returns them with
+// p's last segment, which must address a mapping key or a sequence index.
+func (p *Path) splitLast(n *Node, op string) ([]*Node, editSegment, error) {
+	last := p.segments[len(p.segments)-1]
+	switch last.(type) {
+	case childSegment, indexSegment, pointerSegment:
+	default:
+		return nil, editSegment{}, fmt.Errorf("yaml: %s: path %q must end in a key or index: %w", op, p.String(), ErrPathSyntax)
+	}
+	parents, err := (&Path{segments: p.segments[:len(p.segments)-1]}).Read(n)
+	return parents, editSegment{last}, err
+}
+
+// key returns the mapping key the segment addresses, if any.
+func (e editSegment) key() (string, bool) {
+	switch s := e.seg.(type) {
+	case childSegment:
+		return s.name, true
+	case pointerSegment:
+		return s.name, true
+	}
+	return "", false
+}
+
+// indexIn returns the index into seq's children the segment addresses, if
+// it is in range.
+func (e editSegment) indexIn(seq *Node) (int, bool) {
+	var idx int
+	switch s := e.seg.(type) {
+	case indexSegment:
+		idx = s.idx
+		if idx < 0 {
+			idx += len(seq.Children)
+		}
+	case pointerSegment:
+		if !s.hasIndex {
+			return 0, false
+		}
+		idx = s.index
+	default:
+		return 0, false
+	}
+	return idx, idx >= 0 && idx < len(seq.Children)
 }
 
 // Append adds value as a new child to each [SequenceNode] matched by the
@@ -327,42 +372,35 @@ func (p *Path) Append(n, value *Node) error {
 
 // Delete removes all nodes matching the path from the tree rooted at n.
 // For mappings, both the key and value are removed. The path must have at
-// least two segments (root + child), and its last segment must be a .key or
-// [n] from [PathString]; other last segments match nothing.
+// least two segments (root + child), and its last segment must address a
+// mapping key or a sequence index (.key, [n], or a [PathPointer] token); a
+// path ending in a wildcard or recursive descent returns an error wrapping
+// [ErrPathSyntax].
 func (p *Path) Delete(n *Node) error {
 	if len(p.segments) < 2 {
 		return errPathTooShortDelete
 	}
-
-	parentSegs := p.segments[:len(p.segments)-1]
-	lastSeg := p.segments[len(p.segments)-1]
-
-	parentPath := &Path{segments: parentSegs}
-	parents, err := parentPath.Read(n)
+	parents, last, err := p.splitLast(n, "Delete")
 	if err != nil {
 		return err
 	}
 
 	for _, parent := range parents {
-		switch seg := lastSeg.(type) {
-		case childSegment:
-			if parent.Kind == MappingNode {
-				for i := 0; i+1 < len(parent.Children); i += 2 {
-					if parent.Children[i].Value == seg.name {
-						parent.Children = append(parent.Children[:i], parent.Children[i+2:]...)
-						break
-					}
+		switch parent.Kind {
+		case MappingNode:
+			name, ok := last.key()
+			if !ok {
+				continue
+			}
+			for i := 0; i+1 < len(parent.Children); i += 2 {
+				if parent.Children[i].Value == name {
+					parent.Children = append(parent.Children[:i], parent.Children[i+2:]...)
+					break
 				}
 			}
-		case indexSegment:
-			if parent.Kind == SequenceNode {
-				idx := seg.idx
-				if idx < 0 {
-					idx = len(parent.Children) + idx
-				}
-				if idx >= 0 && idx < len(parent.Children) {
-					parent.Children = append(parent.Children[:idx], parent.Children[idx+1:]...)
-				}
+		case SequenceNode:
+			if idx, ok := last.indexIn(parent); ok {
+				parent.Children = append(parent.Children[:idx], parent.Children[idx+1:]...)
 			}
 		}
 	}
@@ -370,23 +408,49 @@ func (p *Path) Delete(n *Node) error {
 	return nil
 }
 
-// String returns the canonical string representation of the path expression.
+// String returns the canonical string representation of the path: the
+// JSONPath-like expression for a path from [PathString], and the escaped
+// RFC 6901 pointer for a path from [PathPointer].
 func (p *Path) String() string {
+	if p.pointer {
+		var buf strings.Builder
+		for _, seg := range p.segments {
+			if s, ok := seg.(pointerSegment); ok {
+				buf.WriteByte('/')
+				buf.WriteString(pointerEscaper.Replace(s.name))
+			}
+		}
+		return buf.String()
+	}
+
 	var buf strings.Builder
-	for _, seg := range p.segments {
+	for i, seg := range p.segments {
 		switch s := seg.(type) {
 		case rootSegment:
 			buf.WriteByte('$')
 		case childSegment:
-			buf.WriteByte('.')
+			if i == 0 || !isRecursive(p.segments[i-1]) {
+				buf.WriteByte('.')
+			}
 			buf.WriteString(s.name)
 		case indexSegment:
 			fmt.Fprintf(&buf, "[%d]", s.idx)
 		case wildcardSegment:
-			buf.WriteString(".*")
+			if i == 0 || !isRecursive(p.segments[i-1]) {
+				buf.WriteByte('.')
+			}
+			buf.WriteByte('*')
 		case recursiveSegment:
 			buf.WriteString("..")
 		}
 	}
 	return buf.String()
 }
+
+func isRecursive(seg pathSegment) bool {
+	_, ok := seg.(recursiveSegment)
+	return ok
+}
+
+// pointerEscaper applies the RFC 6901 escaping rules to a reference token.
+var pointerEscaper = strings.NewReplacer("~", "~0", "/", "~1")

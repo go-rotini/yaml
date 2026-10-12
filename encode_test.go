@@ -1421,7 +1421,57 @@ func TestMarshalWithOmitEmptyOption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = string(data)
+	if got := string(data); got != "key: val\n" {
+		t.Errorf("map: got %q", got)
+	}
+
+	type inner struct {
+		X int `yaml:"x"`
+	}
+	type cfg struct {
+		Name  string            `yaml:"name"`
+		Port  int               `yaml:"port"`
+		Tags  []string          `yaml:"tags"`
+		Inner *inner            `yaml:"inner"`
+		Extra map[string]string `yaml:",inline"`
+	}
+	v := cfg{Name: "app", Extra: map[string]string{"e": "", "f": "g"}}
+	cases := []struct {
+		opts []EncodeOption
+		want string
+	}{
+		{[]EncodeOption{WithOmitEmpty(true)}, "name: app\nf: g\n"},
+		{[]EncodeOption{WithOmitEmpty(true), WithKYAML()}, "---\n{\n  name: \"app\",\n  f: \"g\",\n}\n"},
+		{nil, "name: app\nport: 0\ntags: null\ninner: null\ne: \"\"\nf: g\n"},
+	}
+	for _, c := range cases {
+		data, err := MarshalWithOptions(v, c.opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(data); got != c.want {
+			t.Errorf("opts %d: got %q, want %q", len(c.opts), got, c.want)
+		}
+	}
+
+	data, err = MarshalWithOptions(struct {
+		Name string `yaml:"name"`
+		Port int    `yaml:"port"`
+	}{Name: "app"}, WithOmitEmpty(true), WithFlow(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "{name: app}\n" {
+		t.Errorf("flow struct: got %q", got)
+	}
+
+	data, err = MarshalWithOptions(map[string]any{"a": map[string]int{"z": 0}, "b": 1}, WithOmitEmpty(true), WithFlow(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "{a: {}, b: 1}\n" {
+		t.Errorf("flow map: got %q", got)
+	}
 }
 
 func TestMarshalValuesNeedingQuoting(t *testing.T) {
@@ -2947,6 +2997,28 @@ func TestKYAMLEncodeWholeFloat(t *testing.T) {
 	}
 	if !strings.Contains(s, "b: 2.5,") {
 		t.Errorf("non-whole 2.5 not rendered correctly:\n%s", s)
+	}
+}
+
+// TestKYAMLWholeFloatRoundTrip checks that whole floats written as integers,
+// including those above 2^53, read back as the same float64.
+func TestKYAMLWholeFloatRoundTrip(t *testing.T) {
+	vals := []float64{
+		1 << 53, 1<<53 + 2, 1<<53 + 4096, 9007199254740993 * 2, 1e15 + 1,
+		9999999999999998, -9999999999999998, 1e16, 1e17, 1 << 62, 123456789,
+	}
+	for _, f := range vals {
+		out, err := MarshalKYAML(map[string]float64{"f": f})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]float64
+		if err := Unmarshal(out, &got); err != nil {
+			t.Fatalf("%v: %v (%s)", f, err, out)
+		}
+		if got["f"] != f {
+			t.Errorf("%v: wrote %s, read back %v", f, out, got["f"])
+		}
 	}
 }
 
