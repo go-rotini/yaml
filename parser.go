@@ -18,7 +18,7 @@ type parser struct {
 	// pendingHead accumulates the text of comment tokens encountered
 	// between structural tokens. The next node-creation call site that
 	// accepts a head comment consumes it via attachPendingHead. Powers
-	// comment preservation through Format() for KYAML re-emission (R11.4).
+	// comment preservation through Format() for KYAML re-emission.
 	pendingHead string
 }
 
@@ -43,7 +43,7 @@ func (p *parser) parse() ([]*node, error) {
 
 	for p.peek().kind != tokenStreamEnd {
 		prevPos := p.pos
-		// R11.4: top-of-document comments attach to the first node.
+		// Top-of-document comments attach to the first node.
 		p.collectIntoPending()
 		if p.peek().kind == tokenStreamEnd {
 			break
@@ -271,7 +271,7 @@ func (p *parser) parseDocument() (*node, error) {
 
 func (p *parser) parseNode() (*node, error) {
 	// Collect any leading comments into pendingHead so the node we're
-	// about to parse can adopt them as its head comment (R11.4).
+	// about to parse can adopt them as its head comment.
 	p.collectIntoPending()
 
 	p.nodeCount++
@@ -452,7 +452,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 		p.advance()
 	}
 
-	// R11.4: leading comments attach as a head comment to the first key.
+	// Leading comments attach as a head comment to the first key.
 	p.collectIntoPending()
 	if p.peek().kind == tokenAnchor || p.peek().kind == tokenTag {
 		saved := p.pos
@@ -485,7 +485,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 	}
 
 	for {
-		// R11.4: comments before the next entry attach to its key.
+		// Comments before the next entry attach to its key.
 		p.collectIntoPending()
 		t := p.peek()
 
@@ -606,7 +606,7 @@ func (p *parser) parseMappingEntry() (*node, *node, error) {
 	}
 
 	// Detect an inline comment on the same source line as the value's last
-	// consumed token (R11.2 / R11.3 / R11.4). The next tokenComment, if its
+	// consumed token. The next tokenComment, if its
 	// line matches the previously-consumed token's line, is the value's
 	// line comment rather than a head comment for the next entry.
 	if value != nil && p.pos > 0 && p.peek().kind == tokenComment {
@@ -716,7 +716,7 @@ func (p *parser) parseFlowMapping() (*node, error) {
 	}
 
 	p.advance()
-	// R11.4: comments before the first entry attach as a head comment to
+	// Comments before the first entry attach as a head comment to
 	// the first key, so [Format] can re-emit them.
 	p.collectIntoPending()
 
@@ -767,7 +767,7 @@ func (p *parser) parseFlowMapping() (*node, error) {
 		}
 
 		// Detect an inline comment on the same source line as the value's
-		// last consumed token (R11.2/R11.3/R11.4). Mirrors the logic in
+		// last consumed token. Mirrors the logic in
 		// parseMappingEntry; flow mappings can also have inline comments
 		// on entries (e.g., `{ k: v, # comment\n  ...}`).
 		if p.pos > 0 && p.peek().kind == tokenComment {

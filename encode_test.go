@@ -2752,7 +2752,7 @@ func TestMarshalQuoteAll(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeLeadingHeader verifies R3.1: every KYAML document begins
+// TestKYAMLEncodeLeadingHeader verifies that every KYAML document begins
 // with a "---" header.
 func TestKYAMLEncodeLeadingHeader(t *testing.T) {
 	cases := []any{
@@ -2774,7 +2774,7 @@ func TestKYAMLEncodeLeadingHeader(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeFlowStyle verifies R4.1 + R7.1: mappings and sequences are
+// TestKYAMLEncodeFlowStyle verifies that mappings and sequences are
 // always flow style.
 func TestKYAMLEncodeFlowStyle(t *testing.T) {
 	out, err := MarshalKYAML(map[string]any{"a": []int{1, 2}, "b": map[string]int{"c": 3}})
@@ -2795,7 +2795,7 @@ func TestKYAMLEncodeFlowStyle(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeStringQuoting verifies R6.4: all string values are
+// TestKYAMLEncodeStringQuoting verifies that all string values are
 // double-quoted.
 func TestKYAMLEncodeStringQuoting(t *testing.T) {
 	out, err := MarshalKYAML(map[string]string{"a": "value", "b": "yes"})
@@ -2810,7 +2810,7 @@ func TestKYAMLEncodeStringQuoting(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeBracketKeysQuoted (R5.3 regression): a key containing `[`
+// TestKYAMLEncodeBracketKeysQuoted verifies that a key containing `[`
 // or `]` MUST be quoted, regardless of bracket content. The YAML flow
 // parser treats `[` as a flow-sequence start in flow context, so an
 // unquoted bracket key produces invalid YAML even when emitted inside a
@@ -2846,7 +2846,7 @@ func TestKYAMLEncodeBracketKeysQuoted(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeKeyQuoting verifies R5.1 + R5.2: type-ambiguous keys are
+// TestKYAMLEncodeKeyQuoting verifies that type-ambiguous keys are
 // quoted; safe keys are unquoted.
 func TestKYAMLEncodeKeyQuoting(t *testing.T) {
 	cases := []struct {
@@ -2881,8 +2881,8 @@ func TestKYAMLEncodeKeyQuoting(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeBooleansAndNull verifies R6.1 + R6.3. Note that a field
-// named `n` is a Norway-problem alias and gets quoted under R5.2.
+// TestKYAMLEncodeBooleansAndNull verifies lowercase booleans and null. Note that a field
+// named `n` is a Norway-problem alias and gets quoted.
 func TestKYAMLEncodeBooleansAndNull(t *testing.T) {
 	type S struct {
 		B *bool   `json:"b"`
@@ -2903,7 +2903,7 @@ func TestKYAMLEncodeBooleansAndNull(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeEmpties verifies R7.4: empty containers as `[]` and `{}`.
+// TestKYAMLEncodeEmpties verifies that empty containers render as `[]` and `{}`.
 func TestKYAMLEncodeEmpties(t *testing.T) {
 	out, err := MarshalKYAML(struct {
 		L []int          `json:"l"`
@@ -2921,7 +2921,7 @@ func TestKYAMLEncodeEmpties(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeNanInfRejected verifies R6.2b: NaN and Inf are unsupported.
+// TestKYAMLEncodeNanInfRejected verifies that NaN and Inf are unsupported.
 func TestKYAMLEncodeNanInfRejected(t *testing.T) {
 	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 		_, err := MarshalKYAML(v)
@@ -2935,7 +2935,7 @@ func TestKYAMLEncodeNanInfRejected(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeWholeFloat verifies R6.2c: 1.0 renders as 1 (no .0).
+// TestKYAMLEncodeWholeFloat verifies that 1.0 renders as 1 (no .0).
 func TestKYAMLEncodeWholeFloat(t *testing.T) {
 	out, err := MarshalKYAML(map[string]float64{"a": 1.0, "b": 2.5})
 	if err != nil {
@@ -2950,7 +2950,7 @@ func TestKYAMLEncodeWholeFloat(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeFlowFold (R10): multi-line strings whose fully-escaped
+// TestKYAMLEncodeFlowFold verifies that multi-line strings whose fully-escaped
 // single-line form exceeds lineWidth are rendered using KYAML's flow-folded
 // form — `\n` escapes for real newlines plus trailing-backslash continuations
 // for source-line wrapping.
@@ -3023,7 +3023,7 @@ func TestKYAMLEncodeFlowFoldIdempotent(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeStringEscapes verifies R6.5 escape handling.
+// TestKYAMLEncodeStringEscapes verifies KYAML escape handling.
 func TestKYAMLEncodeStringEscapes(t *testing.T) {
 	cases := map[string]string{
 		"newline": "a\nb",
@@ -3052,7 +3052,7 @@ func TestKYAMLEncodeStringEscapes(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeSequenceCuddling verifies R8.2 + R8.4 — for [{...}] the
+// TestKYAMLEncodeSequenceCuddling verifies that for [{...}] the
 // outer brackets cuddle to the inner element brackets.
 func TestKYAMLEncodeSequenceCuddling(t *testing.T) {
 	out, err := MarshalKYAML([]map[string]string{{"name": "x"}})
@@ -3070,7 +3070,7 @@ func TestKYAMLEncodeSequenceCuddling(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeTrailingCommas verifies R8.1: trailing commas after the
+// TestKYAMLEncodeTrailingCommas verifies trailing commas after the
 // final element of mappings (which never cuddle).
 func TestKYAMLEncodeTrailingCommas(t *testing.T) {
 	out, err := MarshalKYAML(map[string]int{"a": 1})
@@ -3082,7 +3082,7 @@ func TestKYAMLEncodeTrailingCommas(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeMapKeySorting verifies R4.5: native map keys are sorted
+// TestKYAMLEncodeMapKeySorting verifies that native map keys are sorted
 // lexicographically.
 func TestKYAMLEncodeMapKeySorting(t *testing.T) {
 	out, err := MarshalKYAML(map[string]int{"c": 3, "a": 1, "b": 2})
@@ -3098,7 +3098,7 @@ func TestKYAMLEncodeMapKeySorting(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeStructDeclarationOrder verifies R4.6: struct fields are
+// TestKYAMLEncodeStructDeclarationOrder verifies that struct fields are
 // emitted in declaration order, not lexicographic.
 func TestKYAMLEncodeStructDeclarationOrder(t *testing.T) {
 	type S struct {
@@ -3119,7 +3119,7 @@ func TestKYAMLEncodeStructDeclarationOrder(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeJSONTagPriority verifies R13.4: under KYAML mode, json tag
+// TestKYAMLEncodeJSONTagPriority verifies that under KYAML mode, json tag
 // wins over yaml tag.
 func TestKYAMLEncodeJSONTagPriority(t *testing.T) {
 	type S struct {
@@ -3156,7 +3156,7 @@ func TestKYAMLEncodeAlwaysQuoteKeys(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeNonStringMapKey verifies R4.4: non-string map keys are
+// TestKYAMLEncodeNonStringMapKey verifies that non-string map keys are
 // rejected.
 func TestKYAMLEncodeNonStringMapKey(t *testing.T) {
 	_, err := MarshalKYAML(map[int]string{1: "one"})
@@ -3311,7 +3311,7 @@ func TestKYAMLEncodeKYAMLFileError(t *testing.T) {
 }
 
 // kyamlJSONMarshalerType implements json.Marshaler — under KYAML mode this
-// path takes precedence over yaml.Marshaler (KEP-5295 R13.2).
+// path takes precedence over yaml.Marshaler.
 type kyamlJSONMarshalerType struct {
 	X int
 }
@@ -3436,7 +3436,7 @@ func TestKYAMLEncodeJSONNumber(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeRawValueRoundTrip covers R13.11: RawValue carries raw YAML
+// TestKYAMLEncodeRawValueRoundTrip verifies that RawValue carries raw YAML
 // bytes that the encoder re-parses and re-emits as canonical KYAML — not
 // pass-through, since pass-through could leak non-KYAML constructs.
 func TestKYAMLEncodeRawValueRoundTrip(t *testing.T) {
@@ -3533,7 +3533,7 @@ other: bar
 		t.Errorf("output not valid KYAML:\n%s", out)
 	}
 	if !strings.Contains(string(out), "inline comment") {
-		t.Logf("inline comment not preserved (best-effort per R11.5):\n%s", out)
+		t.Logf("inline comment not preserved (placement is best-effort):\n%s", out)
 	}
 }
 
@@ -3591,8 +3591,8 @@ func TestWalkKYAMLCommentsLineAndFoot(t *testing.T) {
 		t.Errorf("head comment on value missing: %+v", out["name"])
 	}
 	// Sequence-element paths ("list[0]") are not anchorable by the
-	// comment post-pass (they don't correspond to `key:` lines), so per
-	// R11.5 their comments are intentionally dropped to avoid spurious
+	// comment post-pass (they don't correspond to `key:` lines), so
+	// their comments are intentionally dropped to avoid spurious
 	// cuddle suppression. Verify the path is absent from the map.
 	if _, ok := out["list[0]"]; ok {
 		t.Errorf("sequence-element path should not be anchorable: %+v", out["list[0]"])
@@ -3679,7 +3679,7 @@ func TestKYAMLEncodeTimeAndDuration(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeDurationAsString covers R13.7: WithDurationAsString opts
+// TestKYAMLEncodeDurationAsString verifies that WithDurationAsString opts
 // into the human-readable string form for time.Duration.
 func TestKYAMLEncodeDurationAsString(t *testing.T) {
 	v := map[string]any{
@@ -3933,7 +3933,7 @@ func (k kyamlYAMLContextMarshaler) MarshalYAML(ctx context.Context) (any, error)
 	return map[string]string{"tag": k.Tag}, nil
 }
 
-// TestKYAMLEncoderMultiDocSeparator (R3.2): under KYAML mode, the Encoder
+// TestKYAMLEncoderMultiDocSeparator verifies that under KYAML mode, the Encoder
 // must NOT emit a duplicate "---\n" separator between documents — each KYAML
 // doc already begins with its own "---\n" header.
 func TestKYAMLEncoderMultiDocSeparator(t *testing.T) {
@@ -4024,7 +4024,7 @@ func TestKYAMLEscapeAllSpecials(t *testing.T) {
 
 func TestKYAMLEncodeMapNonStringKeyRejected(t *testing.T) {
 	// Map with int key (no TextMarshaler) must be rejected under KYAML
-	// (R4.4: only string-typed keys allowed).
+	// (only string-typed keys are allowed).
 	v := map[int]string{1: "one"}
 	_, err := MarshalKYAML(v)
 	if !errors.Is(err, ErrUnsupported) {

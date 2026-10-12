@@ -70,7 +70,7 @@ type Node struct {
 	MergeKey      bool // node represents a merge key (<<)
 	Children      []*Node
 	Pos           Position
-	Comment       string
+	Comment       string // line comment, on the same line as the node
 	HeadComment   string
 	FootComment   string
 }
@@ -78,7 +78,9 @@ type Node struct {
 // File is the result of parsing a YAML byte stream. It contains one [Node]
 // per document in the stream.
 type File struct {
-	Docs     []*Node
+	Docs []*Node
+	// Warnings lists non-fatal problems found while parsing, such as
+	// unknown directives.
 	Warnings []string
 }
 
@@ -303,16 +305,18 @@ func Filter(n *Node, fn func(*Node) bool) []*Node {
 	return result
 }
 
-// NodeToBytes serializes a [Node] tree back into YAML bytes using default
-// encoding options.
+// NodeToBytes serializes a [Node] tree back into block-style YAML bytes using
+// default encoding options. Only structure and scalar values are written:
+// tags, anchors, aliases, comments and scalar styles are not preserved.
 func NodeToBytes(n *Node) ([]byte, error) {
 	internal := importNode(n)
 	enc := newEncoder(defaultEncodeOptions())
 	return enc.encodeNode(internal)
 }
 
-// NodeToBytesWithOptions serializes a [Node] tree back into YAML bytes using
-// the provided encoding options.
+// NodeToBytesWithOptions is like [NodeToBytes] but applies opts. Only the
+// options that affect scalars and indentation apply; [WithKYAML] and
+// [WithFlow] do not change the block-style output.
 func NodeToBytesWithOptions(n *Node, opts ...EncodeOption) ([]byte, error) {
 	o := defaultEncodeOptions()
 	for _, opt := range opts {

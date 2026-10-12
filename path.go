@@ -7,7 +7,7 @@ import (
 )
 
 // Path is a compiled JSONPath-like expression for querying and mutating a
-// YAML [Node] tree. Create one with [PathString].
+// YAML [Node] tree. Create one with [PathString] or [PathPointer].
 type Path struct {
 	segments []pathSegment
 }
@@ -80,9 +80,11 @@ func (recursiveSegment) match(n *Node) []*Node {
 //   - .key    child mapping key
 //   - [n]     sequence index (negative indexes count from the end)
 //   - .*, [*] wildcard (all children)
-//   - ..      recursive descent
+//   - ..      recursive descent (every node below); follow it with .key or
+//     [n], as in "$...host"
 //
 // Example: "$.servers[0].host" selects the host field of the first server.
+// Invalid expressions return an error wrapping [ErrPathSyntax].
 func PathString(expr string) (*Path, error) {
 	if expr == "" {
 		return nil, fmt.Errorf("empty path expression: %w", ErrPathSyntax)
@@ -207,7 +209,7 @@ func (s pointerSegment) match(n *Node) []*Node {
 }
 
 // Read evaluates the path against the [Node] tree rooted at n and returns
-// all matching nodes.
+// all matching nodes. When n is a [DocumentNode], $ selects its root node.
 func (p *Path) Read(n *Node) ([]*Node, error) {
 	current := []*Node{n}
 
@@ -231,6 +233,7 @@ func (p *Path) Read(n *Node) ([]*Node, error) {
 
 // ReadString is a convenience that parses YAML data, evaluates the path
 // against the first document, and returns the scalar Value of the first match.
+// It returns [ErrPathNotFound] when nothing matches.
 func (p *Path) ReadString(data []byte) (string, error) {
 	file, err := Parse(data)
 	if err != nil {
@@ -265,7 +268,8 @@ func (p *Path) ReadPositions(n *Node) ([]Position, error) {
 
 // Replace finds all nodes matching the path within the tree rooted at n and
 // replaces each with replacement. The path must have at least two segments
-// (root + child).
+// (root + child), and its last segment must be a .key or [n] from
+// [PathString]; other last segments match nothing.
 func (p *Path) Replace(n, replacement *Node) error {
 	if len(p.segments) < 2 {
 		return errPathTooShortReplace
@@ -323,7 +327,8 @@ func (p *Path) Append(n, value *Node) error {
 
 // Delete removes all nodes matching the path from the tree rooted at n.
 // For mappings, both the key and value are removed. The path must have at
-// least two segments (root + child).
+// least two segments (root + child), and its last segment must be a .key or
+// [n] from [PathString]; other last segments match nothing.
 func (p *Path) Delete(n *Node) error {
 	if len(p.segments) < 2 {
 		return errPathTooShortDelete

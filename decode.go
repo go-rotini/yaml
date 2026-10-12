@@ -998,7 +998,8 @@ type Unmarshaler interface {
 }
 
 // BytesUnmarshaler is implemented by types that can decode themselves from
-// raw YAML bytes.
+// YAML bytes. data is the value re-encoded as block-style YAML, not the
+// original source text (see [RawValue]).
 type BytesUnmarshaler interface {
 	UnmarshalYAML(data []byte) error
 }

@@ -8061,7 +8061,7 @@ func TestDefaultFloatInvalid(t *testing.T) {
 	}
 }
 
-// TestKYAMLValidateRejections covers the full §2.12 forbidden-construct list.
+// TestKYAMLValidateRejections covers every construct KYAML forbids.
 // Each input should fail validation with the expected rule ID.
 func TestKYAMLValidateRejections(t *testing.T) {
 	cases := []struct {
@@ -8116,8 +8116,8 @@ func TestKYAMLValidateRejections(t *testing.T) {
 		},
 		{
 			// Block-style mapping with a literal block scalar value. The
-			// outer mapping triggers R12.5 and the literal scalar triggers
-			// R12.4 — we check for either.
+			// outer mapping triggers a block-mapping violation and the literal
+			// scalar a block-scalar violation; we check for the first.
 			name: "literal-block-scalar",
 			yaml: "---\nnote: |\n  multi\n  line\n",
 			rule: "R12.5",
@@ -8656,9 +8656,9 @@ func TestKYAMLValidateKYAMLNullVariants(t *testing.T) {
 	}
 }
 
-// TestKYAMLValidateExplicitComplexKey covers R12.14: explicit `?` complex
-// keys (used for non-string keys like sequences/mappings as keys) must be
-// rejected. The validator surfaces this as R4.4 (non-string mapping key)
+// TestKYAMLValidateExplicitComplexKey verifies that explicit `?` complex
+// keys (used for non-string keys like sequences/mappings as keys) are
+// rejected. The validator surfaces this as a non-string mapping key violation
 // since the underlying violation is the same: KYAML mapping keys must be
 // strings.
 func TestKYAMLValidateExplicitComplexKey(t *testing.T) {
@@ -8685,7 +8685,7 @@ func TestKYAMLValidateExplicitComplexKey(t *testing.T) {
 			if !errors.As(err, &k) {
 				t.Fatalf("expected *KYAMLError, got %v", err)
 			}
-			// R4.4 (non-string key) or R12.5/R12.6 (block style) or R12.14 — any
+			// A non-string-key, block-style or complex-key violation: any
 			// of these is an acceptable rejection.
 			ok := false
 			for _, v := range k.Errors {
@@ -8722,8 +8722,8 @@ func TestKYAMLValidateKYAMLBoolVariants(t *testing.T) {
 	}
 }
 
-// TestKYAMLDecodeRawValue covers R13.11: a struct field typed as RawValue
-// should receive the raw source bytes for that field's value, allowing
+// TestKYAMLDecodeRawValue verifies that a struct field typed as RawValue
+// receives that field's value as YAML bytes, allowing
 // deferred decoding.
 func TestKYAMLDecodeRawValue(t *testing.T) {
 	type S struct {

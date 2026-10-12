@@ -15,15 +15,16 @@ type MapItem struct {
 // or to pass a YAML value through without interpreting it. Analogous to
 // [encoding/json.RawMessage].
 //
-// During decoding, the original source bytes spanning the value (including
-// any surrounding quotes for scalars) are stored verbatim. During encoding
-// in default mode the bytes are emitted as-is. Under KYAML mode the raw
-// bytes are re-parsed and re-emitted as canonical KYAML, since pass-through
-// could otherwise leak non-KYAML constructs (anchors, tags, etc.) into
-// strict-KYAML output (R13.11).
+// During decoding, the value's node is re-encoded as block-style YAML and
+// those bytes are stored, as with any [BytesUnmarshaler]; the source text is
+// not kept verbatim, so tags, anchors, aliases, comments and unneeded quotes
+// are lost. During encoding in default mode the bytes are emitted as-is.
+// Under KYAML mode they are re-parsed and re-emitted as canonical KYAML, so
+// non-KYAML constructs cannot leak into the output.
 type RawValue []byte
 
-// MarshalYAML returns the raw bytes verbatim. Implements [BytesMarshaler].
+// MarshalYAML returns the raw bytes verbatim, or "null" when r is empty.
+// Implements [BytesMarshaler].
 func (r RawValue) MarshalYAML() ([]byte, error) {
 	if len(r) == 0 {
 		return []byte("null"), nil

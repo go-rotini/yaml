@@ -94,7 +94,7 @@ func (enc *Encoder) EncodeContext(ctx context.Context, v any) error {
 		return err
 	}
 	// Block-style YAML separates documents with "---\n". KYAML already
-	// begins each document with its own "---\n" header (R3.1), so adding
+	// begins each document with its own "---\n" header, so adding
 	// the separator again would produce a duplicate marker.
 	if enc.n > 0 && !enc.opts.kyaml {
 		if _, err := enc.w.Write([]byte("---\n")); err != nil {

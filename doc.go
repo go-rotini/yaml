@@ -21,35 +21,31 @@
 //
 // [Format] re-emits arbitrary YAML as canonical KYAML; anchors and aliases
 // are reified, merge keys are resolved, and explicit tags are stripped.
-// [ValidKYAML] and [ValidateKYAML] classify input as conformant or not. [Lint]
-// reports every conformance deviation, with optional cosmetic checks via
-// [WithKYAMLLintCosmetic].
+// [ValidKYAML] and [ValidateKYAML] classify input as conformant or not, and
+// [Lint] reports every deviation as a list of issues.
 //
-// # KYAML rule reference
+// # KYAML rules
 //
-// Validation errors from [ValidateKYAML] and [UnmarshalKYAML] carry rule IDs
-// from the KYAML specification:
+// [ValidateKYAML], [UnmarshalKYAML] and [Lint] report these violations, each
+// as a [KYAMLViolation] or [LintIssue] whose Rule field identifies the rule:
 //
-//   - R3.1   Document must begin with the "---" header
-//   - R4.1   Mappings must be in flow style ({...})
-//   - R4.4   Mapping keys must be string scalars
-//   - R5     Type-ambiguous keys must be double-quoted
-//   - R6.1   Booleans render as lowercase true/false
-//   - R6.3   Null renders as lowercase "null"
-//   - R6.4   String values must be double-quoted
-//   - R7.1   Sequences must be in flow style ([...])
-//   - R12.1  Anchors and aliases not allowed (& *)
-//   - R12.2  Explicit tags not allowed (!! !)
-//   - R12.3  Merge keys not allowed (<<)
-//   - R12.4  Block-style scalars not allowed (| >)
-//   - R12.5  Block-style mappings not allowed
-//   - R12.6  Block-style sequences not allowed
-//   - R12.7  Plain (unquoted) string values not allowed
-//   - R12.8  Single-quoted scalars not allowed
-//   - R12.9  YAML directives not allowed (%YAML %TAG)
-//   - R12.11 Hex/octal/binary integer literals not allowed
-//   - R12.12 YAML 1.1 boolean aliases must be quoted (yes no on off)
-//   - R12.13 NaN and infinity literals not allowed (.nan .inf)
+//   - the document does not begin with the "---" header
+//   - a mapping or sequence is in block style
+//   - a mapping key is not a string scalar
+//   - a type-ambiguous key is not double-quoted
+//   - a boolean or null is not lowercase true/false/null
+//   - a string value is plain (unquoted) or single-quoted
+//   - anchors or aliases (& *)
+//   - explicit tags (!! !)
+//   - merge keys (<<)
+//   - block scalars (| >)
+//   - YAML directives (%YAML %TAG)
+//   - hex, octal or binary integer literals
+//   - unquoted YAML 1.1 boolean words (yes no on off)
+//   - NaN or infinity literals (.nan .inf)
+//
+// With [WithKYAMLLintCosmetic], [Lint] also warns when the input differs from
+// the output of [Format].
 //
 // See [KEP-5295] for the full specification.
 //

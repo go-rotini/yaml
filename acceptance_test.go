@@ -1069,9 +1069,9 @@ func TestKYAMLLintCosmetic(t *testing.T) {
 	}
 }
 
-// TestKYAMLFormatPreservesComments (R11.1, R11.2, R11.3, R11.4): comments
+// TestKYAMLFormatPreservesComments verifies that comments
 // from the input AST should survive Format() and appear in the KYAML
-// output. Best-effort per R11.5.
+// output, on a best-effort basis.
 func TestKYAMLFormatPreservesComments(t *testing.T) {
 	src := []byte(`# top of file
 apiVersion: v1
@@ -1114,10 +1114,10 @@ func TestKYAMLFormatNoCommentsIdempotent(t *testing.T) {
 	}
 }
 
-// TestKYAMLEncodeR85UncuddleOnComments (R8.5): when comments are registered
+// TestKYAMLEncodeUncuddleOnComments verifies that when comments are registered
 // via WithComment, sequence cuddling is suppressed so post-pass-inserted
 // comments don't land between cuddled brackets.
-func TestKYAMLEncodeR85UncuddleOnComments(t *testing.T) {
+func TestKYAMLEncodeUncuddleOnComments(t *testing.T) {
 	v := []map[string]string{{"name": "x"}}
 	out, err := MarshalWithOptions(v, WithKYAML(), WithComment(map[string][]Comment{
 		"name": {{Position: HeadCommentPos, Text: "the name"}},
@@ -1147,8 +1147,11 @@ func TestKYAMLFormatErrorRenders(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 	rendered := FormatError(src, err)
-	if !strings.Contains(rendered, "R12.11") {
-		t.Errorf("expected rule ID R12.11 in formatted error:\n%s", rendered)
+	if !strings.Contains(rendered, "non-decimal integer literal") {
+		t.Errorf("expected violation message in formatted error:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "R12.11") {
+		t.Errorf("rule ID must not appear in formatted error:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "0x50") {
 		t.Errorf("expected source line in formatted error:\n%s", rendered)
@@ -1158,21 +1161,20 @@ func TestKYAMLFormatErrorRenders(t *testing.T) {
 // ---------------------------------------------------------------------------
 // TestKEPCompliance: explicit rule-by-rule conformance harness.
 //
-// Every rule in YAML_PACKAGE_REQUIREMENTS.md §2 has its own sub-test below
-// — sub-test names match the rule IDs (R1.1, R1.2, …, R14.5) so the
-// rule-to-test mapping is unambiguous. Many of these duplicate coverage
-// from focused tests elsewhere; the goal here is auditability: a failure
-// in this test points directly at the spec rule that broke.
+// Every KYAML rule has its own sub-test below, named after the rule. Many
+// of these duplicate coverage from focused tests elsewhere; the goal here
+// is auditability: a failure in this test points directly at the rule that
+// broke.
 //
 // Run a single rule via:
 //
-//	go test -run 'TestKEPCompliance/R12.1' .
+//	go test -run 'TestKEPCompliance/anchor_rejected' .
 // ---------------------------------------------------------------------------
 
 func TestKEPCompliance(t *testing.T) {
-	// === §2.1 Compatibility model =====================================
+	// === Compatibility model ===
 
-	t.Run("R1.1 KYAML output is valid YAML", func(t *testing.T) {
+	t.Run("KYAML output is valid YAML", func(t *testing.T) {
 		v := map[string]any{
 			"apiVersion": "v1", "kind": "Pod",
 			"metadata": map[string]any{"name": "x"},
@@ -1188,7 +1190,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R1.2 compliant YAML parsers parse KYAML", func(t *testing.T) {
+	t.Run("compliant YAML parsers parse KYAML", func(t *testing.T) {
 		// Verify by routing KYAML output through the package's own decoder
 		// (which is a YAML 1.2 parser).
 		out, err := MarshalKYAML([]any{1, "two", true, nil, map[string]int{"a": 1}})
@@ -1204,14 +1206,14 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R1.3 not all YAML is KYAML", func(t *testing.T) {
+	t.Run("not all YAML is KYAML", func(t *testing.T) {
 		// Block-style YAML is rejected by strict KYAML validation.
 		if ValidKYAML([]byte("name: foo\n")) {
 			t.Error("block-style YAML should not be valid KYAML")
 		}
 	})
 
-	t.Run("R1.4 default decode accepts any valid YAML", func(t *testing.T) {
+	t.Run("default decode accepts any valid YAML", func(t *testing.T) {
 		// Default Unmarshal (no WithStrictKYAML) accepts non-KYAML input.
 		var v map[string]any
 		if err := Unmarshal([]byte("name: foo\n"), &v); err != nil {
@@ -1222,7 +1224,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R1.5 strict KYAML decode is opt-in", func(t *testing.T) {
+	t.Run("strict KYAML decode is opt-in", func(t *testing.T) {
 		// Without the option, plain YAML decodes fine; with it, rejected.
 		src := []byte("name: foo\n")
 		var v map[string]any
@@ -1234,7 +1236,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R1.6 round-trip stability (idempotence)", func(t *testing.T) {
+	t.Run("round-trip stability (idempotence)", func(t *testing.T) {
 		v := map[string]any{"a": 1, "b": []int{1, 2, 3}, "c": map[string]string{"x": "y"}}
 		first, err := MarshalKYAML(v)
 		if err != nil {
@@ -1253,9 +1255,9 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.2 File format =============================================
+	// === File format ===
 
-	t.Run("R2.1 encoder produces UTF-8", func(t *testing.T) {
+	t.Run("encoder produces UTF-8", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]string{"k": "日本語"})
 		if err != nil {
 			t.Fatal(err)
@@ -1266,7 +1268,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R2.2 no BOM emitted", func(t *testing.T) {
+	t.Run("no BOM emitted", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]int{"x": 1})
 		if err != nil {
 			t.Fatal(err)
@@ -1276,7 +1278,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R2.3 LF line endings only", func(t *testing.T) {
+	t.Run("LF line endings only", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]int{"a": 1, "b": 2})
 		if err != nil {
 			t.Fatal(err)
@@ -1286,9 +1288,9 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.3 Document structure ======================================
+	// === Document structure ===
 
-	t.Run("R3.1 every document begins with --- header", func(t *testing.T) {
+	t.Run("every document begins with --- header", func(t *testing.T) {
 		for _, v := range []any{42, "x", nil, []int{1}, map[string]int{"a": 1}} {
 			out, err := MarshalKYAML(v)
 			if err != nil {
@@ -1300,7 +1302,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R3.2 multi-document streams (no duplicate separator)", func(t *testing.T) {
+	t.Run("multi-document streams (no duplicate separator)", func(t *testing.T) {
 		var buf bytes.Buffer
 		enc := NewEncoder(&buf, WithKYAML())
 		_ = enc.Encode(map[string]int{"a": 1})
@@ -1314,7 +1316,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R3.3 no `...` end-of-document marker", func(t *testing.T) {
+	t.Run("no `...` end-of-document marker", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]int{"k": 1})
 		if err != nil {
 			t.Fatal(err)
@@ -1324,7 +1326,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R3.4 strict mode rejects YAML directives", func(t *testing.T) {
+	t.Run("strict mode rejects YAML directives", func(t *testing.T) {
 		err := ValidateKYAML([]byte("%YAML 1.2\n---\n{ a: 1 }\n"))
 		var k *KYAMLError
 		if !errors.As(err, &k) {
@@ -1341,9 +1343,9 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.4 Mappings ================================================
+	// === Mappings ===
 
-	t.Run("R4.1 mappings always flow style {}", func(t *testing.T) {
+	t.Run("mappings always flow style {}", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]int{"a": 1, "b": 2})
 		if err != nil {
 			t.Fatal(err)
@@ -1353,7 +1355,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R4.2 each mapping key on its own line", func(t *testing.T) {
+	t.Run("each mapping key on its own line", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]int{"a": 1, "b": 2})
 		if err != nil {
 			t.Fatal(err)
@@ -1365,7 +1367,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R4.3 embedded structs are inlined", func(t *testing.T) {
+	t.Run("embedded structs are inlined", func(t *testing.T) {
 		type Inner struct {
 			Alpha int `json:"alpha"`
 		}
@@ -1383,14 +1385,14 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R4.4 non-string map keys rejected", func(t *testing.T) {
+	t.Run("non-string map keys rejected", func(t *testing.T) {
 		_, err := MarshalKYAML(map[int]string{1: "one"})
 		if !errors.Is(err, ErrUnsupported) {
 			t.Errorf("expected ErrUnsupported for int-keyed map, got %v", err)
 		}
 	})
 
-	t.Run("R4.5 native map keys lex-sorted", func(t *testing.T) {
+	t.Run("native map keys lex-sorted", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]int{"c": 3, "a": 1, "b": 2})
 		if err != nil {
 			t.Fatal(err)
@@ -1401,7 +1403,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R4.6 struct fields in declaration order", func(t *testing.T) {
+	t.Run("struct fields in declaration order", func(t *testing.T) {
 		type S struct {
 			Z int `json:"z"`
 			A int `json:"a"`
@@ -1420,7 +1422,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R4.7 per-key quoting decisions", func(t *testing.T) {
+	t.Run("per-key quoting decisions", func(t *testing.T) {
 		// Mix of safe + ambiguous keys. Safe keys unquoted, ambiguous quoted.
 		out, err := MarshalKYAML(map[string]int{"safe_key": 1, "yes": 2})
 		if err != nil {
@@ -1432,9 +1434,9 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.5 Key quoting =============================================
+	// === Key quoting ===
 
-	t.Run("R5.1 type-ambiguous keys quoted", func(t *testing.T) {
+	t.Run("type-ambiguous keys quoted", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]int{"yes": 1, "no": 2})
 		if err != nil {
 			t.Fatal(err)
@@ -1445,7 +1447,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R5.2 full ambiguous-word list", func(t *testing.T) {
+	t.Run("full ambiguous-word list", func(t *testing.T) {
 		// Spec list: NO/no/N/n/YES/yes/Y/y/ON/on/OFF/off/TRUE/true/True/FALSE/false/False/NULL/null/Null/~
 		ambig := []string{
 			"NO", "no", "N", "n", "YES", "yes", "Y", "y",
@@ -1464,7 +1466,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R5.3 unquoted-key predicate", func(t *testing.T) {
+	t.Run("unquoted-key predicate", func(t *testing.T) {
 		// Safe identifiers and label-key syntax stay unquoted.
 		safe := []string{"name", "apiVersion", "kubernetes.io/role", "_42", "a-b-c", "a.b.c"}
 		for _, k := range safe {
@@ -1482,7 +1484,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R5.4 non-safe keys double-quoted", func(t *testing.T) {
+	t.Run("non-safe keys double-quoted", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]int{"with space": 1, "42": 2})
 		if err != nil {
 			t.Fatal(err)
@@ -1493,7 +1495,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R5.5 WithKYAMLAlwaysQuoteKeys forces quoting", func(t *testing.T) {
+	t.Run("WithKYAMLAlwaysQuoteKeys forces quoting", func(t *testing.T) {
 		out, err := MarshalWithOptions(map[string]int{"safe": 1}, WithKYAML(), WithKYAMLAlwaysQuoteKeys())
 		if err != nil {
 			t.Fatal(err)
@@ -1503,9 +1505,9 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.6 Scalars =================================================
+	// === Scalars ===
 
-	t.Run("R6.1 booleans emit as lowercase true/false", func(t *testing.T) {
+	t.Run("booleans emit as lowercase true/false", func(t *testing.T) {
 		out, err := MarshalKYAML(map[string]bool{"t": true, "f": false})
 		if err != nil {
 			t.Fatal(err)
@@ -1516,8 +1518,8 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R6.2 integers and floats in natural numeric form (umbrella)", func(t *testing.T) {
-		// Umbrella for R6.2a/b/c: integers as decimal int, floats as
+	t.Run("integers and floats in natural numeric form (umbrella)", func(t *testing.T) {
+		// Umbrella for the cases below: integers as decimal int, floats as
 		// shortest-round-trippable, neither quoted.
 		out, _ := MarshalKYAML(map[string]any{"i": 42, "f": 3.14})
 		s := string(out)
@@ -1526,14 +1528,14 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R6.2a integers emit as decimal", func(t *testing.T) {
+	t.Run("integers emit as decimal", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]int{"v": 0xFF})
 		if !strings.Contains(string(out), "v: 255,") {
 			t.Errorf("integer not emitted as decimal:\n%s", out)
 		}
 	})
 
-	t.Run("R6.2b NaN and Inf rejected", func(t *testing.T) {
+	t.Run("NaN and Inf rejected", func(t *testing.T) {
 		for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 			_, err := MarshalKYAML(f)
 			if !errors.Is(err, ErrUnsupported) {
@@ -1542,28 +1544,28 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R6.2c integer-shaped float emits as int", func(t *testing.T) {
+	t.Run("integer-shaped float emits as int", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]float64{"a": 1.0})
 		if !strings.Contains(string(out), "a: 1,") {
 			t.Errorf("1.0 not emitted as `1`:\n%s", out)
 		}
 	})
 
-	t.Run("R6.3 null emits as lowercase null", func(t *testing.T) {
+	t.Run("null emits as lowercase null", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]any{"x": nil})
 		if !strings.Contains(string(out), "x: null,") {
 			t.Errorf("nil not emitted as null:\n%s", out)
 		}
 	})
 
-	t.Run("R6.4 string values always double-quoted", func(t *testing.T) {
+	t.Run("string values always double-quoted", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]string{"k": "value"})
 		if !strings.Contains(string(out), `k: "value",`) {
 			t.Errorf("string not double-quoted:\n%s", out)
 		}
 	})
 
-	t.Run("R6.5 escape sequences", func(t *testing.T) {
+	t.Run("escape sequences", func(t *testing.T) {
 		// Sample of escapes; full coverage in TestKYAMLEscapeAllSpecials.
 		cases := map[string]string{
 			"newline": "a\nb",
@@ -1586,7 +1588,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R6.6 NBSP emitted as literal UTF-8", func(t *testing.T) {
+	t.Run("NBSP emitted as literal UTF-8", func(t *testing.T) {
 		// NBSP (U+00A0) is in the C1 control range — verify the escape
 		// table treats it consistently.
 		out, _ := MarshalKYAML(map[string]string{"k": " "})
@@ -1599,9 +1601,9 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.7 Sequences ===============================================
+	// === Sequences ===
 
-	t.Run("R7.1 sequences always flow style []", func(t *testing.T) {
+	t.Run("sequences always flow style []", func(t *testing.T) {
 		out, _ := MarshalKYAML([]int{1, 2, 3})
 		if !bytes.Contains(out, []byte("[")) || !bytes.Contains(out, []byte("]")) {
 			t.Errorf("expected flow brackets:\n%s", out)
@@ -1611,7 +1613,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R7.2 elements rendered per their type", func(t *testing.T) {
+	t.Run("elements rendered per their type", func(t *testing.T) {
 		out, _ := MarshalKYAML([]any{1, "two", true, nil})
 		s := string(out)
 		for _, want := range []string{"1,", `"two",`, "true,", "null,"} {
@@ -1621,7 +1623,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R7.3 each sequence element on its own line", func(t *testing.T) {
+	t.Run("each sequence element on its own line", func(t *testing.T) {
 		out, _ := MarshalKYAML([]int{1, 2, 3})
 		// Multi-line: each element on its own line.
 		if strings.Count(string(out), "\n") < 5 {
@@ -1629,7 +1631,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R7.4 empty containers as [] and {}", func(t *testing.T) {
+	t.Run("empty containers as [] and {}", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]any{"l": []int{}, "m": map[string]int{}})
 		s := string(out)
 		if !strings.Contains(s, "l: [],") || !strings.Contains(s, "m: {},") {
@@ -1637,16 +1639,16 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.8 Cuddling + trailing commas ==============================
+	// === Cuddling + trailing commas ===
 
-	t.Run("R8.1 trailing commas after final entry (when not cuddled)", func(t *testing.T) {
+	t.Run("trailing commas after final entry (when not cuddled)", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]int{"a": 1})
 		if !strings.Contains(string(out), "a: 1,\n") {
 			t.Errorf("expected trailing comma after final mapping entry:\n%s", out)
 		}
 	})
 
-	t.Run("R8.2 paired brackets cuddled (sequence of compound)", func(t *testing.T) {
+	t.Run("paired brackets cuddled (sequence of compound)", func(t *testing.T) {
 		out, _ := MarshalKYAML([]map[string]int{{"a": 1}})
 		s := string(out)
 		if !strings.Contains(s, "[{") || !strings.Contains(s, "}]") {
@@ -1654,7 +1656,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R8.3 cuddling rules concretely", func(t *testing.T) {
+	t.Run("cuddling rules concretely", func(t *testing.T) {
 		// [{...}, {...}] cuddles open + uses ", " between cuddled elements.
 		out, _ := MarshalKYAML([]map[string]int{{"a": 1}, {"b": 2}})
 		s := string(out)
@@ -1663,7 +1665,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R8.4 worked example matches KEP", func(t *testing.T) {
+	t.Run("worked example matches KEP", func(t *testing.T) {
 		// Approximate the KEP-5295 pod example.
 		v := map[string]any{
 			"apiVersion": "v1",
@@ -1684,7 +1686,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R8.5 uncuddle when comments present", func(t *testing.T) {
+	t.Run("uncuddle when comments present", func(t *testing.T) {
 		v := []map[string]string{{"name": "x"}}
 		out, _ := MarshalWithOptions(v, WithKYAML(),
 			WithComment(map[string][]Comment{"name": {{Position: HeadCommentPos, Text: "c"}}}))
@@ -1694,25 +1696,25 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.9 Indentation =============================================
+	// === Indentation ===
 
-	t.Run("R9.1 default 2-space indent", func(t *testing.T) {
+	t.Run("default 2-space indent", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]int{"a": 1})
 		if !strings.Contains(string(out), "  a: 1,") {
 			t.Errorf("expected 2-space indent:\n%s", out)
 		}
 	})
 
-	t.Run("R9.2 WithIndent honored", func(t *testing.T) {
+	t.Run("WithIndent honored", func(t *testing.T) {
 		out, _ := MarshalWithOptions(map[string]int{"a": 1}, WithKYAML(), WithIndent(4))
 		if !strings.Contains(string(out), "    a: 1,") {
 			t.Errorf("expected 4-space indent:\n%s", out)
 		}
 	})
 
-	// === §2.10 Multi-line strings =====================================
+	// === Multi-line strings ===
 
-	t.Run("R10.1 flow-folding form for long multi-line strings", func(t *testing.T) {
+	t.Run("flow-folding form for long multi-line strings", func(t *testing.T) {
 		long := strings.Repeat("a", 50) + "\n" + strings.Repeat("b", 50) + "\n" + strings.Repeat("c", 50)
 		out, _ := MarshalKYAML(map[string]string{"k": long})
 		// Flow-folded output contains backslash + newline continuation.
@@ -1721,7 +1723,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R10.2 flow-folding round-trips through YAML parser", func(t *testing.T) {
+	t.Run("flow-folding round-trips through YAML parser", func(t *testing.T) {
 		long := strings.Repeat("a", 50) + "\n" + strings.Repeat("b", 50) + "\n" + strings.Repeat("c", 50)
 		out, _ := MarshalKYAML(map[string]string{"k": long})
 		var got map[string]string
@@ -1733,7 +1735,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R10.3 KEP example shape", func(t *testing.T) {
+	t.Run("KEP example shape", func(t *testing.T) {
 		// The KEP example uses "first\nsecond\nthird" with continuations.
 		// We verify our output FORMS a valid YAML string that decodes back.
 		s := strings.Repeat("x", 100) + "\n" + strings.Repeat("y", 100) + "\n" + strings.Repeat("z", 100)
@@ -1744,7 +1746,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R10.4 length-based heuristic", func(t *testing.T) {
+	t.Run("length-based heuristic", func(t *testing.T) {
 		// Short multi-line stays single-line.
 		short := "a\nb\nc"
 		out, _ := MarshalKYAML(map[string]string{"k": short})
@@ -1753,16 +1755,16 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R10.5 single-line escaped form for short strings", func(t *testing.T) {
+	t.Run("single-line escaped form for short strings", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]string{"k": "a\nb"})
 		if !strings.Contains(string(out), `\n`) {
 			t.Errorf("expected `\\n` escape:\n%s", out)
 		}
 	})
 
-	// === §2.11 Comments ===============================================
+	// === Comments ===
 
-	t.Run("R11.1 best-effort comment placement", func(t *testing.T) {
+	t.Run("best-effort comment placement", func(t *testing.T) {
 		src := []byte("# top\nname: foo\n")
 		out, err := Format(src)
 		if err != nil {
@@ -1773,7 +1775,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R11.2 line-comment placement on mapping value", func(t *testing.T) {
+	t.Run("line-comment placement on mapping value", func(t *testing.T) {
 		// Inline comment on a scalar value is preserved at the value's line.
 		src := []byte("name: foo  # inline\n")
 		out, err := Format(src)
@@ -1785,21 +1787,21 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R11.3 line-comment placement on list element", func(t *testing.T) {
+	t.Run("line-comment placement on list element", func(t *testing.T) {
 		// Line comment on a sequence element.
 		src := []byte("- foo  # line\n")
 		out, err := Format(src)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Best-effort per R11.5 — sequence-element comments may be lost
+		// Best-effort: sequence-element comments may be lost
 		// (path-anchor limitation). We just verify no crash + valid output.
 		if !ValidKYAML(out) {
 			t.Errorf("output not valid KYAML:\n%s", out)
 		}
 	})
 
-	t.Run("R11.4 head/inline/foot preservation", func(t *testing.T) {
+	t.Run("head/inline/foot preservation", func(t *testing.T) {
 		src := []byte("# head\nname: foo  # inline\n")
 		out, _ := Format(src)
 		if !strings.Contains(string(out), "head") || !strings.Contains(string(out), "inline") {
@@ -1807,8 +1809,8 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R11.5 caveat: best-effort, comment loss permitted", func(t *testing.T) {
-		// Per R11.5 some comments may be lost (e.g., on empty/special-char
+	t.Run("caveat: best-effort, comment loss permitted", func(t *testing.T) {
+		// Some comments may be lost (e.g., on empty/special-char
 		// keys, sequence-index paths). Verify Format never crashes on
 		// these inputs and the output is valid KYAML — comment loss itself
 		// is acceptable.
@@ -1822,7 +1824,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R11.6 WithComment programmatic injection", func(t *testing.T) {
+	t.Run("WithComment programmatic injection", func(t *testing.T) {
 		v := map[string]int{"port": 80}
 		out, err := MarshalWithOptions(v, WithKYAML(),
 			WithComment(map[string][]Comment{
@@ -1836,50 +1838,49 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.12 Forbidden constructs (validator) =======================
+	// === Forbidden constructs (validator) ===
 
 	rejectionCases := []struct {
-		rule  string
 		desc  string
 		input string
 	}{
-		{"R12.1", "anchor", "---\n{ a: &x 1 }\n"},
-		{"R12.1", "alias", "---\n{ a: &x 1, b: *x }\n"},
-		{"R12.2", "explicit tag", "---\n{ a: !!int 5 }\n"},
-		{"R12.3", "merge key", "---\n{ <<: { a: 1 }, b: 2 }\n"},
-		{"R12.4", "literal block scalar", "---\nname: |\n  multi\n  line\n"},
-		{"R12.5", "block-style mapping", "---\nname: foo\n"},
-		{"R12.6", "block-style sequence", "---\nitems:\n  - 1\n  - 2\n"},
-		{"R12.7", "plain string value", "---\n{ name: bare_string }\n"},
-		{"R12.8", "single-quoted scalar", "---\n{ name: 'foo' }\n"},
-		{"R12.9", "YAML directive", "%YAML 1.2\n---\n{ a: 1 }\n"},
-		{"R12.10", "compound mapping key", "---\n? [1, 2]\n: foo\n"},
-		{"R12.11", "hex integer literal", "---\n{ port: 0x50 }\n"},
-		{"R12.12", "YAML 1.1 boolean alias", "---\n{ enabled: yes }\n"},
-		{"R12.13", "NaN literal", "---\n{ bad: .nan }\n"},
-		{"R12.14", "explicit complex-key indicator", "---\n? {a: 1}\n: foo\n"},
+		{"anchor", "---\n{ a: &x 1 }\n"},
+		{"alias", "---\n{ a: &x 1, b: *x }\n"},
+		{"explicit tag", "---\n{ a: !!int 5 }\n"},
+		{"merge key", "---\n{ <<: { a: 1 }, b: 2 }\n"},
+		{"literal block scalar", "---\nname: |\n  multi\n  line\n"},
+		{"block-style mapping", "---\nname: foo\n"},
+		{"block-style sequence", "---\nitems:\n  - 1\n  - 2\n"},
+		{"plain string value", "---\n{ name: bare_string }\n"},
+		{"single-quoted scalar", "---\n{ name: 'foo' }\n"},
+		{"YAML directive", "%YAML 1.2\n---\n{ a: 1 }\n"},
+		{"compound mapping key", "---\n? [1, 2]\n: foo\n"},
+		{"hex integer literal", "---\n{ port: 0x50 }\n"},
+		{"YAML 1.1 boolean alias", "---\n{ enabled: yes }\n"},
+		{"NaN literal", "---\n{ bad: .nan }\n"},
+		{"explicit complex-key indicator", "---\n? {a: 1}\n: foo\n"},
 	}
 	for _, rc := range rejectionCases {
-		t.Run(rc.rule+" "+rc.desc+" rejected by strict mode", func(t *testing.T) {
+		t.Run(rc.desc+" rejected by strict mode", func(t *testing.T) {
 			err := ValidateKYAML([]byte(rc.input))
 			if err == nil {
-				t.Errorf("expected validation error for %s (%s) input:\n%s", rc.rule, rc.desc, rc.input)
+				t.Errorf("expected validation error for %s input:\n%s", rc.desc, rc.input)
 				return
 			}
 			var k *KYAMLError
 			if !errors.As(err, &k) {
 				t.Errorf("expected *KYAMLError, got %T", err)
 			}
-			// Don't require the exact rule ID — different inputs may surface
+			// Don't require a particular Rule — different inputs may surface
 			// related rules (e.g., a block-mapping with plain string emits
-			// both R12.5 and R12.7). The test's purpose is rule X is
-			// somehow surfaced in the rejection.
+			// both a block-mapping and a plain-string violation). The purpose
+			// is that the construct is rejected.
 		})
 	}
 
-	// === §2.13 Special types ==========================================
+	// === Special types ===
 
-	t.Run("R13.1 nil pointer renders as null", func(t *testing.T) {
+	t.Run("nil pointer renders as null", func(t *testing.T) {
 		var p *int
 		out, _ := MarshalKYAML(map[string]any{"x": p})
 		if !strings.Contains(string(out), "x: null,") {
@@ -1887,7 +1888,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R13.2 json.Marshaler primary under KYAML", func(t *testing.T) {
+	t.Run("json.Marshaler primary under KYAML", func(t *testing.T) {
 		out, err := MarshalKYAML(kyamlJSONMarshalerType{X: 5})
 		if err != nil {
 			t.Fatal(err)
@@ -1897,14 +1898,14 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R13.3 nil interface renders as null", func(t *testing.T) {
+	t.Run("nil interface renders as null", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]any{"x": any(nil)})
 		if !strings.Contains(string(out), "x: null,") {
 			t.Errorf("nil interface should render as null:\n%s", out)
 		}
 	})
 
-	t.Run("R13.4 json struct tag primary", func(t *testing.T) {
+	t.Run("json struct tag primary", func(t *testing.T) {
 		type S struct {
 			V int `json:"json_name" yaml:"yaml_name"`
 		}
@@ -1914,7 +1915,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R13.5 tag option merging", func(t *testing.T) {
+	t.Run("tag option merging", func(t *testing.T) {
 		type S struct {
 			A string `json:"a" yaml:"a,omitempty"`
 		}
@@ -1925,7 +1926,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R13.6 time.Time as RFC 3339 quoted string", func(t *testing.T) {
+	t.Run("time.Time as RFC 3339 quoted string", func(t *testing.T) {
 		tm := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 		out, _ := MarshalKYAML(map[string]any{"t": tm})
 		if !strings.Contains(string(out), `"2026-05-08T12:00:00Z"`) {
@@ -1933,7 +1934,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R13.7 time.Duration as int64 nanoseconds (default)", func(t *testing.T) {
+	t.Run("time.Duration as int64 nanoseconds (default)", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]any{"d": time.Hour + 30*time.Minute})
 		if !strings.Contains(string(out), "d: 5400000000000,") {
 			t.Errorf("Duration not int64 ns:\n%s", out)
@@ -1945,7 +1946,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R13.8 big.Int / big.Float verbatim", func(t *testing.T) {
+	t.Run("big.Int / big.Float verbatim", func(t *testing.T) {
 		bi := big.NewInt(99999999)
 		bf := big.NewFloat(3.14)
 		out, _ := MarshalKYAML(map[string]any{"i": bi, "f": bf})
@@ -1954,7 +1955,7 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R13.9 []byte and [N]byte base64-encoded", func(t *testing.T) {
+	t.Run("[]byte and [N]byte base64-encoded", func(t *testing.T) {
 		out, _ := MarshalKYAML(map[string]any{"sl": []byte("hi"), "ar": [2]byte{'h', 'i'}})
 		s := string(out)
 		if !strings.Contains(s, `sl: "aGk=",`) || !strings.Contains(s, `ar: "aGk=",`) {
@@ -1962,16 +1963,16 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R13.10 json.Number emitted verbatim", func(t *testing.T) {
+	t.Run("json.Number emitted verbatim", func(t *testing.T) {
 		// Use `num` (not `n`) since `n` is a Norway-problem alias and would
-		// be quoted per R5.2, distracting from the value-emission check.
+		// be quoted, distracting from the value-emission check.
 		out, _ := MarshalKYAML(map[string]any{"num": json.Number("3.10")})
 		if !strings.Contains(string(out), "num: 3.10,") {
 			t.Errorf("json.Number not preserved verbatim:\n%s", out)
 		}
 	})
 
-	t.Run("R13.11 RawValue re-parsed and re-emitted as KYAML", func(t *testing.T) {
+	t.Run("RawValue re-parsed and re-emitted as KYAML", func(t *testing.T) {
 		// Block-style YAML inside RawValue should re-emit as KYAML.
 		out, err := MarshalKYAML(map[string]any{"r": RawValue("a: 1\nb: 2\n")})
 		if err != nil {
@@ -1990,9 +1991,9 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	// === §2.14 Decoding semantics =====================================
+	// === Decoding semantics ===
 
-	t.Run("R14.1 default WithKYAML decode = base", func(t *testing.T) {
+	t.Run("default WithKYAML decode = base", func(t *testing.T) {
 		// KYAML mode is encoder-only. Default Unmarshal is unaffected by it.
 		var v map[string]any
 		if err := Unmarshal([]byte("name: foo\n"), &v); err != nil {
@@ -2000,14 +2001,14 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R14.2 WithStrictKYAML rejects forbidden constructs", func(t *testing.T) {
+	t.Run("WithStrictKYAML rejects forbidden constructs", func(t *testing.T) {
 		var v any
 		if err := UnmarshalWithOptions([]byte("name: foo\n"), &v, WithStrictKYAML()); !errors.Is(err, ErrKYAML) {
 			t.Errorf("expected ErrKYAML, got %v", err)
 		}
 	})
 
-	t.Run("R14.3 IsKYAML / ValidateKYAML are pure validators", func(t *testing.T) {
+	t.Run("IsKYAML / ValidateKYAML are pure validators", func(t *testing.T) {
 		valid := []byte("---\n{ a: 1 }\n")
 		if !ValidKYAML(valid) {
 			t.Error("ValidKYAML rejected valid input")
@@ -2017,17 +2018,17 @@ func TestKEPCompliance(t *testing.T) {
 		}
 	})
 
-	t.Run("R14.4 strict mode does not enforce cosmetic rules", func(t *testing.T) {
+	t.Run("strict mode does not enforce cosmetic rules", func(t *testing.T) {
 		// `{ a: 1, b: 2 }` is structurally valid KYAML on a single line —
 		// canonical KYAML puts each key on its own line, but the structural
-		// validator (R14.4) doesn't enforce that. Strict mode accepts.
+		// validator doesn't enforce that. Strict mode accepts.
 		nonCanonical := []byte("---\n{ a: 1, b: 2 }\n")
 		if err := ValidateKYAML(nonCanonical); err != nil {
 			t.Errorf("strict mode should accept structurally-valid (non-canonical) KYAML, got %v", err)
 		}
 	})
 
-	t.Run("R14.5 WithKYAMLLintCosmetic flags non-canonical formatting", func(t *testing.T) {
+	t.Run("WithKYAMLLintCosmetic flags non-canonical formatting", func(t *testing.T) {
 		nonCanonical := []byte("---\n{ a: 1, b: 2 }\n")
 		issues, err := Lint(nonCanonical, WithStrictKYAML(), WithKYAMLLintCosmetic())
 		if err != nil {

@@ -7,13 +7,17 @@ import (
 	"strings"
 )
 
-// Position identifies a location within YAML source text.
+// Position identifies a location within YAML source text. Line and Column
+// start at 1; Column and Offset count bytes of the UTF-8 input (input in
+// UTF-16 or UTF-32 is converted to UTF-8 first). The zero Position means
+// the location is unknown.
 type Position struct {
 	Line   int
 	Column int
 	Offset int
 }
 
+// String returns the position as "line:column".
 func (p Position) String() string {
 	return fmt.Sprintf("%d:%d", p.Line, p.Column)
 }
@@ -33,6 +37,7 @@ func (e *SyntaxError) Error() string {
 	return fmt.Sprintf("yaml: %s", e.Message)
 }
 
+// Is reports whether target is a [*SyntaxError], so any syntax error matches [ErrSyntax].
 func (e *SyntaxError) Is(target error) bool {
 	_, ok := target.(*SyntaxError)
 	return ok
@@ -48,6 +53,7 @@ func (e *TypeError) Error() string {
 	return fmt.Sprintf("yaml: unmarshal errors:\n  %s", strings.Join(e.Errors, "\n  "))
 }
 
+// Is reports whether target is a [*TypeError], so any type error matches [ErrType].
 func (e *TypeError) Is(target error) bool {
 	_, ok := target.(*TypeError)
 	return ok
@@ -64,6 +70,7 @@ func (e *UnknownFieldError) Error() string {
 	return fmt.Sprintf("yaml: line %d: unknown field %q", e.Pos.Line, e.Field)
 }
 
+// Is reports whether target is an [*UnknownFieldError], so any such error matches [ErrUnknownField].
 func (e *UnknownFieldError) Is(target error) bool {
 	_, ok := target.(*UnknownFieldError)
 	return ok
@@ -80,6 +87,7 @@ func (e *CycleError) Error() string {
 	return fmt.Sprintf("yaml: line %d: alias %q creates a cycle", e.Pos.Line, e.Anchor)
 }
 
+// Is reports whether target is a [*CycleError], so any such error matches [ErrCycle].
 func (e *CycleError) Is(target error) bool {
 	_, ok := target.(*CycleError)
 	return ok
@@ -96,6 +104,7 @@ func (e *DuplicateKeyError) Error() string {
 	return fmt.Sprintf("yaml: line %d: duplicate key %q", e.Pos.Line, e.Key)
 }
 
+// Is reports whether target is a [*DuplicateKeyError], so any such error matches [ErrDuplicateKey].
 func (e *DuplicateKeyError) Is(target error) bool {
 	_, ok := target.(*DuplicateKeyError)
 	return ok
@@ -114,10 +123,12 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("yaml: line %d: validation: %s", e.Pos.Line, e.Err.Error())
 }
 
+// Unwrap returns the validator's error.
 func (e *ValidationError) Unwrap() error {
 	return e.Err
 }
 
+// Is reports whether target is a [*ValidationError], so any such error matches [ErrValidation].
 func (e *ValidationError) Is(target error) bool {
 	_, ok := target.(*ValidationError)
 	return ok
@@ -136,28 +147,30 @@ func (e *DefaultError) Error() string {
 	return fmt.Sprintf("yaml: field %q: %s", e.Field, e.Message)
 }
 
+// Is reports whether target is a [*DefaultError], so any such error matches [ErrDefault].
 func (e *DefaultError) Is(target error) bool {
 	_, ok := target.(*DefaultError)
 	return ok
 }
 
-// KYAMLError reports one or more KYAML conformance violations. Returned by
-// [UnmarshalKYAML], [ValidateKYAML], and any decode call configured with
-// [WithStrictKYAML].
+// KYAMLError reports one or more KYAML conformance violations. It is
+// returned by [ValidateKYAML], [UnmarshalKYAML] and [UnmarshalWithOptions]
+// with [WithStrictKYAML].
 //
 // Use [errors.Is](err, [ErrKYAML]) to test for KYAML errors generically.
 type KYAMLError struct {
 	Errors []KYAMLViolation
 }
 
-// KYAMLViolation describes a single KYAML rule violation. Rule is a rule
-// identifier from the KYAML requirements document (e.g. "R12.1" for
-// "anchors not allowed").
+// KYAMLViolation describes a single KYAML rule violation.
 type KYAMLViolation struct {
+	// Rule is a stable identifier of the rule broken, for code that
+	// branches on the kind of violation. It is not part of the message.
 	Rule    string
 	Message string
 	Pos     Position
-	Token   string
+	// Token is the offending source text, when known.
+	Token string
 }
 
 func (e *KYAMLError) Error() string {
@@ -167,21 +180,22 @@ func (e *KYAMLError) Error() string {
 	if len(e.Errors) == 1 {
 		v := e.Errors[0]
 		if v.Pos.Line > 0 {
-			return fmt.Sprintf("yaml: line %d, column %d: %s (%s)", v.Pos.Line, v.Pos.Column, v.Message, v.Rule)
+			return fmt.Sprintf("yaml: line %d, column %d: %s", v.Pos.Line, v.Pos.Column, v.Message)
 		}
-		return fmt.Sprintf("yaml: %s (%s)", v.Message, v.Rule)
+		return "yaml: " + v.Message
 	}
 	parts := make([]string, 0, len(e.Errors))
 	for _, v := range e.Errors {
 		if v.Pos.Line > 0 {
-			parts = append(parts, fmt.Sprintf("line %d, column %d: %s (%s)", v.Pos.Line, v.Pos.Column, v.Message, v.Rule))
+			parts = append(parts, fmt.Sprintf("line %d, column %d: %s", v.Pos.Line, v.Pos.Column, v.Message))
 		} else {
-			parts = append(parts, fmt.Sprintf("%s (%s)", v.Message, v.Rule))
+			parts = append(parts, v.Message)
 		}
 	}
 	return fmt.Sprintf("yaml: %d KYAML violations:\n  %s", len(e.Errors), strings.Join(parts, "\n  "))
 }
 
+// Is reports whether target is a [*KYAMLError], so any such error matches [ErrKYAML].
 func (e *KYAMLError) Is(target error) bool {
 	_, ok := target.(*KYAMLError)
 	return ok
@@ -198,20 +212,22 @@ const (
 
 // LintIssue describes a single KYAML conformance deviation reported by [Lint].
 type LintIssue struct {
+	// Rule is a stable identifier of the rule broken, for code that
+	// branches on the kind of issue. It is not part of the message.
 	Rule     string
 	Message  string
 	Pos      Position
 	Severity Severity
 }
 
-// String renders the issue with its source position and rule ID. LintIssue
-// is a finding rather than an error: it carries a Severity field, so the
-// type implements [fmt.Stringer] instead of error.
+// String renders the issue with its source position, when known. LintIssue
+// is a finding rather than an error, so it implements [fmt.Stringer]
+// instead of error.
 func (i LintIssue) String() string {
 	if i.Pos.Line > 0 {
-		return fmt.Sprintf("line %d, column %d: %s (%s)", i.Pos.Line, i.Pos.Column, i.Message, i.Rule)
+		return fmt.Sprintf("line %d, column %d: %s", i.Pos.Line, i.Pos.Column, i.Message)
 	}
-	return fmt.Sprintf("%s (%s)", i.Message, i.Rule)
+	return i.Message
 }
 
 // Sentinel errors for use with [errors.Is].
@@ -269,7 +285,7 @@ func FormatError(data []byte, err error, color ...bool) string {
 			if i > 0 {
 				buf.WriteByte('\n')
 			}
-			msg := fmt.Sprintf("yaml: line %d, column %d: %s (%s)", v.Pos.Line, v.Pos.Column, v.Message, v.Rule)
+			msg := fmt.Sprintf("yaml: line %d, column %d: %s", v.Pos.Line, v.Pos.Column, v.Message)
 			if useColor {
 				fmt.Fprintf(&buf, "\x1b[1;31m%s\x1b[0m\n", msg)
 			} else {

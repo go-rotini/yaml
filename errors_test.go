@@ -370,7 +370,8 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 				Message: "anchor not allowed",
 				Pos:     Position{Line: 5, Column: 7},
 			}}},
-			want: `yaml: line 5, column 7: anchor not allowed (R12.1)`,
+			want:    `yaml: line 5, column 7: anchor not allowed`,
+			exactly: true,
 		},
 		{
 			name: "single-no-pos",
@@ -378,7 +379,8 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 				Rule:    "R3.1",
 				Message: "missing header",
 			}}},
-			want: `yaml: missing header (R3.1)`,
+			want:    `yaml: missing header`,
+			exactly: true,
 		},
 		{
 			name: "multi-mixed",
@@ -404,11 +406,11 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 
 func TestLintIssueString(t *testing.T) {
 	withPos := LintIssue{Rule: "R12.5", Message: "block style", Pos: Position{Line: 3, Column: 1}}
-	if got := withPos.String(); got != "line 3, column 1: block style (R12.5)" {
+	if got := withPos.String(); got != "line 3, column 1: block style" {
 		t.Errorf("String() with pos = %q", got)
 	}
 	noPos := LintIssue{Rule: "R3.1", Message: "no header"}
-	if got := noPos.String(); got != "no header (R3.1)" {
+	if got := noPos.String(); got != "no header" {
 		t.Errorf("String() no pos = %q", got)
 	}
 }
