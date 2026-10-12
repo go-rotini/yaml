@@ -61,13 +61,16 @@
 //
 // The tag format is "keyname,opts" where opts is a comma-separated list of:
 //   - omitempty: omit the field if it has its zero value
-//   - inline: inline the struct's fields into the parent mapping
+//   - inline: merge the struct's fields, or the map's entries, into the parent
+//     mapping; a map key that names a struct field is left out when encoding,
+//     and keys that name no field are decoded into the map
 //   - flow: encode the field in flow style (e.g. [a, b] or {k: v})
 //   - required: return an error during decoding if the key is absent
 //   - default=<value>: set field to <value> during decoding if the key is absent
 //     (requires [WithDefaults]; scalar types only)
 //
-// A tag of "-" excludes the field from encoding and decoding.
+// A tag of "-" excludes the field from encoding and decoding. A struct with
+// no fields left to write is encoded as an empty mapping ({}).
 //
 // # Custom Marshalers
 //

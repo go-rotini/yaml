@@ -1,7 +1,6 @@
 package yaml
 
 import (
-	"bytes"
 	"fmt"
 	"slices"
 	"strings"
@@ -30,7 +29,6 @@ type scanner struct {
 }
 
 func newScanner(src []byte) *scanner {
-	src = normalizeLineBreaks(src)
 	return &scanner{
 		src:               src,
 		line:              1,
@@ -40,30 +38,6 @@ func newScanner(src []byte) *scanner {
 		docStartMapIndent: -1,
 		flowBlockIndent:   -1,
 	}
-}
-
-func normalizeLineBreaks(src []byte) []byte {
-	if !bytes.Contains(src, []byte{0xC2, 0x85}) &&
-		!bytes.Contains(src, []byte{0xE2, 0x80, 0xA8}) &&
-		!bytes.Contains(src, []byte{0xE2, 0x80, 0xA9}) {
-		return src
-	}
-	var buf []byte
-	for i := 0; i < len(src); {
-		if i+1 < len(src) && src[i] == 0xC2 && src[i+1] == 0x85 {
-			buf = append(buf, '\n')
-			i += 2
-			continue
-		}
-		if i+2 < len(src) && src[i] == 0xE2 && src[i+1] == 0x80 && (src[i+2] == 0xA8 || src[i+2] == 0xA9) {
-			buf = append(buf, '\n')
-			i += 3
-			continue
-		}
-		buf = append(buf, src[i])
-		i++
-	}
-	return buf
 }
 
 func (s *scanner) scan() ([]token, error) {

@@ -1,10 +1,12 @@
 package yaml
 
 import (
+	"bytes"
 	"context"
 	"encoding"
 	"encoding/base64"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
 	"reflect"
@@ -13,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type encoder struct {
@@ -20,6 +23,10 @@ type encoder struct {
 	ctx         context.Context
 	buf         []byte
 	encodingKey bool
+	// flowDepth counts the flow collections being written, where block
+	// scalars are not allowed.
+	flowDepth int
+	keys      keyTracker
 }
 
 func newEncoder(opts *encoderOptions) *encoder {
@@ -30,16 +37,18 @@ func (e *encoder) encode(v reflect.Value) ([]byte, error) {
 	if e.opts.kyaml {
 		ke := newKYAMLEmitter(e.opts)
 		ke.ctx = e.ctx
+		ke.keys.on = e.opts.comments != nil
 		out, err := ke.encode(v)
 		if err != nil {
 			return nil, err
 		}
 		if e.opts.comments != nil {
-			out = applyComments(out, e.opts.comments)
+			out = applyComments(out, e.opts.comments, ke.keys.positions)
 		}
 		return out, nil
 	}
 	e.buf = e.buf[:0]
+	e.keys = keyTracker{on: e.opts.comments != nil}
 	if err := e.marshalValue(v, 0, false); err != nil {
 		return nil, err
 	}
@@ -47,102 +56,142 @@ func (e *encoder) encode(v reflect.Value) ([]byte, error) {
 		e.buf = append(e.buf, '\n')
 	}
 	if e.opts.comments != nil {
-		e.buf = applyComments(e.buf, e.opts.comments)
+		e.buf = applyComments(e.buf, e.opts.comments, e.keys.positions)
 	}
 	return e.buf, nil
 }
 
-func applyComments(buf []byte, comments map[string][]Comment) []byte {
-	for path, cs := range comments {
-		for _, c := range cs {
+// keyPos records where the entry at path was written, for placing
+// comments: line is the line its key or sequence item starts on, end the
+// line its value ends on. lineCommentAtEnd places a line comment on the
+// end line, after a scalar that may span lines.
+type keyPos struct {
+	path             string
+	line, end        int
+	lineCommentAtEnd bool
+}
+
+// keyTracker records the position of every mapping entry and sequence item
+// while encoding, so that [WithComment] comments are placed by structure
+// rather than by matching text.
+type keyTracker struct {
+	on        bool
+	path      string
+	positions []keyPos
+	counted   int
+	lines     int
+}
+
+// line returns the 0-based line that the next byte appended to buf is on.
+func (k *keyTracker) line(buf []byte) int {
+	k.lines += bytes.Count(buf[k.counted:], []byte{'\n'})
+	k.counted = len(buf)
+	return k.lines
+}
+
+// enter records the start of the entry seg (a key, or "[i]" for a sequence
+// item) and makes it the current path. leave takes what it returns.
+func (k *keyTracker) enter(buf []byte, seg string) (idx int, parent string) {
+	if !k.on {
+		return -1, ""
+	}
+	parent = k.path
+	switch {
+	case strings.HasPrefix(seg, "["):
+		k.path = parent + seg
+	case parent == "":
+		k.path = seg
+	default:
+		k.path = parent + "." + seg
+	}
+	k.positions = append(k.positions, keyPos{path: k.path, line: k.line(buf)})
+	return len(k.positions) - 1, parent
+}
+
+// leave records the end of the entry started by enter.
+func (k *keyTracker) leave(buf []byte, idx int, parent string, lineCommentAtEnd bool) {
+	if idx < 0 {
+		return
+	}
+	k.positions[idx].end = k.line(buf)
+	k.positions[idx].lineCommentAtEnd = lineCommentAtEnd
+	k.path = parent
+}
+
+// findKeyPos returns the position recorded for path, which may start with
+// "$" or "$.". A path that matches no entry falls back to the first entry
+// whose last segment equals the path's last segment.
+func findKeyPos(positions []keyPos, path string) (keyPos, bool) {
+	path = strings.TrimPrefix(strings.TrimPrefix(path, "$"), ".")
+	if path == "" {
+		return keyPos{}, false
+	}
+	for _, kp := range positions {
+		if kp.path == path {
+			return kp, true
+		}
+	}
+	last := path[strings.LastIndex(path, ".")+1:]
+	for _, kp := range positions {
+		if kp.path[strings.LastIndex(kp.path, ".")+1:] == last {
+			return kp, true
+		}
+	}
+	return keyPos{}, false
+}
+
+// applyComments inserts comments at the lines recorded in positions: a head
+// comment on its own line before the entry, a line comment at the end of
+// the entry's first line (or its last, for a multi-line scalar), and a foot
+// comment on its own line after the entry's value.
+func applyComments(buf []byte, comments map[string][]Comment, positions []keyPos) []byte {
+	type extra struct{ head, tail, foot []string }
+	lines := strings.Split(string(buf), "\n")
+	added := make(map[int]*extra)
+	at := func(i int) *extra {
+		if added[i] == nil {
+			added[i] = &extra{}
+		}
+		return added[i]
+	}
+	indentOf := func(i int) string {
+		return lines[i][:len(lines[i])-len(strings.TrimLeft(lines[i], " "))]
+	}
+	for _, path := range slices.Sorted(maps.Keys(comments)) {
+		kp, ok := findKeyPos(positions, path)
+		if !ok || kp.line >= len(lines) || kp.end >= len(lines) {
+			continue
+		}
+		for _, c := range comments[path] {
 			switch c.Position {
 			case HeadCommentPos:
-				buf = insertHeadComment(buf, path, c.Text)
+				at(kp.line).head = append(at(kp.line).head, indentOf(kp.line)+"# "+c.Text)
 			case LineCommentPos:
-				buf = insertLineComment(buf, path, c.Text)
+				l := kp.line
+				if kp.lineCommentAtEnd {
+					l = kp.end
+				}
+				at(l).tail = append(at(l).tail, " # "+c.Text)
 			case FootCommentPos:
-				buf = insertFootComment(buf, path, c.Text)
+				at(kp.end).foot = append(at(kp.end).foot, indentOf(kp.line)+"# "+c.Text)
 			}
 		}
 	}
-	return buf
-}
-
-// matchKeyLine reports whether trimmed (with leading spaces removed) begins
-// with `key:` or `"key":`. The quoted form is required because KYAML quotes
-// type-ambiguous, numeric, and otherwise-special keys.
-func matchKeyLine(trimmed, key string) bool {
-	if strings.HasPrefix(trimmed, key+":") {
-		return true
-	}
-	return strings.HasPrefix(trimmed, `"`+key+`":`)
-}
-
-func insertHeadComment(buf []byte, path, text string) []byte {
-	key := pathToKey(path)
-	if key == "" {
+	if len(added) == 0 {
 		return buf
 	}
-	lines := strings.Split(string(buf), "\n")
+	out := make([]string, 0, len(lines)+len(added))
 	for i, line := range lines {
-		trimmed := strings.TrimLeft(line, " ")
-		if matchKeyLine(trimmed, key) {
-			indent := strings.Repeat(" ", len(line)-len(trimmed))
-			comment := indent + "# " + text
-			after := make([]string, 0, len(lines)+1)
-			after = append(after, lines[:i]...)
-			after = append(after, comment)
-			after = append(after, lines[i:]...)
-			return []byte(strings.Join(after, "\n"))
+		x := added[i]
+		if x == nil {
+			out = append(out, line)
+			continue
 		}
+		out = append(out, x.head...)
+		out = append(out, line+strings.Join(x.tail, ""))
+		out = append(out, x.foot...)
 	}
-	return buf
-}
-
-func insertLineComment(buf []byte, path, text string) []byte {
-	key := pathToKey(path)
-	if key == "" {
-		return buf
-	}
-	lines := strings.Split(string(buf), "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimLeft(line, " ")
-		if matchKeyLine(trimmed, key) {
-			lines[i] = line + " # " + text
-			return []byte(strings.Join(lines, "\n"))
-		}
-	}
-	return buf
-}
-
-func insertFootComment(buf []byte, path, text string) []byte {
-	key := pathToKey(path)
-	if key == "" {
-		return buf
-	}
-	lines := strings.Split(string(buf), "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimLeft(line, " ")
-		if matchKeyLine(trimmed, key) {
-			indent := strings.Repeat(" ", len(line)-len(trimmed))
-			comment := indent + "# " + text
-			after := make([]string, 0, len(lines)+1)
-			after = append(after, lines[:i+1]...)
-			after = append(after, comment)
-			after = append(after, lines[i+1:]...)
-			return []byte(strings.Join(after, "\n"))
-		}
-	}
-	return buf
-}
-
-func pathToKey(path string) string {
-	path = strings.TrimPrefix(path, "$.")
-	parts := strings.Split(path, ".")
-	if len(parts) == 0 {
-		return ""
-	}
-	return parts[len(parts)-1]
+	return []byte(strings.Join(out, "\n"))
 }
 
 func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
@@ -175,8 +224,7 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 				err, _ := reflect.TypeAssert[error](out[1])
 				return err
 			}
-			e.buf = append(e.buf, out[0].Bytes()...)
-			return nil
+			return e.writeRawYAML(out[0].Bytes(), indent, inline)
 		}
 	}
 
@@ -201,8 +249,7 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 			if err != nil {
 				return err
 			}
-			e.buf = append(e.buf, raw...)
-			return nil
+			return e.writeRawYAML(raw, indent, inline)
 		}
 		if m, ok := iface.(encoding.TextMarshaler); ok {
 			raw, err := m.MarshalText()
@@ -228,8 +275,7 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 			if err != nil {
 				return err
 			}
-			e.buf = append(e.buf, raw...)
-			return nil
+			return e.writeRawYAML(raw, indent, inline)
 		}
 		if m, ok := iface.(encoding.TextMarshaler); ok {
 			raw, err := m.MarshalText()
@@ -323,35 +369,42 @@ func (e *encoder) marshalSlice(v reflect.Value, indent int, inline bool) error {
 		return e.marshalFlowSequence(v, indent)
 	}
 
-	seqIndent := indent
-	if e.opts.indentSequence {
-		seqIndent = indent + e.opts.indent
-	}
-
 	for i := range v.Len() {
 		if i > 0 {
 			e.buf = append(e.buf, '\n')
-			e.writeIndent(seqIndent)
+			e.writeIndent(indent)
 		}
+		idx, parent := e.keys.enter(e.buf, itemSeg(i))
 		e.buf = append(e.buf, "- "...)
 
-		elem := v.Index(i)
-		if err := e.marshalValue(elem, seqIndent+e.opts.indent, false); err != nil {
+		// A collection item starts on the "- " line, so its later lines
+		// align with the column after "- ", whatever the indent setting.
+		if err := e.marshalValue(v.Index(i), indent+len("- "), false); err != nil {
 			return err
 		}
+		e.keys.leave(e.buf, idx, parent, false)
 	}
 	return nil
 }
 
+// itemSeg returns the comment path segment of sequence item i.
+func itemSeg(i int) string {
+	return "[" + strconv.Itoa(i) + "]"
+}
+
 func (e *encoder) marshalFlowSequence(v reflect.Value, indent int) error {
+	e.flowDepth++
+	defer func() { e.flowDepth-- }()
 	e.buf = append(e.buf, '[')
 	for i := range v.Len() {
 		if i > 0 {
 			e.buf = append(e.buf, ", "...)
 		}
+		idx, parent := e.keys.enter(e.buf, itemSeg(i))
 		if err := e.marshalValue(v.Index(i), indent, true); err != nil {
 			return err
 		}
+		e.keys.leave(e.buf, idx, parent, false)
 	}
 	e.buf = append(e.buf, ']')
 	return nil
@@ -370,10 +423,49 @@ func (e *encoder) mapKeys(v reflect.Value) []reflect.Value {
 	return keys
 }
 
-// omitField reports whether a struct field is left out: it is empty and
-// tagged omitempty, or [WithOmitEmpty] is set.
+// inlineMapKeys returns the keys of inline map field m to encode. A key
+// that names a field of the struct is left out: the field takes precedence,
+// as it does when decoding.
+func (e *encoder) inlineMapKeys(m reflect.Value, sf *structFields) []reflect.Value {
+	return slices.DeleteFunc(e.mapKeys(m), func(k reflect.Value) bool {
+		return sf.namesField(mapKeyText(k))
+	})
+}
+
+// namesField reports whether name is the key of a non-inline field.
+func (sf *structFields) namesField(name string) bool {
+	idx, ok := sf.byName[name]
+	return ok && !sf.fields[idx].inline
+}
+
+// mapKeyText returns the text of map key k.
+func mapKeyText(k reflect.Value) string {
+	if k.Kind() == reflect.String {
+		return k.String()
+	}
+	return fmt.Sprint(k.Interface())
+}
+
+// omitField reports whether a struct field is left out: it sits behind a
+// nil embedded pointer, or it is empty and tagged omitempty or
+// [WithOmitEmpty] is set.
 func omitField(opts *encoderOptions, fi *fieldInfo, field reflect.Value) bool {
-	return (fi.omitEmpty || opts.omitEmpty) && isEmpty(field)
+	return !field.IsValid() || (fi.omitEmpty || opts.omitEmpty) && isEmpty(field)
+}
+
+// fieldForEncode returns the field of struct v at index, or the zero Value
+// when an embedded struct pointer on the way is nil. It never allocates.
+func fieldForEncode(v reflect.Value, index []int) reflect.Value {
+	for _, i := range index {
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return reflect.Value{}
+			}
+			v = v.Elem()
+		}
+		v = v.Field(i)
+	}
+	return v
 }
 
 func (e *encoder) marshalMap(v reflect.Value, indent int, inline bool) error {
@@ -388,56 +480,321 @@ func (e *encoder) marshalMap(v reflect.Value, indent int, inline bool) error {
 	}
 
 	for i, key := range keys {
-		val := v.MapIndex(key)
-
 		if i > 0 {
 			e.buf = append(e.buf, '\n')
 			e.writeIndent(indent)
 		}
-
-		e.encodingKey = true
-		if err := e.marshalValue(key, indent, true); err != nil {
+		idx, parent := e.keys.enter(e.buf, mapKeyText(key))
+		if err := e.writeKey(key, indent); err != nil {
 			return err
 		}
-		e.encodingKey = false
-		e.buf = append(e.buf, ':')
-
-		if isCompound(val) {
-			e.buf = append(e.buf, '\n')
-			e.writeIndent(indent + e.opts.indent)
-			if err := e.marshalValue(val, indent+e.opts.indent, false); err != nil {
-				return err
-			}
-		} else {
-			e.buf = append(e.buf, ' ')
-			if err := e.marshalValue(val, indent+e.opts.indent, false); err != nil {
-				return err
-			}
+		if err := e.writeBlockValue(v.MapIndex(key), indent, false); err != nil {
+			return err
 		}
+		e.keys.leave(e.buf, idx, parent, false)
 	}
 
 	return nil
 }
 
 func (e *encoder) marshalFlowMapping(v reflect.Value, keys []reflect.Value, indent int) error {
+	e.flowDepth++
+	defer func() { e.flowDepth-- }()
 	e.buf = append(e.buf, '{')
 
 	for i, key := range keys {
 		if i > 0 {
 			e.buf = append(e.buf, ", "...)
 		}
-		e.encodingKey = true
-		if err := e.marshalValue(key, indent, true); err != nil {
+		idx, parent := e.keys.enter(e.buf, mapKeyText(key))
+		if err := e.writeKey(key, indent); err != nil {
 			return err
 		}
-		e.encodingKey = false
 		e.buf = append(e.buf, ": "...)
 		if err := e.marshalValue(v.MapIndex(key), indent, true); err != nil {
 			return err
 		}
+		e.keys.leave(e.buf, idx, parent, false)
 	}
 	e.buf = append(e.buf, '}')
 	return nil
+}
+
+// writeKey writes a mapping key, quoted when it would otherwise read back
+// as a different value.
+func (e *encoder) writeKey(key reflect.Value, indent int) error {
+	e.encodingKey = true
+	defer func() { e.encodingKey = false }()
+	return e.marshalValue(key, indent, true)
+}
+
+// writeFieldName writes a struct field name as a mapping key.
+func (e *encoder) writeFieldName(name string) {
+	e.encodingKey = true
+	e.writeScalar(name, 0)
+	e.encodingKey = false
+}
+
+// writeBlockValue writes the ':' after a block mapping key and then val:
+// on the following lines when it is a non-empty collection, otherwise after
+// a space. flow writes val in flow style.
+//
+// Without [WithIndentSequence] a block sequence starts at the key's column.
+func (e *encoder) writeBlockValue(val reflect.Value, indent int, flow bool) error {
+	e.buf = append(e.buf, ':')
+	val, err := e.resolveMarshaler(val)
+	if err != nil {
+		return err
+	}
+	if raw, ok, err := e.rawMarshal(val); ok {
+		if err != nil {
+			return err
+		}
+		n, err := parseRawYAML(raw)
+		if err != nil {
+			return err
+		}
+		if flow {
+			e.buf = append(e.buf, ' ')
+			e.emitFlowNode(n)
+		} else {
+			e.emitBlockChild(n, indent, true)
+		}
+		return nil
+	}
+	if !flow && e.isBlockCompound(val) {
+		childIndent := indent + e.opts.indent
+		if !e.opts.indentSequence && isSequenceValue(val) {
+			childIndent = indent
+		}
+		e.buf = append(e.buf, '\n')
+		e.writeIndent(childIndent)
+		return e.marshalValue(val, childIndent, false)
+	}
+	e.buf = append(e.buf, ' ')
+	return e.marshalValue(val, indent+e.opts.indent, flow)
+}
+
+// rawMarshal calls the marshaler that writes v as YAML bytes, a custom
+// marshaler or [BytesMarshaler], when marshalValue would use one for v.
+// MarshalYAML methods returning values must already be resolved.
+func (e *encoder) rawMarshal(v reflect.Value) (raw []byte, ok bool, err error) {
+	if !v.IsValid() || !v.CanInterface() {
+		return nil, false, nil
+	}
+	if fn, found := e.opts.customMarshalers[v.Type()]; found {
+		out := reflect.ValueOf(fn).Call([]reflect.Value{v})
+		if !out[1].IsNil() {
+			err, _ = reflect.TypeAssert[error](out[1])
+			return nil, true, err
+		}
+		return out[0].Bytes(), true, nil
+	}
+	switch m := v.Interface().(type) {
+	case BytesMarshaler:
+		raw, err = m.MarshalYAML()
+		return raw, true, err
+	case encoding.TextMarshaler:
+		return nil, false, nil
+	}
+	if v.CanAddr() {
+		if m, found := reflect.TypeAssert[BytesMarshaler](v.Addr()); found {
+			raw, err = m.MarshalYAML()
+			return raw, true, err
+		}
+	}
+	return nil, false, nil
+}
+
+// parseRawYAML parses the YAML bytes returned by a custom marshaler or
+// [BytesMarshaler] into the node they hold; blank bytes hold null. Bytes
+// that are not valid YAML, or hold no value (only a comment, such as
+// "#ff8000"), are taken as a string. More than one document is an error.
+func parseRawYAML(raw []byte) (*node, error) {
+	if strings.TrimSpace(string(raw)) == "" {
+		return &node{kind: nodeScalar}, nil
+	}
+	text := &node{kind: nodeScalar, value: string(raw), tag: tagStr}
+	docs, ok := parseDocs(raw)
+	switch {
+	case !ok, len(docs) == 0:
+		return text, nil
+	case len(docs) > 1:
+		return nil, fmt.Errorf("yaml: marshaler returned %d YAML documents: %w", len(docs), ErrUnsupported)
+	}
+	n := docs[0]
+	if n.kind == nodeDocument {
+		if len(n.children) == 0 {
+			return text, nil
+		}
+		n = n.children[0]
+	}
+	return n, nil
+}
+
+// parseDocs parses raw into its documents, reporting false if raw is not
+// valid YAML.
+func parseDocs(raw []byte) ([]*node, bool) {
+	tokens, err := newScanner(raw).scan()
+	if err != nil {
+		return nil, false
+	}
+	docs, err := newParser(tokens).parse()
+	return docs, err == nil
+}
+
+// writeRawYAML writes the YAML bytes returned by a custom marshaler or
+// [BytesMarshaler] at the current position, re-emitting them so that
+// multi-line output is indented to fit, and in flow style where flow is
+// required.
+func (e *encoder) writeRawYAML(raw []byte, indent int, inline bool) error {
+	n, err := parseRawYAML(raw)
+	if err != nil {
+		return err
+	}
+	if e.opts.flow || inline {
+		e.emitFlowNode(n)
+	} else {
+		e.emitNode(n, indent)
+	}
+	return nil
+}
+
+// maxMarshalerChain bounds how many MarshalYAML results resolveMarshaler
+// follows when each returns another marshaler.
+const maxMarshalerChain = 64
+
+// resolveMarshaler calls the MarshalYAML method marshalValue would call for
+// v, and returns the value it produced, so that the layout can be chosen
+// from what is actually written. It returns v itself when no MarshalYAML
+// method applies.
+func (e *encoder) resolveMarshaler(v reflect.Value) (reflect.Value, error) {
+	for range maxMarshalerChain {
+		for v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) && !v.IsNil() {
+			v = v.Elem()
+		}
+		if !v.IsValid() || !v.CanInterface() || v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			return v, nil
+		}
+		if _, ok := e.opts.customMarshalers[v.Type()]; ok {
+			return v, nil
+		}
+		var (
+			result any
+			err    error
+		)
+		switch m := v.Interface().(type) {
+		case MarshalerContext:
+			result, err = m.MarshalYAML(e.ctx)
+		case Marshaler:
+			result, err = m.MarshalYAML()
+		case BytesMarshaler, encoding.TextMarshaler:
+			return v, nil
+		default:
+			if !v.CanAddr() {
+				return v, nil
+			}
+			pm, ok := reflect.TypeAssert[Marshaler](v.Addr())
+			if !ok {
+				return v, nil
+			}
+			result, err = pm.MarshalYAML()
+		}
+		if err != nil {
+			return v, err
+		}
+		v = reflect.ValueOf(result)
+	}
+	return v, nil
+}
+
+// isSequenceValue reports whether v is written as a sequence ([]byte is
+// written as a !!binary scalar).
+func isSequenceValue(v reflect.Value) bool {
+	for v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) && !v.IsNil() {
+		v = v.Elem()
+	}
+	switch v.Kind() {
+	case reflect.Array:
+		return true
+	case reflect.Slice:
+		return v.Type().Elem().Kind() != reflect.Uint8
+	}
+	return false
+}
+
+// isBlockCompound reports whether v is written as a block collection on
+// lines of its own: a map or struct with at least one entry left after
+// omitted entries, or a non-empty sequence.
+func (e *encoder) isBlockCompound(v reflect.Value) bool {
+	if !isCompound(v) {
+		return false
+	}
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		v = v.Elem()
+	}
+	if byMarshaler, asText := e.marshaledBy(v); byMarshaler {
+		return !asText
+	}
+	switch v.Kind() {
+	case reflect.Slice:
+		return isSequenceValue(v)
+	case reflect.Map:
+		return !e.opts.omitEmpty || len(e.mapKeys(v)) > 0
+	case reflect.Struct:
+		return e.hasStructEntries(v)
+	}
+	return true
+}
+
+// marshaledBy reports whether marshalValue writes v through a marshaler
+// instead of by kind, and whether that marshaler is
+// [encoding.TextMarshaler], whose output is always a scalar. It follows
+// the order marshalValue checks them in.
+func (e *encoder) marshaledBy(v reflect.Value) (byMarshaler, asText bool) {
+	if !v.CanInterface() {
+		return false, false
+	}
+	if _, ok := e.opts.customMarshalers[v.Type()]; ok {
+		return true, false
+	}
+	switch v.Interface().(type) {
+	case MarshalerContext, Marshaler, BytesMarshaler:
+		return true, false
+	case encoding.TextMarshaler:
+		return true, true
+	}
+	if v.CanAddr() {
+		switch v.Addr().Interface().(type) {
+		case Marshaler, BytesMarshaler:
+			return true, false
+		case encoding.TextMarshaler:
+			return true, true
+		}
+	}
+	return false, false
+}
+
+// hasStructEntries reports whether struct v writes at least one mapping
+// entry. A struct with conflicting field names reports true so that encoding
+// it returns the conflict error.
+func (e *encoder) hasStructEntries(v reflect.Value) bool {
+	sf := getStructFields(v.Type())
+	if len(sf.conflicts) > 0 {
+		return true
+	}
+	for i := range sf.fields {
+		fi := &sf.fields[i]
+		field := fieldForEncode(v, fi.index)
+		if omitField(e.opts, fi, field) {
+			continue
+		}
+		if fi.inline && field.Kind() == reflect.Map && len(e.inlineMapKeys(field, sf)) == 0 {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func (e *encoder) marshalStruct(v reflect.Value, indent int, inline bool) error {
@@ -446,97 +803,100 @@ func (e *encoder) marshalStruct(v reflect.Value, indent int, inline bool) error 
 		return fmt.Errorf("yaml: struct %s has conflicting field names: %s: %w", v.Type(), strings.Join(sf.conflicts, ", "), errConflictingFields)
 	}
 
+	if !e.hasStructEntries(v) {
+		e.buf = append(e.buf, "{}"...)
+		return nil
+	}
+
 	if e.opts.flow || inline {
 		return e.marshalFlowStruct(v, sf, indent)
 	}
 
 	first := true
+	next := func() {
+		if !first {
+			e.buf = append(e.buf, '\n')
+			e.writeIndent(indent)
+		}
+		first = false
+	}
 	for i := range sf.fields {
 		fi := &sf.fields[i]
-		field := fieldByIndex(v, fi.index)
+		field := fieldForEncode(v, fi.index)
 
 		if omitField(e.opts, fi, field) {
 			continue
 		}
 
 		if fi.inline && field.Kind() == reflect.Map {
-			for _, key := range e.mapKeys(field) {
-				val := field.MapIndex(key)
-				if !first {
-					e.buf = append(e.buf, '\n')
-					e.writeIndent(indent)
+			for _, key := range e.inlineMapKeys(field, sf) {
+				next()
+				idx, parent := e.keys.enter(e.buf, mapKeyText(key))
+				if err := e.writeKey(key, indent); err != nil {
+					return err
 				}
-				first = false
-				e.buf = append(e.buf, fmt.Sprint(key.Interface())...)
-				e.buf = append(e.buf, ':')
-				if isCompound(val) {
-					e.buf = append(e.buf, '\n')
-					e.writeIndent(indent + e.opts.indent)
-					if err := e.marshalValue(val, indent+e.opts.indent, false); err != nil {
-						return err
-					}
-				} else {
-					e.buf = append(e.buf, ' ')
-					if err := e.marshalValue(val, indent+e.opts.indent, false); err != nil {
-						return err
-					}
+				if err := e.writeBlockValue(field.MapIndex(key), indent, false); err != nil {
+					return err
 				}
+				e.keys.leave(e.buf, idx, parent, false)
 			}
 			continue
 		}
 
-		if !first {
-			e.buf = append(e.buf, '\n')
-			e.writeIndent(indent)
+		next()
+		idx, parent := e.keys.enter(e.buf, fi.name)
+		e.writeFieldName(fi.name)
+		if err := e.writeBlockValue(field, indent, fi.flow); err != nil {
+			return err
 		}
-		first = false
-
-		e.buf = append(e.buf, fi.name...)
-		e.buf = append(e.buf, ':')
-
-		if fi.flow {
-			e.buf = append(e.buf, ' ')
-			if err := e.marshalValue(field, indent+e.opts.indent, true); err != nil {
-				return err
-			}
-			continue
-		}
-
-		if isCompound(field) {
-			e.buf = append(e.buf, '\n')
-			e.writeIndent(indent + e.opts.indent)
-			if err := e.marshalValue(field, indent+e.opts.indent, false); err != nil {
-				return err
-			}
-		} else {
-			e.buf = append(e.buf, ' ')
-			if err := e.marshalValue(field, indent+e.opts.indent, false); err != nil {
-				return err
-			}
-		}
+		e.keys.leave(e.buf, idx, parent, false)
 	}
 
 	return nil
 }
 
+// marshalFlowStruct writes v as a flow mapping. The entries of an inline map
+// field are merged into it, as in block style.
 func (e *encoder) marshalFlowStruct(v reflect.Value, sf *structFields, indent int) error {
+	e.flowDepth++
+	defer func() { e.flowDepth-- }()
 	e.buf = append(e.buf, '{')
 	first := true
-	for i := range sf.fields {
-		fi := &sf.fields[i]
-		field := fieldByIndex(v, fi.index)
-		if omitField(e.opts, fi, field) {
-			continue
-		}
+	next := func() {
 		if !first {
 			e.buf = append(e.buf, ", "...)
 		}
 		first = false
-		e.buf = append(e.buf, fi.name...)
+	}
+	for i := range sf.fields {
+		fi := &sf.fields[i]
+		field := fieldForEncode(v, fi.index)
+		if omitField(e.opts, fi, field) {
+			continue
+		}
+		if fi.inline && field.Kind() == reflect.Map {
+			for _, key := range e.inlineMapKeys(field, sf) {
+				next()
+				idx, parent := e.keys.enter(e.buf, mapKeyText(key))
+				if err := e.writeKey(key, indent); err != nil {
+					return err
+				}
+				e.buf = append(e.buf, ": "...)
+				if err := e.marshalValue(field.MapIndex(key), indent, true); err != nil {
+					return err
+				}
+				e.keys.leave(e.buf, idx, parent, false)
+			}
+			continue
+		}
+		next()
+		idx, parent := e.keys.enter(e.buf, fi.name)
+		e.writeFieldName(fi.name)
 		e.buf = append(e.buf, ": "...)
 		if err := e.marshalValue(field, indent, true); err != nil {
 			return err
 		}
+		e.keys.leave(e.buf, idx, parent, false)
 	}
 	e.buf = append(e.buf, '}')
 	return nil
@@ -553,7 +913,7 @@ func (e *encoder) writeScalar(s string, indent int) {
 		return
 	}
 
-	if e.opts.useLiteral && strings.Contains(s, "\n") {
+	if e.opts.useLiteral && strings.Contains(s, "\n") && literalSafe(s) && !e.encodingKey && !e.opts.flow && e.flowDepth == 0 {
 		e.writeLiteralScalar(s, indent)
 		return
 	}
@@ -581,21 +941,18 @@ func (e *encoder) writeLiteralScalar(s string, indent int) {
 	}
 	e.buf = append(e.buf, '\n')
 
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		if i == len(lines)-1 && line == "" {
-			break
+	// The line break after the last line belongs to whatever follows.
+	for i, line := range strings.Split(strings.TrimSuffix(s, "\n"), "\n") {
+		if i > 0 {
+			e.buf = append(e.buf, '\n')
 		}
 		e.writeIndent(indent + e.opts.indent)
 		e.buf = append(e.buf, line...)
-		if i < len(lines)-1 {
-			e.buf = append(e.buf, '\n')
-		}
 	}
 }
 
 func (e *encoder) writeQuotedScalar(s string) {
-	if e.opts.useSingleQuote && !strings.ContainsAny(s, "'\n") {
+	if e.opts.useSingleQuote && !strings.Contains(s, "'") && !hasUnsafeRune(s, true) {
 		e.buf = append(e.buf, '\'')
 		e.buf = append(e.buf, s...)
 		e.buf = append(e.buf, '\'')
@@ -603,33 +960,40 @@ func (e *encoder) writeQuotedScalar(s string) {
 	}
 
 	e.buf = append(e.buf, '"')
+	e.buf = append(e.buf, escapeKYAMLLine(s)...)
+	e.buf = append(e.buf, '"')
+}
+
+// hasUnsafeRune reports whether s holds a character that must be escaped
+// in a double-quoted scalar to read back unchanged: a control character, a
+// character the decoder reads as a line break (U+0085, U+2028, U+2029), a
+// byte order mark or noncharacter, or invalid UTF-8. allowTab exempts tabs.
+func hasUnsafeRune(s string, allowTab bool) bool {
 	for _, r := range s {
-		switch r {
-		case '"':
-			e.buf = append(e.buf, '\\', '"')
-		case '\\':
-			e.buf = append(e.buf, '\\', '\\')
-		case '\n':
-			e.buf = append(e.buf, '\\', 'n')
-		case '\r':
-			e.buf = append(e.buf, '\\', 'r')
-		case '\t':
-			e.buf = append(e.buf, '\\', 't')
-		case '\a':
-			e.buf = append(e.buf, '\\', 'a')
-		case '\b':
-			e.buf = append(e.buf, '\\', 'b')
-		case '\v':
-			e.buf = append(e.buf, '\\', 'v')
-		case '\f':
-			e.buf = append(e.buf, '\\', 'f')
-		case 0x1b:
-			e.buf = append(e.buf, '\\', 'e')
-		default:
-			e.buf = append(e.buf, string(r)...)
+		switch {
+		case r == '\t':
+			if !allowTab {
+				return true
+			}
+		case r < 0x20, r >= 0x7f && r <= 0x9f,
+			r == 0x2028, r == 0x2029, r == 0xfeff, r == 0xfffe, r == 0xffff, r == utf8.RuneError:
+			return true
 		}
 	}
-	e.buf = append(e.buf, '"')
+	return false
+}
+
+// literalSafe reports whether multi-line s reads back unchanged from a
+// literal block scalar: it has no character that needs escaping besides
+// newlines and tabs, its first content line does not start with a space
+// (which would be taken as indentation), and it does not end in more than
+// one newline.
+func literalSafe(s string) bool {
+	if hasUnsafeRune(strings.ReplaceAll(s, "\n", ""), true) || strings.HasSuffix(s, "\n\n") {
+		return false
+	}
+	content := strings.TrimLeft(s, "\n")
+	return content != "" && content[0] != ' '
 }
 
 func (e *encoder) writeIndent(n int) {
@@ -651,9 +1015,8 @@ func isBlockCollection(n *node) bool {
 }
 
 func (e *encoder) emitNode(n *node, indent int) {
-	if n.anchor != "" && n.kind != nodeAlias {
-		e.buf = append(e.buf, '&')
-		e.buf = append(e.buf, n.anchor...)
+	if props := nodeProps(n); props != "" {
+		e.buf = append(e.buf, props...)
 		if isBlockCollection(n) {
 			e.buf = append(e.buf, '\n')
 			e.writeIndent(indent)
@@ -664,10 +1027,173 @@ func (e *encoder) emitNode(n *node, indent int) {
 	e.emitNodeBody(n, indent)
 }
 
+// emitBlockChild writes n after a "?" or ":" indicator: a block collection
+// starts on the next line, indented, and anything else follows a space. A
+// mapping value that is a block sequence starts at the key's column unless
+// [WithIndentSequence] is set.
+func (e *encoder) emitBlockChild(n *node, indent int, isValue bool) {
+	if !isBlockCollection(n) {
+		e.buf = append(e.buf, ' ')
+		e.emitNode(n, indent+e.opts.indent)
+		return
+	}
+	if props := nodeProps(n); props != "" {
+		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, props...)
+	}
+	childIndent := indent + e.opts.indent
+	if isValue && n.kind == nodeSequence && !e.opts.indentSequence {
+		childIndent = indent
+	}
+	e.buf = append(e.buf, '\n')
+	e.writeIndent(childIndent)
+	e.emitNodeBody(n, childIndent)
+}
+
+// emitFlowNode writes n in flow style.
+func (e *encoder) emitFlowNode(n *node) {
+	if props := nodeProps(n); props != "" {
+		e.buf = append(e.buf, props...)
+		e.buf = append(e.buf, ' ')
+	}
+	switch n.kind {
+	case nodeScalar:
+		e.flowDepth++
+		e.writeNodeScalar(n, 0)
+		e.flowDepth--
+	case nodeMergeKey:
+		e.buf = append(e.buf, "<<"...)
+	case nodeAlias:
+		e.buf = append(e.buf, '*')
+		e.buf = append(e.buf, n.alias...)
+	case nodeMapping:
+		e.buf = append(e.buf, '{')
+		for i := 0; i < len(n.children)-1; i += 2 {
+			if i > 0 {
+				e.buf = append(e.buf, ", "...)
+			}
+			if k := n.children[i]; k.kind == nodeMapping || k.kind == nodeSequence {
+				e.buf = append(e.buf, "? "...)
+			}
+			e.emitFlowNode(n.children[i])
+			e.buf = append(e.buf, ": "...)
+			e.emitFlowNode(n.children[i+1])
+		}
+		e.buf = append(e.buf, '}')
+	case nodeSequence:
+		e.buf = append(e.buf, '[')
+		for i, child := range n.children {
+			if i > 0 {
+				e.buf = append(e.buf, ", "...)
+			}
+			e.emitFlowNode(child)
+		}
+		e.buf = append(e.buf, ']')
+	case nodeDocument:
+		if len(n.children) > 0 {
+			e.emitFlowNode(n.children[0])
+		}
+	}
+}
+
+// nodeProps returns the anchor and tag written before n, or "".
+func nodeProps(n *node) string {
+	if n.kind == nodeAlias || n.kind == nodeMergeKey || n.kind == nodeDocument {
+		return ""
+	}
+	tag := nodeTag(n)
+	switch {
+	case n.anchor == "":
+		return tag
+	case tag == "":
+		return "&" + n.anchor
+	default:
+		return "&" + n.anchor + " " + tag
+	}
+}
+
+// Long forms of the tags implied by a node's kind.
+const (
+	tagStr = "tag:yaml.org,2002:str"
+	tagMap = "tag:yaml.org,2002:map"
+	tagSeq = "tag:yaml.org,2002:seq"
+)
+
+// nodeTag returns the tag written before n, or "" when the written form
+// already implies it: a mapping's !!map, a sequence's !!seq, a string's
+// !!str, or a plain scalar that resolves to its !!null, !!bool, !!int or
+// !!float tag on its own.
+func nodeTag(n *node) string {
+	tag := n.tag
+	if rest, ok := strings.CutPrefix(tag, "!!"); ok {
+		tag = "tag:yaml.org,2002:" + rest
+	}
+	switch tag {
+	case "", "!", tagStr:
+		return ""
+	case tagMap:
+		if n.kind == nodeMapping {
+			return ""
+		}
+	case tagSeq:
+		if n.kind == nodeSequence {
+			return ""
+		}
+	case tagNull, tagBool, tagInt, tagFloat:
+		if n.kind == nodeScalar && n.style == scalarPlain && coreTag(n.value) == tag {
+			return ""
+		}
+	}
+	return formatTag(tag)
+}
+
+// coreTag returns the tag a plain scalar resolves to under the Core schema.
+func coreTag(s string) string {
+	switch scalarToAnyCore(s).(type) {
+	case nil:
+		return tagNull
+	case bool:
+		return tagBool
+	case int64:
+		return tagInt
+	case float64:
+		return tagFloat
+	}
+	return tagStr
+}
+
+// formatTag returns the shortest written form of a resolved tag: !!name for
+// the YAML tag namespace, the local tag itself, or the verbatim !<tag>.
+func formatTag(tag string) string {
+	if rest, ok := strings.CutPrefix(tag, "tag:yaml.org,2002:"); ok && isTagShorthand(rest) {
+		return "!!" + rest
+	}
+	if rest, ok := strings.CutPrefix(tag, "!"); ok && isTagShorthand(rest) {
+		return tag
+	}
+	return "!<" + tag + ">"
+}
+
+// isTagShorthand reports whether s can follow a tag handle as written:
+// non-empty, with no '!', '%', flow indicator, space or control character.
+func isTagShorthand(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r <= ' ' || r == 0x7f || strings.ContainsRune("!%,[]{}", r) {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *encoder) emitNodeBody(n *node, indent int) {
 	switch n.kind {
 	case nodeScalar:
-		e.writeScalar(n.value, indent)
+		e.writeNodeScalar(n, indent)
+	case nodeMergeKey:
+		e.buf = append(e.buf, "<<"...)
 	case nodeAlias:
 		e.buf = append(e.buf, '*')
 		e.buf = append(e.buf, n.alias...)
@@ -681,21 +1207,18 @@ func (e *encoder) emitNodeBody(n *node, indent int) {
 				e.buf = append(e.buf, '\n')
 				e.writeIndent(indent)
 			}
-			e.emitNode(n.children[i], indent)
-			child := n.children[i+1]
-			if isBlockCollection(child) {
-				e.buf = append(e.buf, ':')
-				if child.anchor != "" {
-					e.buf = append(e.buf, " &"...)
-					e.buf = append(e.buf, child.anchor...)
-				}
+			key := n.children[i]
+			if key.kind == nodeMapping || key.kind == nodeSequence {
+				// A collection key needs the explicit "? key" form.
+				e.buf = append(e.buf, '?')
+				e.emitBlockChild(key, indent, false)
 				e.buf = append(e.buf, '\n')
-				e.writeIndent(indent + e.opts.indent)
-				e.emitNodeBody(child, indent+e.opts.indent)
+				e.writeIndent(indent)
 			} else {
-				e.buf = append(e.buf, ": "...)
-				e.emitNode(child, indent+e.opts.indent)
+				e.emitNode(key, indent)
 			}
+			e.buf = append(e.buf, ':')
+			e.emitBlockChild(n.children[i+1], indent, true)
 		}
 	case nodeSequence:
 		if len(n.children) == 0 {
@@ -708,7 +1231,7 @@ func (e *encoder) emitNodeBody(n *node, indent int) {
 				e.writeIndent(indent)
 			}
 			e.buf = append(e.buf, "- "...)
-			e.emitNode(child, indent+e.opts.indent)
+			e.emitNode(child, indent+len("- "))
 		}
 	case nodeDocument:
 		for _, child := range n.children {
@@ -717,30 +1240,45 @@ func (e *encoder) emitNodeBody(n *node, indent int) {
 	}
 }
 
-// yamlBoolLiterals is the set of bare-word boolean literals in YAML 1.2
-// Core. A plain scalar matching any of these must be quoted on emit to
-// preserve its string identity through round-trip.
-var yamlBoolLiterals = map[string]struct{}{
-	trueLiteral: {}, "True": {}, "TRUE": {},
-	falseLiteral: {}, "False": {}, "FALSE": {},
+// writeNodeScalar writes a scalar node so that it reads back with the same
+// value and type. A quoted scalar stays quoted, a scalar tagged as a string
+// is quoted when it would otherwise read as another type, and a plain
+// scalar that reads as null, a bool or a number, or that carries a written
+// tag, is written unquoted when it can be.
+func (e *encoder) writeNodeScalar(n *node, indent int) {
+	tagged := nodeTag(n) != ""
+	switch {
+	case n.style == scalarSingleQuoted || n.style == scalarDoubleQuoted:
+		e.writeQuotedScalar(n.value)
+	case n.style != scalarPlain || isStrTag(n.tag):
+		e.writeScalar(n.value, indent)
+	case n.value == "" && tagged:
+		e.writeQuotedScalar("")
+	case n.value == "":
+		e.buf = append(e.buf, nullLiteral...)
+	case readsAsNonString(n.value), n.value == "<<":
+		e.buf = append(e.buf, n.value...)
+	default:
+		e.writeScalar(n.value, indent)
+	}
+}
+
+// isStrTag reports whether tag marks a scalar as a string: the !!str tag in
+// short or long form, or the non-specific tag "!".
+func isStrTag(tag string) bool {
+	return tag == tagStr || tag == "!!str" || tag == "!"
+}
+
+// readsAsNonString reports whether the plain scalar s resolves to null, a
+// bool or a number under the Core schema.
+func readsAsNonString(s string) bool {
+	_, isStr := scalarToAnyCore(s).(string)
+	return !isStr
 }
 
 func needsQuoting(s string) bool {
-	if s == "" {
-		return true
-	}
-
-	if isNullValue(s) {
-		return true
-	}
-	if _, ok := yamlBoolLiterals[s]; ok {
-		return true
-	}
-
-	if _, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return true
-	}
-	if _, err := strconv.ParseFloat(s, 64); err == nil {
+	// "<<" as a plain key is a merge key.
+	if s == "" || s == "<<" || readsAsNonString(s) {
 		return true
 	}
 
@@ -748,10 +1286,8 @@ func needsQuoting(s string) bool {
 		return true
 	}
 
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			return true
-		}
+	if hasUnsafeRune(s, false) {
+		return true
 	}
 
 	if s[0] == '-' || s[0] == '.' || s[0] == ' ' {

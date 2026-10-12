@@ -45,7 +45,7 @@ func defaultEncodeOptions() *encoderOptions {
 	return &encoderOptions{
 		indent:         2,
 		lineWidth:      80,
-		indentSequence: false,
+		indentSequence: true,
 	}
 }
 
@@ -54,9 +54,9 @@ func WithIndent(n int) EncodeOption {
 	return func(o *encoderOptions) { o.indent = n }
 }
 
-// WithIndentSequence controls whether sequence items are indented relative to
-// their parent key. When false (the default), the "- " prefix aligns with
-// the parent's indentation level.
+// WithIndentSequence controls whether a block sequence under a mapping key is
+// indented one level from the key (true, the default) or starts at the
+// key's column ("key:" then "- item").
 func WithIndentSequence(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.indentSequence = b }
 }
@@ -99,9 +99,12 @@ func WithOmitEmpty(b bool) EncodeOption {
 
 // WithComment attaches comments to nodes by dot-path key (e.g. "server.port").
 // Each key maps to a slice of [Comment] values specifying position and text.
-// Placement matches only the last path segment against the first output line
-// that starts with that key, so a key name used more than once gets the
-// comment at its first occurrence, and a path ending in a sequence index is
+// A path names the entry from the root, with "." between keys and "[i]" for
+// a sequence item (e.g. "servers[0].port"); a leading "$" or "$." is
+// allowed. Comments are placed at the entry itself, never inside a scalar:
+// a head comment on the line before it, a line comment at the end of its
+// first line, and a foot comment after its value. A path that names no entry
+// falls back to the first entry whose last segment matches, and is otherwise
 // not placed.
 func WithComment(comments map[string][]Comment) EncodeOption {
 	return func(o *encoderOptions) { o.comments = comments }
@@ -109,7 +112,8 @@ func WithComment(comments map[string][]Comment) EncodeOption {
 
 // WithAutoInt writes string values that are decimal integers (e.g. "42")
 // unquoted, so they decode back as integers rather than strings. It has no
-// effect under [WithJSON], [WithQuoteAllStrings] or [WithKYAML].
+// effect under [WithJSON], [WithQuoteAllStrings] or [WithKYAML]. The
+// original text is not kept: "+42" and "042" both decode back as 42.
 func WithAutoInt(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.autoInt = b }
 }
@@ -188,8 +192,14 @@ type Schema int
 
 const (
 	// CoreSchema resolves plain scalars using the YAML 1.2 Core schema:
-	// null (~, null, Null, NULL, empty), bool (true/false in any case),
-	// int (decimal, hex 0x, octal 0o), float (including .inf, .nan).
+	// null (~, null, Null, NULL, empty), bool (true, True, TRUE and the same
+	// for false), int (decimal, hex 0x, octal 0o), float (decimal with an
+	// optional exponent, and .inf, -.inf, .nan in lower, title or upper case).
+	// Plain inf, nan and infinity are strings. Scalars tagged !!null, !!bool,
+	// !!int or !!float resolve to that type under every schema. Timestamps
+	// are not resolved, so a date decodes into any as a string (decode into
+	// time.Time for a time), and a !!binary scalar decodes into any as its
+	// base64 text (decode into []byte for the bytes).
 	CoreSchema Schema = iota
 
 	// JSONSchema resolves plain scalars like JSON: null (lowercase only),
@@ -259,7 +269,9 @@ func WithDisallowDuplicateKey() DecodeOption {
 }
 
 // WithOrderedMap causes decoding into any (interface{}) to produce [MapSlice]
-// values for mappings instead of map[string]any, preserving key order.
+// values for mappings instead of map[string]any, preserving key order. A
+// mapping or sequence used as a key is kept as the [MapItem] key, while
+// map[string]any and map[any]any cannot hold one and report a [TypeError].
 func WithOrderedMap() DecodeOption {
 	return func(o *decoderOptions) { o.useOrderedMap = true }
 }
@@ -340,7 +352,8 @@ func WithMaxNodes(n int) DecodeOption {
 }
 
 // WithCustomMarshaler registers a function that encodes values of type T to YAML
-// bytes, overriding the default encoding for that type.
+// bytes, overriding the default encoding for that type. The bytes are
+// handled as for [BytesMarshaler].
 func WithCustomMarshaler[T any](fn func(T) ([]byte, error)) EncodeOption {
 	return func(o *encoderOptions) {
 		if o.customMarshalers == nil {

@@ -28,6 +28,7 @@ type kyamlEmitter struct {
 	buf  []byte
 	ctx  context.Context
 	seen map[uintptr]bool
+	keys keyTracker
 }
 
 func newKYAMLEmitter(opts *encoderOptions) *kyamlEmitter {
@@ -313,17 +314,27 @@ func (e *kyamlEmitter) emitRawJSON(data []byte, indent int) error {
 	return e.emit(reflect.ValueOf(v), indent)
 }
 
-// emitRawJSONOrText tries to parse as JSON; if that fails, emits as a quoted
-// string. Used for marshaler outputs that may be either YAML/JSON or plain text.
+// emitRawJSONOrText parses marshaler output as JSON, then as YAML, and
+// re-emits it as KYAML. Output that is neither is emitted as a quoted string.
 func (e *kyamlEmitter) emitRawJSONOrText(data []byte, indent int) error {
 	var v any
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.UseNumber()
-	if err := dec.Decode(&v); err == nil {
+	if err := dec.Decode(&v); err == nil && json.Valid(data) {
 		return e.emit(reflect.ValueOf(v), indent)
 	}
-	e.emitString(string(data), indent)
-	return nil
+	n, err := parseRawYAML(data)
+	if err != nil {
+		return err
+	}
+	if n.tag == tagStr && n.value == string(data) {
+		e.emitString(string(data), indent)
+		return nil
+	}
+	if err := UnmarshalWithOptions(data, &v, WithOrderedMap()); err != nil {
+		return err
+	}
+	return e.emit(reflect.ValueOf(v), indent)
 }
 
 // emitFloat emits a float in KYAML form. NaN and infinities are rejected
@@ -372,33 +383,33 @@ func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 	// When any comment is registered, suppress cuddling globally.
 	suppressCuddle := len(e.opts.comments) > 0
 
+	lastCuddled := false
 	for i := range n {
 		elem := v.Index(i)
 		elemForCuddle := unwrapForCuddle(elem)
 		startsBracket := !suppressCuddle && emitsAsCompound(elemForCuddle)
 
-		if i == 0 {
-			if !startsBracket {
-				e.buf = append(e.buf, '\n')
-				e.writeIndent(inner)
-			}
-		} else {
-			// Previous iteration appended ','.
-			if startsBracket && lastVisibleAfterCommaIsCloseBracket(e.buf) {
-				e.buf = append(e.buf, ' ')
-			} else {
-				e.buf = append(e.buf, '\n')
-				e.writeIndent(inner)
-			}
+		// A compound element cuddles onto `[` or onto the previous
+		// element's close bracket; any other element starts its own line.
+		cuddled := startsBracket && (i == 0 || lastVisibleAfterCommaIsCloseBracket(e.buf))
+		switch {
+		case cuddled && i > 0:
+			e.buf = append(e.buf, ' ')
+		case !cuddled:
+			e.buf = append(e.buf, '\n')
+			e.writeIndent(inner)
 		}
+		lastCuddled = cuddled
 
 		// Cuddled compound elements use the sequence's own indent so their
 		// close bracket aligns with `]`.
 		elemIndent := inner
-		if startsBracket {
+		if cuddled {
 			elemIndent = indent
 		}
 
+		idx, parent := e.keys.enter(e.buf, itemSeg(i))
+		valueStart := len(e.buf)
 		if err := e.emit(elem, elemIndent); err != nil {
 			return err
 		}
@@ -406,11 +417,12 @@ func (e *kyamlEmitter) emitSequence(v reflect.Value, indent int) error {
 		if i < n-1 {
 			e.buf = append(e.buf, ',')
 		}
+		e.keys.leave(e.buf, idx, parent, !startsCollection(e.buf[valueStart:]))
 	}
 
 	// Cuddle the close bracket only if the last element ended with one,
 	// and not when cuddling is suppressed for comments.
-	if !suppressCuddle && lastIsCloseBracket(e.buf) {
+	if lastCuddled && lastIsCloseBracket(e.buf) {
 		e.buf = append(e.buf, ']')
 	} else {
 		e.buf = append(e.buf, ',', '\n')
@@ -500,7 +512,7 @@ func (e *kyamlEmitter) emitStruct(v reflect.Value, indent int) error {
 	entries := make([]mapEntry, 0, len(sf.fields))
 	for i := range sf.fields {
 		fi := &sf.fields[i]
-		field := fieldByIndex(v, fi.index)
+		field := fieldForEncode(v, fi.index)
 		if !field.IsValid() {
 			continue
 		}
@@ -517,6 +529,9 @@ func (e *kyamlEmitter) emitStruct(v reflect.Value, indent int) error {
 				ks, err := mapKeyToString(k)
 				if err != nil {
 					return err
+				}
+				if sf.namesField(ks) {
+					continue
 				}
 				subEntries = append(subEntries, mapEntry{
 					rawKey: k,
@@ -560,9 +575,11 @@ func (e *kyamlEmitter) emitMappingEntries(entries []mapEntry, indent int) error 
 		e.buf = append(e.buf, '\n')
 		e.writeIndent(inner)
 
+		idx, parent := e.keys.enter(e.buf, ent.keyStr)
 		e.buf = append(e.buf, e.formatKey(ent.keyStr)...)
 		e.buf = append(e.buf, ':', ' ')
 
+		valueStart := len(e.buf)
 		switch {
 		case ent.emitNullDirect, !ent.value.IsValid():
 			e.buf = append(e.buf, "null"...)
@@ -574,12 +591,19 @@ func (e *kyamlEmitter) emitMappingEntries(entries []mapEntry, indent int) error 
 
 		// Trailing comma after every entry.
 		e.buf = append(e.buf, ',')
+		e.keys.leave(e.buf, idx, parent, !startsCollection(e.buf[valueStart:]))
 	}
 
 	e.buf = append(e.buf, '\n')
 	e.writeIndent(indent)
 	e.buf = append(e.buf, '}')
 	return nil
+}
+
+// startsCollection reports whether emitted value text opens a flow mapping
+// or sequence.
+func startsCollection(value []byte) bool {
+	return len(value) > 0 && (value[0] == '{' || value[0] == '[')
 }
 
 // formatKey returns the rendered key text, quoted when the key is
@@ -731,9 +755,12 @@ func escapeKYAMLLine(s string) string {
 		case 0x2029:
 			b.WriteString(`\P`)
 		default:
-			if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
+			switch {
+			case r < 0x20 || (r >= 0x7F && r <= 0x9F):
 				fmt.Fprintf(&b, `\x%02x`, r)
-			} else {
+			case r == 0xFEFF || r == 0xFFFE || r == 0xFFFF:
+				fmt.Fprintf(&b, `\u%04X`, r)
+			default:
 				b.WriteRune(r)
 			}
 		}
@@ -866,6 +893,9 @@ func emitsAsCompound(v reflect.Value) bool {
 	if !v.IsValid() {
 		return false
 	}
+	if writesAsText(v) {
+		return false
+	}
 	switch v.Kind() {
 	case reflect.Slice, reflect.Array:
 		// []byte renders as a base64 string, not a sequence.
@@ -888,6 +918,27 @@ func emitsAsCompound(v reflect.Value) bool {
 		return true
 	}
 	return false
+}
+
+// writesAsText reports whether dispatchMarshaler writes v through
+// [encoding.TextMarshaler], whose output is a string.
+func writesAsText(v reflect.Value) bool {
+	if !v.CanInterface() {
+		return false
+	}
+	if _, ok := reflect.TypeAssert[encoding.TextMarshaler](v); !ok {
+		return false
+	}
+	switch v.Interface().(type) {
+	case json.Marshaler, MarshalerContext, Marshaler, BytesMarshaler:
+		return false
+	}
+	if v.CanAddr() {
+		if _, ok := reflect.TypeAssert[json.Marshaler](v.Addr()); ok {
+			return false
+		}
+	}
+	return true
 }
 
 // lastIsCloseBracket reports whether buf's last non-whitespace byte is `}` or `]`.

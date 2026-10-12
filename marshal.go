@@ -9,6 +9,8 @@ import (
 )
 
 // Marshal serializes v into YAML bytes using default encoding options.
+// YAML is text, so a string that is not valid UTF-8 is written with U+FFFD
+// in place of each invalid byte.
 func Marshal(v any) ([]byte, error) {
 	return MarshalWithOptions(v)
 }

@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,121 +70,68 @@ func TestEncodeWithComments(t *testing.T) {
 	}
 }
 
-func TestApplyCommentsAllPositions(t *testing.T) {
-	buf := []byte("name: alice\n")
-	cs := map[string][]Comment{
-		"$.name": {
-			{Position: HeadCommentPos, Text: "head"},
-			{Position: LineCommentPos, Text: "line"},
-			{Position: FootCommentPos, Text: "foot"},
-		},
-	}
-	result := applyComments(buf, cs)
-	s := string(result)
-	if !strings.Contains(s, "# head") {
-		t.Errorf("expected head comment, got:\n%s", s)
-	}
-	if !strings.Contains(s, "# line") {
-		t.Errorf("expected line comment, got:\n%s", s)
-	}
-	if !strings.Contains(s, "# foot") {
-		t.Errorf("expected foot comment, got:\n%s", s)
-	}
+type commentDoc struct {
+	Doc   string   `json:"doc"   yaml:"doc"`
+	Name  string   `json:"name"  yaml:"name"`
+	Items []string `json:"items" yaml:"items"`
+	Sub   struct {
+		Name string `json:"name" yaml:"name"`
+	} `json:"sub" yaml:"sub"`
 }
 
-func TestInsertHeadCommentEmptyPath(t *testing.T) {
-	buf := []byte("name: alice\n")
-	result := insertHeadComment(buf, "$", "comment")
-	if !bytes.Equal(result, buf) {
-		t.Errorf("expected no change for root path, got:\n%s", result)
+func TestCommentsPlacedByStructure(t *testing.T) {
+	v := commentDoc{Doc: "name: inside\nmore\n", Name: "real", Items: []string{"a", "b"}}
+	v.Sub.Name = "nested"
+	comments := map[string][]Comment{
+		"$.name":     {{Position: HeadCommentPos, Text: "head"}, {Position: LineCommentPos, Text: "line"}, {Position: FootCommentPos, Text: "foot"}},
+		"sub.name":   {{Position: HeadCommentPos, Text: "nested head"}},
+		"items[1]":   {{Position: LineCommentPos, Text: "second"}},
+		"sub":        {{Position: FootCommentPos, Text: "after sub"}},
+		"$":          {{Position: HeadCommentPos, Text: "root is not placed"}},
+		"$.missing":  {{Position: HeadCommentPos, Text: "missing is not placed"}},
+		"items[9]":   {{Position: HeadCommentPos, Text: "no such item"}},
+		"other.name": {{Position: LineCommentPos, Text: "falls back to the first name key"}},
 	}
-}
 
-func TestInsertHeadCommentKeyNotFound(t *testing.T) {
-	buf := []byte("name: alice\n")
-	result := insertHeadComment(buf, "$.missing", "comment")
-	if !bytes.Equal(result, buf) {
-		t.Errorf("expected no change for missing key, got:\n%s", result)
+	out, err := MarshalWithOptions(v, WithLiteralStyle(true), WithComment(comments))
+	if err != nil {
+		t.Fatal(err)
 	}
-}
+	want := "doc: |\n" +
+		"    name: inside\n" +
+		"    more\n" +
+		"# head\n" +
+		"name: real # line # falls back to the first name key\n" +
+		"# foot\n" +
+		"items:\n" +
+		"  - a\n" +
+		"  - b # second\n" +
+		"sub:\n" +
+		"  # nested head\n" +
+		"  name: nested\n" +
+		"# after sub\n"
+	if string(out) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+	var back commentDoc
+	if err := Unmarshal(out, &back); err != nil || back.Doc != v.Doc || back.Sub.Name != "nested" {
+		t.Errorf("round trip: %+v, %v", back, err)
+	}
 
-func TestInsertLineCommentEmptyPath(t *testing.T) {
-	buf := []byte("name: alice\n")
-	result := insertLineComment(buf, "$", "comment")
-	if !bytes.Equal(result, buf) {
-		t.Errorf("expected no change for root path, got:\n%s", result)
+	kout, err := MarshalWithOptions(v, WithKYAML(), WithComment(map[string][]Comment{
+		"name":     {{Position: LineCommentPos, Text: "line"}},
+		"items[0]": {{Position: HeadCommentPos, Text: "first"}},
+	}))
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestInsertLineCommentKeyNotFound(t *testing.T) {
-	buf := []byte("name: alice\n")
-	result := insertLineComment(buf, "$.missing", "comment")
-	if !bytes.Equal(result, buf) {
-		t.Errorf("expected no change for missing key, got:\n%s", result)
+	for _, line := range []string{"  name: \"real\", # line\n", "    # first\n    \"a\",\n"} {
+		if !strings.Contains(string(kout), line) {
+			t.Errorf("KYAML output missing %q:\n%s", line, kout)
+		}
 	}
-}
-
-func TestInsertFootCommentEmptyPath(t *testing.T) {
-	buf := []byte("name: alice\n")
-	result := insertFootComment(buf, "$", "comment")
-	if !bytes.Equal(result, buf) {
-		t.Errorf("expected no change for root path, got:\n%s", result)
-	}
-}
-
-func TestInsertFootCommentKeyNotFound(t *testing.T) {
-	buf := []byte("name: alice\n")
-	result := insertFootComment(buf, "$.missing", "comment")
-	if !bytes.Equal(result, buf) {
-		t.Errorf("expected no change for missing key, got:\n%s", result)
-	}
-}
-
-func TestInsertHeadCommentIndented(t *testing.T) {
-	buf := []byte("outer:\n  name: alice\n")
-	result := insertHeadComment(buf, "$.outer.name", "about name")
-	s := string(result)
-	if !strings.Contains(s, "  # about name") {
-		t.Errorf("expected indented head comment, got:\n%s", s)
-	}
-	headIdx := strings.Index(s, "# about name")
-	nameIdx := strings.Index(s, "name:")
-	if headIdx > nameIdx {
-		t.Error("head comment should appear before key")
-	}
-}
-
-func TestInsertFootCommentIndented(t *testing.T) {
-	buf := []byte("outer:\n  name: alice\n")
-	result := insertFootComment(buf, "$.outer.name", "after name")
-	s := string(result)
-	if !strings.Contains(s, "  # after name") {
-		t.Errorf("expected indented foot comment, got:\n%s", s)
-	}
-	footIdx := strings.Index(s, "# after name")
-	nameIdx := strings.Index(s, "name:")
-	if footIdx < nameIdx {
-		t.Error("foot comment should appear after key")
-	}
-}
-
-func TestPathToKey(t *testing.T) {
-	tests := []struct {
-		path string
-		want string
-	}{
-		{"$.name", "name"},
-		{"$.outer.inner.key", "key"},
-		{"$.", ""},
-		{"name", "name"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			got := pathToKey(tt.path)
-			if got != tt.want {
-				t.Errorf("pathToKey(%q) = %q, want %q", tt.path, got, tt.want)
-			}
-		})
+	if err := Unmarshal(kout, &back); err != nil {
+		t.Errorf("KYAML re-parse: %v\n%s", err, kout)
 	}
 }
 
@@ -1942,13 +1891,6 @@ func TestIsEmptyInterface(t *testing.T) {
 	}
 }
 
-func TestPathToKeyEmpty(t *testing.T) {
-	got := pathToKey("$.")
-	if got != "" {
-		t.Errorf("expected empty string, got %q", got)
-	}
-}
-
 type encodeTextMarshalerError struct{}
 
 func (e encodeTextMarshalerError) MarshalText() ([]byte, error) {
@@ -1983,27 +1925,6 @@ func TestMarshalMapCompoundValueError(t *testing.T) {
 	_, err := Marshal(m)
 	if err == nil {
 		t.Error("expected error from compound map value")
-	}
-}
-
-func TestInsertHeadCommentEmptyKey(t *testing.T) {
-	buf := insertHeadComment([]byte("key: val\n"), "$", "comment")
-	if strings.Contains(string(buf), "comment") {
-		t.Error("expected no comment inserted for root path")
-	}
-}
-
-func TestInsertLineCommentEmptyKey(t *testing.T) {
-	buf := insertLineComment([]byte("key: val\n"), "$", "comment")
-	if strings.Contains(string(buf), "comment") {
-		t.Error("expected no comment inserted for root path")
-	}
-}
-
-func TestInsertFootCommentEmptyKey(t *testing.T) {
-	buf := insertFootComment([]byte("key: val\n"), "$", "comment")
-	if strings.Contains(string(buf), "comment") {
-		t.Error("expected no comment inserted for root path")
 	}
 }
 
@@ -2367,24 +2288,6 @@ func TestMarshalBigOmitemptyNonZero(t *testing.T) {
 	}
 }
 
-func TestInsertHeadCommentIndentCalc(t *testing.T) {
-	buf := []byte("  name: foo\n  age: 30\n")
-	result := insertHeadComment(buf, "$.name", "about name")
-	s := string(result)
-	if !strings.Contains(s, "  # about name\n  name: foo") {
-		t.Errorf("head comment should match key indentation, got:\n%s", s)
-	}
-}
-
-func TestInsertFootCommentIndentCalc(t *testing.T) {
-	buf := []byte("  name: foo\n  age: 30\n")
-	result := insertFootComment(buf, "$.name", "after name")
-	s := string(result)
-	if !strings.Contains(s, "  name: foo\n  # after name") {
-		t.Errorf("foot comment should match key indentation, got:\n%s", s)
-	}
-}
-
 func TestMarshalCustomMarshalerNilMap(t *testing.T) {
 	type Foo struct {
 		Name string `yaml:"name"`
@@ -2515,24 +2418,6 @@ func TestMarshalLiteralScalarCustomIndent(t *testing.T) {
 	s := string(data)
 	if !strings.Contains(s, "    line1") {
 		t.Errorf("expected 4-space indent for literal content, got:\n%s", s)
-	}
-}
-
-func TestInsertHeadCommentArithmetic(t *testing.T) {
-	buf := []byte("    deep:\n      key: val\n")
-	result := insertHeadComment(buf, "$.deep", "test comment")
-	s := string(result)
-	if !strings.Contains(s, "    # test comment\n    deep:") {
-		t.Errorf("head comment indent should be 4 spaces, got:\n%s", s)
-	}
-}
-
-func TestInsertFootCommentArithmetic(t *testing.T) {
-	buf := []byte("    deep:\n      key: val\n")
-	result := insertFootComment(buf, "$.deep", "test comment")
-	s := string(result)
-	if !strings.Contains(s, "    deep:\n    # test comment") {
-		t.Errorf("foot comment indent should be 4 spaces, got:\n%s", s)
 	}
 }
 
@@ -4401,5 +4286,692 @@ func TestKYAMLEncodeNilSliceAndMap(t *testing.T) {
 	s := string(out)
 	if !strings.Contains(s, "l1: null,") || !strings.Contains(s, "m1: null,") {
 		t.Errorf("nil slice/map should render as null:\n%s", s)
+	}
+}
+
+type inlineInner struct {
+	F string `json:"f" yaml:"f"`
+}
+
+type inlineOuter struct {
+	Name  string         `json:"name"    yaml:"name"`
+	Extra map[string]any `json:",inline" yaml:",inline"`
+	Inner inlineInner    `json:",inline" yaml:",inline"`
+}
+
+func TestMarshalInlineMapAllModes(t *testing.T) {
+	v := inlineOuter{
+		Name:  "app",
+		Extra: map[string]any{"x": map[string]string{"g": "h"}, "1": "y", "a: b": 2},
+		Inner: inlineInner{F: "q"},
+	}
+	tests := []struct {
+		name string
+		opts []EncodeOption
+		want string
+	}{
+		{"block", nil, "name: app\n\"1\": y\n\"a: b\": 2\nx:\n  g: h\nf: q\n"},
+		{"flow", []EncodeOption{WithFlow(true)}, "{name: app, \"1\": y, \"a: b\": 2, x: {g: h}, f: q}\n"},
+		{"json", []EncodeOption{WithJSON(true)}, "\"name\": \"app\"\n\"1\": \"y\"\n\"a: b\": 2\n\"x\":\n  \"g\": \"h\"\n\"f\": \"q\"\n"},
+		{"kyaml", []EncodeOption{WithKYAML()}, ""},
+	}
+	want := map[string]any{"name": "app", "1": "y", "a: b": int64(2), "x": map[string]any{"g": "h"}, "f": "q"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := MarshalWithOptions(v, tt.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.want != "" && string(out) != tt.want {
+				t.Errorf("got:\n%s\nwant:\n%s", out, tt.want)
+			}
+			var got map[string]any
+			if err := Unmarshal(out, &got); err != nil {
+				t.Fatalf("re-parse: %v\n%s", err, out)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("round trip:\n got %#v\nwant %#v\noutput:\n%s", got, want, out)
+			}
+		})
+	}
+}
+
+type allOmitted struct {
+	A string `json:"a,omitempty" yaml:"a,omitempty"`
+}
+
+type holdsAllOmitted struct {
+	K allOmitted   `json:"k" yaml:"k"`
+	P *allOmitted  `json:"p" yaml:"p"`
+	S []allOmitted `json:"s" yaml:"s"`
+}
+
+func TestMarshalAllFieldsOmittedWritesEmptyMapping(t *testing.T) {
+	v := holdsAllOmitted{P: &allOmitted{}, S: []allOmitted{{}}}
+	tests := []struct {
+		name string
+		opts []EncodeOption
+		want string
+	}{
+		{"block", nil, "k: {}\np: {}\ns:\n  - {}\n"},
+		{"flow", []EncodeOption{WithFlow(true)}, "{k: {}, p: {}, s: [{}]}\n"},
+		{"json", []EncodeOption{WithJSON(true)}, "\"k\": {}\n\"p\": {}\n\"s\":\n  - {}\n"},
+		{"kyaml", []EncodeOption{WithKYAML()}, "---\n{\n  k: {},\n  p: {},\n  s: [{}],\n}\n"},
+	}
+	want := map[string]any{"k": map[string]any{}, "p": map[string]any{}, "s": []any{map[string]any{}}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := MarshalWithOptions(v, tt.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != tt.want {
+				t.Errorf("got:\n%q\nwant:\n%q", out, tt.want)
+			}
+			var got map[string]any
+			if err := Unmarshal(out, &got); err != nil {
+				t.Fatalf("re-parse: %v\n%s", err, out)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("round trip:\n got %#v\nwant %#v", got, want)
+			}
+		})
+	}
+
+	out, err := Marshal(allOmitted{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "{}\n" {
+		t.Errorf("top-level: got %q, want %q", out, "{}\n")
+	}
+
+	out, err = MarshalWithOptions(map[string]map[string]string{"m": {"a": ""}}, WithOmitEmpty(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "m: {}\n" {
+		t.Errorf("map with every entry omitted: got %q, want %q", out, "m: {}\n")
+	}
+}
+
+type fieldlessMarshaler struct{ n int }
+
+func (m fieldlessMarshaler) MarshalYAML() (any, error) { return map[string]int{"v": m.n}, nil }
+
+func TestMarshalFieldlessMarshalerStaysBlock(t *testing.T) {
+	out, err := Marshal(struct {
+		M fieldlessMarshaler `yaml:"m"`
+	}{M: fieldlessMarshaler{n: 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "m:\n  v: 3\n" {
+		t.Errorf("got %q", out)
+	}
+}
+
+type embeddedNilBase struct {
+	A string `json:"a" yaml:"a"`
+}
+
+type embedsNilPointer struct {
+	*embeddedNilBase
+	B string `json:"b" yaml:"b"`
+}
+
+func TestMarshalNilEmbeddedPointer(t *testing.T) {
+	v := embedsNilPointer{B: "x"}
+	for _, opts := range [][]EncodeOption{nil, {WithFlow(true)}, {WithKYAML()}} {
+		out, err := MarshalWithOptions(&v, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), "a:") {
+			t.Errorf("field behind nil embedded pointer written:\n%s", out)
+		}
+	}
+	if v.embeddedNilBase != nil {
+		t.Error("encoding allocated the embedded pointer")
+	}
+}
+
+type inlineShadow struct {
+	Name  string         `json:"name"    yaml:"name"`
+	Extra map[string]any `json:",inline" yaml:",inline"`
+}
+
+func TestInlineMapKeyNamingFieldIsSkipped(t *testing.T) {
+	v := inlineShadow{Name: "a", Extra: map[string]any{"name": "b", "z": 1}}
+	tests := []struct {
+		name string
+		opts []EncodeOption
+		want string
+	}{
+		{"block", nil, "name: a\nz: 1\n"},
+		{"flow", []EncodeOption{WithFlow(true)}, "{name: a, z: 1}\n"},
+		{"json", []EncodeOption{WithJSON(true)}, "\"name\": \"a\"\n\"z\": 1\n"},
+		{"kyaml", []EncodeOption{WithKYAML()}, "---\n{\n  name: \"a\",\n  z: 1,\n}\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := MarshalWithOptions(v, tt.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != tt.want {
+				t.Errorf("got %q, want %q", out, tt.want)
+			}
+		})
+	}
+
+	out, err := Marshal(inlineShadow{Extra: map[string]any{"name": "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "name: \"\"\n" {
+		t.Errorf("shadowed-only inline map: got %q", out)
+	}
+}
+
+func TestUnmarshalInlineMap(t *testing.T) {
+	src := "base: &b {q: 9, name: zz}\nname: a\nx: 1\ny: [1]\n<<: *b\n"
+	var v inlineShadow
+	if err := Unmarshal([]byte(src), &v); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"base": map[string]any{"q": int64(9), "name": "zz"}, "x": int64(1), "y": []any{int64(1)}, "q": int64(9)}
+	if v.Name != "a" || !reflect.DeepEqual(v.Extra, want) {
+		t.Errorf("got %+v, want name a and extra %#v", v, want)
+	}
+
+	in := inlineShadow{Name: "n", Extra: map[string]any{"k": "v", "n": int64(2)}}
+	data, err := Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back inlineShadow
+	if err := Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, in) {
+		t.Errorf("round trip: got %+v, want %+v", back, in)
+	}
+}
+
+func TestSpecialFloatSpellingsRoundTrip(t *testing.T) {
+	var got map[string]any
+	src := "a: .inf\nb: -.Inf\nc: +.INF\nd: .NaN\ne: inf\nf: nan\ng: Infinity\nh: 1e3\ni: .5\nj: 5.\nk: 0x1p-2\n"
+	if err := Unmarshal([]byte(src), &got); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]any{"e": "inf", "f": "nan", "g": "Infinity", "h": 1000.0, "i": 0.5, "j": 5.0, "k": "0x1p-2"} {
+		if got[k] != want {
+			t.Errorf("%s: got %#v, want %#v", k, got[k], want)
+		}
+	}
+	for _, k := range []string{"a", "c"} {
+		if got[k] != math.Inf(1) {
+			t.Errorf("%s: got %#v, want +Inf", k, got[k])
+		}
+	}
+	if f, ok := got["d"].(float64); !ok || !math.IsNaN(f) {
+		t.Errorf("d: got %#v, want NaN", got["d"])
+	}
+
+	strs := []any{"inf", "nan", "Infinity", "-inf", ".inf", "+.inf", ".NaN", "1e3", "0x1F", "0o7", "0b1"}
+	floats := []any{math.Inf(1), math.Inf(-1), 1.5}
+	data, err := Marshal(map[string]any{"s": strs, "f": floats})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"- inf\n", "- nan\n", "- Infinity\n", "- \".inf\"\n", "- \"0x1F\"\n"} {
+		if !strings.Contains(string(data), line) {
+			t.Errorf("output missing %q:\n%s", line, data)
+		}
+	}
+	var back map[string]any
+	if err := Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back["s"], strs) || !reflect.DeepEqual(back["f"], floats) {
+		t.Errorf("round trip:\n got %#v\nwant s=%#v f=%#v\n%s", back, strs, floats, data)
+	}
+
+	var typed struct {
+		F float64 `yaml:"f"`
+	}
+	if err := Unmarshal([]byte("f: inf\n"), &typed); err != nil || !math.IsInf(typed.F, 1) {
+		t.Errorf("float field from inf: got %v, %v", typed.F, err)
+	}
+}
+
+func TestUnmarshalExplicitCoreTags(t *testing.T) {
+	src := "f: !!float 3\ni: !!int \"4\"\nb: !!bool \"true\"\nn: !!null \"\"\n"
+	want := map[string]any{"f": 3.0, "i": int64(4), "b": true, "n": nil}
+	for _, s := range []Schema{CoreSchema, JSONSchema, FailsafeSchema} {
+		var got map[string]any
+		if err := UnmarshalWithOptions([]byte(src), &got, WithSchema(s)); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("schema %d: got %#v, want %#v", s, got, want)
+		}
+	}
+}
+
+type textStruct struct{ s string }
+
+func (x textStruct) MarshalText() ([]byte, error) { return []byte(x.s), nil }
+
+func TestTextMarshalerStructIsInline(t *testing.T) {
+	out, err := Marshal(map[string]any{"t": textStruct{"hi"}, "p": &textStruct{"x"}, "ip": net.ParseIP("1.2.3.4")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "ip: 1.2.3.4\np: x\nt: hi\n"; string(out) != want {
+		t.Errorf("got %q, want %q", out, want)
+	}
+	out, err = MarshalWithOptions([]any{textStruct{"a"}, textStruct{"b"}}, WithKYAML())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "---\n[\n  \"a\",\n  \"b\",\n]\n"; string(out) != want {
+		t.Errorf("KYAML: got %q, want %q", out, want)
+	}
+}
+
+func TestCoreIntResolution(t *testing.T) {
+	var got map[string]any
+	src := "a: 0x-1\nb: 0b101\nc: 0x1F\nd: 0o17\ne: +5\nf: 0x+1\ng: -12\n"
+	if err := Unmarshal([]byte(src), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"a": "0x-1", "b": "0b101", "c": int64(31), "d": int64(15), "e": int64(5), "f": "0x+1", "g": int64(-12)}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+
+	var typed struct {
+		I int `yaml:"i"`
+	}
+	if err := Unmarshal([]byte("i: 0b101\n"), &typed); err != nil || typed.I != 5 {
+		t.Errorf("int field from 0b101: got %d, %v", typed.I, err)
+	}
+	if err := Unmarshal([]byte("i: 0x-1\n"), &typed); err == nil {
+		t.Error("int field from 0x-1: expected an error")
+	}
+
+	var js map[string]any
+	if err := UnmarshalWithOptions([]byte("h: 0x1F\nn: 12\np: +3\n"), &js, WithSchema(JSONSchema)); err != nil {
+		t.Fatal(err)
+	}
+	if js["h"] != "0x1F" || js["n"] != int64(12) || js["p"] != "+3" {
+		t.Errorf("JSON schema: got %#v", js)
+	}
+
+	strs := []any{"0x-1", "0b101", "0x1F", "0o17", "+5", "0x+1", "-12"}
+	data, err := Marshal(strs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "- 0x-1\n- 0b101\n- \"0x1F\"\n- \"0o17\"\n- \"+5\"\n- 0x+1\n- \"-12\"\n"; string(data) != want {
+		t.Errorf("got %q, want %q", data, want)
+	}
+	var back []any
+	if err := Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, strs) {
+		t.Errorf("round trip: got %#v, want %#v", back, strs)
+	}
+}
+
+func TestBlockOutputAtEveryIndent(t *testing.T) {
+	v := map[string]any{
+		"seq": []any{
+			map[string]any{"a": 1, "b": []any{1, map[string]any{"c": "x\ny\n", "d": 2}}},
+			[]any{1, []any{2, 3}},
+			[]byte("bin"),
+		},
+		"map": map[string]any{"x": []any{1, 2}, "y": map[string]any{"z": []any{map[string]any{"k": "v"}}}},
+		"s":   "multi\nline\n",
+	}
+	ref, err := MarshalWithOptions(v, WithFlow(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want any
+	if err := Unmarshal(ref, &want); err != nil {
+		t.Fatal(err)
+	}
+
+	src := "? {k: v, k2: [a, b]}\n: [1, {a: 1, b: [2, 3]}]\n? [x, {y: z}]\n: {m: [n]}\nlit: |\n  one\n  two\n"
+	file, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, indent := range []int{2, 3, 4, 8} {
+		for _, indentSeq := range []bool{true, false} {
+			opts := []EncodeOption{WithIndent(indent), WithIndentSequence(indentSeq), WithLiteralStyle(true)}
+			name := fmt.Sprintf("indent=%d/indentSequence=%v", indent, indentSeq)
+			t.Run(name, func(t *testing.T) {
+				out, err := MarshalWithOptions(v, opts...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var got any
+				if err := Unmarshal(out, &got); err != nil {
+					t.Fatalf("re-parse: %v\n%s", err, out)
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("round trip:\n got %#v\nwant %#v\n%s", got, want, out)
+				}
+
+				nodeOut, err := NodeToBytesWithOptions(file.Docs[0], opts...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				again, err := Parse(nodeOut)
+				if err != nil {
+					t.Fatalf("re-parse node output: %v\n%s", err, nodeOut)
+				}
+				sameNodes(t, "doc", file.Docs[0], again.Docs[0])
+			})
+		}
+	}
+
+	out, err := MarshalWithOptions(map[string][]int{"k": {1, 2}}, WithIndentSequence(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "k:\n- 1\n- 2\n"; string(out) != want {
+		t.Errorf("WithIndentSequence(false): got %q, want %q", out, want)
+	}
+}
+
+type marshalsAs int
+
+func (m marshalsAs) MarshalYAML() (any, error) {
+	switch m {
+	case 1:
+		return map[string]int{"a": 1, "b": 2}, nil
+	case 2:
+		return []int{1, 2}, nil
+	}
+	return "low", nil
+}
+
+type marshalsAsStruct struct{ n int }
+
+func (m marshalsAsStruct) MarshalYAML() (any, error) { return "s" + strconv.Itoa(m.n), nil }
+
+func TestMarshalerResultChoosesLayout(t *testing.T) {
+	v := map[string]any{"m": marshalsAs(1), "s": marshalsAs(2), "z": marshalsAs(0), "t": marshalsAsStruct{n: 1}}
+	tests := []struct {
+		name string
+		opts []EncodeOption
+		want string
+	}{
+		{"block", nil, "m:\n  a: 1\n  b: 2\ns:\n  - 1\n  - 2\nt: s1\nz: low\n"},
+		{"flow", []EncodeOption{WithFlow(true)}, "{m: {a: 1, b: 2}, s: [1, 2], t: s1, z: low}\n"},
+		{"json", []EncodeOption{WithJSON(true)}, "\"m\":\n  \"a\": 1\n  \"b\": 2\n\"s\":\n  - 1\n  - 2\n\"t\": \"s1\"\n\"z\": \"low\"\n"},
+		{"kyaml", []EncodeOption{WithKYAML()}, "---\n{\n  m: {\n    a: 1,\n    b: 2,\n  },\n  s: [\n    1,\n    2,\n  ],\n  t: \"s1\",\n  z: \"low\",\n}\n"},
+	}
+	want := map[string]any{"m": map[string]any{"a": int64(1), "b": int64(2)}, "s": []any{int64(1), int64(2)}, "t": "s1", "z": "low"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := MarshalWithOptions(v, tt.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != tt.want {
+				t.Errorf("got %q, want %q", out, tt.want)
+			}
+			var got map[string]any
+			if err := Unmarshal(out, &got); err != nil {
+				t.Fatalf("re-parse: %v\n%s", err, out)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("round trip: got %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+type rawYAML struct{ s string }
+
+func (r rawYAML) MarshalYAML() ([]byte, error) { return []byte(r.s), nil }
+
+type customColor struct{ r, g, b uint8 }
+
+type customBlock struct{ n int }
+
+func TestRawMarshalerOutputIsReindented(t *testing.T) {
+	v := map[string]any{
+		"m":   rawYAML{"a: 1\nb:\n  - x\n  - y\n"},
+		"s":   rawYAML{"- 1\n- k: v\n  k2: w\n"},
+		"lit": rawYAML{"|\n  one\n  two\n"},
+		"sc":  rawYAML{"hello"},
+		"seq": []any{rawYAML{"a: 1\nb: 2\n"}, rawYAML{"- 1\n- 2\n"}},
+		"rv":  RawValue("x: 1\ny:\n  z: [1, 2]\n"),
+		"col": customColor{255, 128, 0},
+		"blk": customBlock{3},
+		"bad": rawYAML{"a: [unclosed"},
+		"nil": rawYAML{""},
+	}
+	color := WithCustomMarshaler(func(c customColor) ([]byte, error) {
+		return fmt.Appendf(nil, "#%02x%02x%02x", c.r, c.g, c.b), nil
+	})
+	block := WithCustomMarshaler(func(c customBlock) ([]byte, error) {
+		return fmt.Appendf(nil, "n: %d\nm:\n  - 1\n", c.n), nil
+	})
+	want := map[string]any{
+		"m":   map[string]any{"a": int64(1), "b": []any{"x", "y"}},
+		"s":   []any{int64(1), map[string]any{"k": "v", "k2": "w"}},
+		"lit": "one\ntwo\n",
+		"sc":  "hello",
+		"seq": []any{map[string]any{"a": int64(1), "b": int64(2)}, []any{int64(1), int64(2)}},
+		"rv":  map[string]any{"x": int64(1), "y": map[string]any{"z": []any{int64(1), int64(2)}}},
+		"col": "#ff8000",
+		"blk": map[string]any{"n": int64(3), "m": []any{int64(1)}},
+		"bad": "a: [unclosed",
+		"nil": nil,
+	}
+	modes := map[string][]EncodeOption{
+		"block":     nil,
+		"indent4":   {WithIndent(4)},
+		"indent3":   {WithIndent(3), WithIndentSequence(false)},
+		"flow":      {WithFlow(true)},
+		"json":      {WithJSON(true)},
+		"kyaml":     {WithKYAML()},
+		"literal":   {WithLiteralStyle(true), WithIndent(8)},
+		"flowlit":   {WithFlow(true), WithLiteralStyle(true)},
+		"singleQ":   {WithSingleQuote(true)},
+		"quoteAll":  {WithQuoteAllStrings(true)},
+		"jsonIndnt": {WithJSON(true), WithIndent(4)},
+	}
+	for name, opts := range modes {
+		t.Run(name, func(t *testing.T) {
+			out, err := MarshalWithOptions(v, append(opts, color, block)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := Unmarshal(out, &got); err != nil {
+				t.Fatalf("re-parse: %v\n%s", err, out)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("round trip:\n got %#v\nwant %#v\n%s", got, want, out)
+			}
+		})
+	}
+
+	if _, err := Marshal(rawYAML{"a: 1\n---\nb: 2\n"}); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("multi-document output: got %v, want ErrUnsupported", err)
+	}
+}
+
+func TestIntFormsForTypedAndUntypedTargets(t *testing.T) {
+	var u struct {
+		A, B, C, D, E uint64
+	}
+	src := "a: 0b101\nb: 0B11\nc: 0X1F\nd: 0O7\ne: +5\n"
+	if err := Unmarshal([]byte(src), &u); err != nil {
+		t.Fatal(err)
+	}
+	if u.A != 5 || u.B != 3 || u.C != 31 || u.D != 7 || u.E != 5 {
+		t.Errorf("uint fields: got %+v", u)
+	}
+	var i struct {
+		A, B, C, D, E int64
+	}
+	if err := Unmarshal([]byte(src), &i); err != nil {
+		t.Fatal(err)
+	}
+	if i.A != 5 || i.B != 3 || i.C != 31 || i.D != 7 || i.E != 5 {
+		t.Errorf("int fields: got %+v", i)
+	}
+	var bad struct{ A uint64 }
+	if err := Unmarshal([]byte("a: 0x-1\n"), &bad); err == nil {
+		t.Error("uint field from 0x-1: expected an error")
+	}
+
+	var got map[string]any
+	if err := Unmarshal([]byte(src+"f: 0x1F\ng: 0o7\nh: 18446744073709551615\n"), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"a": "0b101", "b": "0B11", "c": "0X1F", "d": "0O7", "e": int64(5), "f": int64(31), "g": int64(7), "h": uint64(18446744073709551615)}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("any: got %#v, want %#v", got, want)
+	}
+
+	strs := []any{"0X1F", "0O7", "0B1", "0x1F", "0o7", "18446744073709551615"}
+	data, err := Marshal(strs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := "- 0X1F\n- 0O7\n- 0B1\n- \"0x1F\"\n- \"0o7\"\n- \"18446744073709551615\"\n"; string(data) != w {
+		t.Errorf("got %q, want %q", data, w)
+	}
+	var back []any
+	if err := Unmarshal(data, &back); err != nil || !reflect.DeepEqual(back, strs) {
+		t.Errorf("round trip: got %#v, %v", back, err)
+	}
+}
+
+func TestStringsNeedingEscapesRoundTrip(t *testing.T) {
+	strs := []string{"a\x00b", "a\x7fb", "a\u0080b", "a\u0085b", "a\u2028b", "a\u2029b", "a\uFEFFb", "a\x1bb",
+		"\x00", "x\r", "a\r\nb", "<<", "  x\n  y", "x\n\n", "\n", "\nx", "x\ty\n", "a\u00a0b"}
+	m := map[string]any{"list": strs}
+	keys := map[string]string{}
+	for _, s := range strs {
+		keys[s] = "v"
+	}
+	m["keys"] = keys
+	modes := map[string][]EncodeOption{
+		"block":   nil,
+		"flow":    {WithFlow(true)},
+		"json":    {WithJSON(true)},
+		"kyaml":   {WithKYAML()},
+		"single":  {WithSingleQuote(true)},
+		"literal": {WithLiteralStyle(true)},
+		"flowlit": {WithFlow(true), WithLiteralStyle(true)},
+		"quote":   {WithQuoteAllStrings(true)},
+	}
+	for name, opts := range modes {
+		t.Run(name, func(t *testing.T) {
+			out, err := MarshalWithOptions(m, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				List []string          `yaml:"list"`
+				Keys map[string]string `yaml:"keys"`
+			}
+			if err := Unmarshal(out, &got); err != nil {
+				t.Fatalf("re-parse: %v\n%s", err, out)
+			}
+			if !reflect.DeepEqual(got.List, strs) || !reflect.DeepEqual(got.Keys, keys) {
+				t.Errorf("round trip:\n got %q %q\nwant %q %q\n%s", got.List, got.Keys, strs, keys, out)
+			}
+		})
+	}
+}
+
+func TestQuotedMergeKeyIsOrdinaryKey(t *testing.T) {
+	var got map[string]any
+	if err := Unmarshal([]byte("base: &b {x: 1}\n\"<<\": plain\nc:\n  <<: *b\n"), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["<<"] != "plain" {
+		t.Errorf("quoted << key: got %#v", got)
+	}
+	if c, _ := got["c"].(map[string]any); c["x"] != int64(1) {
+		t.Errorf("merge not applied: %#v", got["c"])
+	}
+}
+
+type compositeKey struct {
+	A int    `yaml:"a"`
+	B string `yaml:"b"`
+}
+
+func TestCollectionMapKeysRoundTrip(t *testing.T) {
+	structKeys := map[compositeKey]string{{A: 1, B: "x y"}: "one", {A: 2, B: "a: b"}: "two"}
+	arrayKeys := map[[2]int]string{{1, 2}: "p", {3, 4}: "q"}
+	for name, opts := range map[string][]EncodeOption{
+		"block": nil, "flow": {WithFlow(true)}, "json": {WithJSON(true)}, "indent4": {WithIndent(4)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := MarshalWithOptions(structKeys, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotS map[compositeKey]string
+			if err := Unmarshal(out, &gotS); err != nil || !reflect.DeepEqual(gotS, structKeys) {
+				t.Errorf("struct keys: got %v, %v\n%s", gotS, err, out)
+			}
+			out, err = MarshalWithOptions(arrayKeys, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotA map[[2]int]string
+			if err := Unmarshal(out, &gotA); err != nil || !reflect.DeepEqual(gotA, arrayKeys) {
+				t.Errorf("array keys: got %v, %v\n%s", gotA, err, out)
+			}
+		})
+	}
+}
+
+func TestCollectionKeysIntoAny(t *testing.T) {
+	src := []byte("? [a, b]\n: 1\n? {k: v}\n: 2\nc: 3\n")
+	for _, target := range []any{new(any), new(map[string]any), new(map[any]any)} {
+		err := Unmarshal(src, target)
+		var typeErr *TypeError
+		if !errors.As(err, &typeErr) || len(typeErr.Errors) != 2 ||
+			!strings.HasPrefix(typeErr.Errors[0], "line 1: cannot ") || !strings.Contains(typeErr.Errors[0], "!!seq") ||
+			!strings.HasPrefix(typeErr.Errors[1], "line 3: cannot ") || !strings.Contains(typeErr.Errors[1], "!!map") {
+			t.Errorf("%T: got %v", target, err)
+		}
+	}
+	var ordered any
+	if err := UnmarshalWithOptions(src, &ordered, WithOrderedMap()); err != nil {
+		t.Fatal(err)
+	}
+	ms := ordered.(MapSlice)
+	if !reflect.DeepEqual(ms[0].Key, []any{"a", "b"}) || !reflect.DeepEqual(ms[1].Key, MapSlice{{Key: "k", Value: "v"}}) || ms[2].Key != "c" {
+		t.Errorf("ordered keys: got %#v", ms)
+	}
+}
+
+func TestKYAMLSequenceMixingScalarsAndMappings(t *testing.T) {
+	out, err := MarshalWithOptions([]any{1, map[string]int{"k": 2}}, WithKYAML())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "---\n[\n  1,\n  {\n    k: 2,\n  },\n]\n"; string(out) != want {
+		t.Errorf("got %q, want %q", out, want)
 	}
 }

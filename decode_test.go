@@ -1038,9 +1038,11 @@ func TestDecodeToAnyNonScalarKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := result.(map[string]any)
-	if _, ok := m["complex_key"]; !ok {
-		t.Error("expected non-scalar key to be formatted as string")
+	if m := result.(map[string]any); len(m) != 0 {
+		t.Errorf("expected the mapping key to be left out, got %v", m)
+	}
+	if len(d.typeErrors) != 1 || !strings.Contains(d.typeErrors[0], "cannot use !!map as a key of map[string]interface {}") {
+		t.Errorf("expected a key type error, got %q", d.typeErrors)
 	}
 }
 
@@ -1095,8 +1097,8 @@ func TestDecodeMappingToOrderedMapNonScalarKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result[0].Key != "complex" {
-		t.Errorf("expected key 'complex', got %v", result[0].Key)
+	if key, ok := result[0].Key.(MapSlice); !ok || len(key) != 0 {
+		t.Errorf("expected the decoded empty mapping as key, got %#v", result[0].Key)
 	}
 }
 
@@ -5865,41 +5867,84 @@ func BenchmarkConformanceLarge(b *testing.B) {
 	}
 }
 
-// ─── NEL / LS / PS Line Break Normalization ─────────────────────────────────
+// ─── NEL / LS / PS are content, not line breaks (YAML 1.2) ──────────────────
 
-func TestNELLineBreak(t *testing.T) {
-	// U+0085 NEL = 0xC2 0x85
-	data := []byte("a: 1\xc2\x85b: 2\n")
-	var v map[string]int
-	if err := Unmarshal(data, &v); err != nil {
-		t.Fatal(err)
-	}
-	if v["a"] != 1 || v["b"] != 2 {
-		t.Fatalf("expected {a:1, b:2}, got %v", v)
+func TestUnicodeLineSeparatorsAreContent(t *testing.T) {
+	for name, sep := range map[string]string{"NEL": "\u0085", "LS": " ", "PS": " "} {
+		t.Run(name, func(t *testing.T) {
+			src := "plain: a" + sep + "b\nsingle: 'a" + sep + "b'\ndouble: \"a" + sep + "b\"\n" +
+				"lit: |\n  a" + sep + "b\nk" + sep + "ey: v\nflow: [a" + sep + "b]\n"
+			var got map[string]any
+			if err := Unmarshal([]byte(src), &got); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]any{
+				"plain": "a" + sep + "b", "single": "a" + sep + "b", "double": "a" + sep + "b",
+				"lit": "a" + sep + "b\n", "k" + sep + "ey": "v", "flow": []any{"a" + sep + "b"},
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
-func TestLSLineBreak(t *testing.T) {
-	// U+2028 LS = 0xE2 0x80 0xA8
-	data := []byte("a: 1\xe2\x80\xa8b: 2\n")
-	var v map[string]int
-	if err := Unmarshal(data, &v); err != nil {
+// ─── Ordered maps: merge keys and MapSlice targets ──────────────────────────
+
+func TestOrderedMapAppliesMergeKeys(t *testing.T) {
+	src := "base: &b {x: 1, y: 2}\nother: &o {z: 3, x: 9}\n" +
+		"one:\n  a: 0\n  <<: *b\n  y: 5\n" +
+		"many:\n  x: 7\n  <<: [*b, *o]\n"
+	var v any
+	if err := UnmarshalWithOptions([]byte(src), &v, WithOrderedMap()); err != nil {
 		t.Fatal(err)
 	}
-	if v["a"] != 1 || v["b"] != 2 {
-		t.Fatalf("expected {a:1, b:2}, got %v", v)
+	ms := v.(MapSlice)
+	one, many := ms[2].Value.(MapSlice), ms[3].Value.(MapSlice)
+	wantOne := MapSlice{{Key: "a", Value: int64(0)}, {Key: "x", Value: int64(1)}, {Key: "y", Value: int64(5)}}
+	wantMany := MapSlice{{Key: "x", Value: int64(7)}, {Key: "y", Value: int64(2)}, {Key: "z", Value: int64(3)}}
+	if !reflect.DeepEqual(one, wantOne) {
+		t.Errorf("one: got %#v, want %#v", one, wantOne)
+	}
+	if !reflect.DeepEqual(many, wantMany) {
+		t.Errorf("many: got %#v, want %#v", many, wantMany)
 	}
 }
 
-func TestPSLineBreak(t *testing.T) {
-	// U+2029 PS = 0xE2 0x80 0xA9
-	data := []byte("a: 1\xe2\x80\xa9b: 2\n")
-	var v map[string]int
-	if err := Unmarshal(data, &v); err != nil {
+func TestUnmarshalIntoMapSlice(t *testing.T) {
+	src := []byte("b: 1\na:\n  d: [1, {f: 2}]\n  c: x\nbase: &m {k: v}\nref: *m\n")
+	want := MapSlice{
+		{Key: "b", Value: int64(1)},
+		{Key: "a", Value: MapSlice{
+			{Key: "d", Value: []any{int64(1), MapSlice{{Key: "f", Value: int64(2)}}}},
+			{Key: "c", Value: "x"},
+		}},
+		{Key: "base", Value: MapSlice{{Key: "k", Value: "v"}}},
+		{Key: "ref", Value: MapSlice{{Key: "k", Value: "v"}}},
+	}
+
+	var ms MapSlice
+	if err := Unmarshal(src, &ms); err != nil || !reflect.DeepEqual(ms, want) {
+		t.Errorf("MapSlice: got %#v, %v", ms, err)
+	}
+	var p *MapSlice
+	if err := Unmarshal(src, &p); err != nil || p == nil || !reflect.DeepEqual(*p, want) {
+		t.Errorf("*MapSlice: got %#v, %v", p, err)
+	}
+	var s struct {
+		M     MapSlice       `yaml:"m"`
+		List  []MapSlice     `yaml:"list"`
+		Plain map[string]any `yaml:"plain"`
+	}
+	if err := Unmarshal([]byte("m: {z: 1, a: 2}\nlist: [{q: 1}, {p: {r: 2}}]\nplain: {n: {o: 1}}\n"), &s); err != nil {
 		t.Fatal(err)
 	}
-	if v["a"] != 1 || v["b"] != 2 {
-		t.Fatalf("expected {a:1, b:2}, got %v", v)
+	if !reflect.DeepEqual(s.M, MapSlice{{Key: "z", Value: int64(1)}, {Key: "a", Value: int64(2)}}) ||
+		!reflect.DeepEqual(s.List, []MapSlice{{{Key: "q", Value: int64(1)}}, {{Key: "p", Value: MapSlice{{Key: "r", Value: int64(2)}}}}}) {
+		t.Errorf("fields: got %#v", s)
+	}
+	if _, ok := s.Plain["n"].(map[string]any); !ok {
+		t.Errorf("a map[string]any field must not switch to MapSlice: got %#v", s.Plain)
 	}
 }
 
@@ -6594,8 +6639,8 @@ func TestBigNilPointer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal nil pointers: %v", err)
 	}
-	if len(data) != 0 {
-		t.Errorf("expected empty output for all-nil omitempty, got: %q", data)
+	if string(data) != "{}\n" {
+		t.Errorf("expected an empty mapping for all-nil omitempty, got: %q", data)
 	}
 
 	var s S

@@ -168,6 +168,10 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 		}
 	}
 
+	if n.kind == nodeMapping && v.Type() == reflect.TypeFor[MapSlice]() {
+		return d.decodeIntoMapSlice(n, v)
+	}
+
 	switch n.kind {
 	case nodeScalar:
 		return d.decodeScalar(n, v)
@@ -368,8 +372,18 @@ func (d *decoder) decodeMappingToMap(n *node, v reflect.Value) error {
 		}
 
 		key := reflect.New(keyType).Elem()
+		typeErrs := len(d.typeErrors)
 		if err := d.decode(keyNode, key); err != nil {
 			return err
+		}
+		if len(d.typeErrors) > typeErrs {
+			// The key could not be decoded; leave the entry out rather than
+			// store it under the zero key.
+			continue
+		}
+		if !key.Comparable() {
+			d.addKeyTypeError(keyNode, collectionKind(key.Interface()), v.Type())
+			continue
 		}
 
 		if d.opts.disallowDuplicates {
@@ -412,7 +426,16 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 		keyName := keyNode.value
 
 		idx, ok := sf.byName[keyName]
+		if ok && sf.fields[idx].inline {
+			ok = false
+		}
 		if !ok {
+			if m, found := inlineMapField(v, sf); found {
+				if err := d.decodeMapEntry(m, keyNode, valNode); err != nil {
+					return err
+				}
+				continue
+			}
 			if d.opts.strict {
 				return &UnknownFieldError{Field: keyName, Pos: keyNode.pos}
 			}
@@ -459,6 +482,47 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 		}
 	}
 
+	return nil
+}
+
+// inlineMapField returns the settable inline map field of struct v, making
+// the map if it is nil.
+func inlineMapField(v reflect.Value, sf *structFields) (reflect.Value, bool) {
+	for i := range sf.fields {
+		fi := &sf.fields[i]
+		if !fi.inline {
+			continue
+		}
+		field := fieldByIndex(v, fi.index)
+		if field.Kind() != reflect.Map || !field.CanSet() {
+			continue
+		}
+		if field.IsNil() {
+			field.Set(reflect.MakeMap(field.Type()))
+		}
+		return field, true
+	}
+	return reflect.Value{}, false
+}
+
+// decodeMapEntry decodes one mapping entry into map m.
+func (d *decoder) decodeMapEntry(m reflect.Value, keyNode, valNode *node) error {
+	key := reflect.New(m.Type().Key()).Elem()
+	if err := d.decode(keyNode, key); err != nil {
+		return err
+	}
+	if !key.Comparable() {
+		d.addKeyTypeError(keyNode, collectionKind(key.Interface()), m.Type())
+		return nil
+	}
+	if d.opts.disallowDuplicates && m.MapIndex(key).IsValid() {
+		return &DuplicateKeyError{Key: keyNode.value, Pos: keyNode.pos}
+	}
+	val := reflect.New(m.Type().Elem()).Elem()
+	if err := d.decode(valNode, val); err != nil {
+		return err
+	}
+	m.SetMapIndex(key, val)
 	return nil
 }
 
@@ -600,6 +664,10 @@ func (d *decoder) decodeMappingMerge(n *node, v reflect.Value) error {
 			if err := d.decode(keyNode, key); err != nil {
 				return err
 			}
+			if !key.Comparable() {
+				d.addKeyTypeError(keyNode, collectionKind(key.Interface()), v.Type())
+				continue
+			}
 			existing := v.MapIndex(key)
 			if existing.IsValid() {
 				continue
@@ -625,7 +693,12 @@ func (d *decoder) decodeMappingMerge(n *node, v reflect.Value) error {
 			}
 
 			idx, ok := sf.byName[keyNode.value]
-			if !ok {
+			if !ok || sf.fields[idx].inline {
+				if m, found := inlineMapField(v, sf); found {
+					if err := d.decodeMappingMerge(&node{kind: nodeMapping, children: []*node{keyNode, valNode}}, m); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			fi := sf.fields[idx]
@@ -753,6 +826,8 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 				continue
 			}
 
+			// A mapping or sequence key cannot be a string key; report it
+			// rather than letting such keys collide.
 			var keyStr string
 			switch keyNode.kind {
 			case nodeScalar:
@@ -762,9 +837,14 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 				if err != nil {
 					return nil, err
 				}
+				if isCollection(resolved) {
+					d.addKeyTypeError(keyNode, collectionKind(resolved), reflect.TypeFor[map[string]any]())
+					continue
+				}
 				keyStr = fmt.Sprintf("%v", resolved)
 			default:
-				keyStr = keyNode.value
+				d.addKeyTypeError(keyNode, keyNode.kind, reflect.TypeFor[map[string]any]())
+				continue
 			}
 
 			val, err := d.decodeToAny(valNode)
@@ -790,33 +870,104 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 	return nil, nil
 }
 
+// decodeIntoMapSlice decodes mapping n into the MapSlice v, decoding nested
+// mappings as MapSlice too, as [WithOrderedMap] does.
+func (d *decoder) decodeIntoMapSlice(n *node, v reflect.Value) error {
+	prev := d.opts.useOrderedMap
+	d.opts.useOrderedMap = true
+	defer func() { d.opts.useOrderedMap = prev }()
+	ms, err := d.decodeMappingToOrderedMap(n)
+	if err != nil {
+		return err
+	}
+	v.Set(reflect.ValueOf(ms))
+	return nil
+}
+
+// decodeMappingToOrderedMap decodes n into a MapSlice in source order. A
+// "<<" merge adds the merged entries that are not already present where the
+// merge appears; an explicit key that follows replaces a merged entry's
+// value in place.
 func (d *decoder) decodeMappingToOrderedMap(n *node) (MapSlice, error) {
 	ms := make(MapSlice, 0, len(n.children)/2)
+	index := make(map[string]int) // string key -> position in ms
+	merged := make(map[string]bool)
 	for i := 0; i < len(n.children)-1; i += 2 {
 		keyNode := n.children[i]
 		valNode := n.children[i+1]
 
-		var keyStr string
+		if isMergeKey(keyNode) {
+			src, err := d.decodeToAny(valNode)
+			if err != nil {
+				return nil, err
+			}
+			sources := []any{src}
+			if seq, ok := src.([]any); ok {
+				sources = seq
+			}
+			for _, s := range sources {
+				m, ok := s.(MapSlice)
+				if !ok {
+					continue
+				}
+				for _, item := range m {
+					k, isStr := item.Key.(string)
+					if isStr {
+						if _, exists := index[k]; exists {
+							continue
+						}
+						index[k] = len(ms)
+						merged[k] = true
+					}
+					ms = append(ms, item)
+				}
+			}
+			continue
+		}
+
+		// MapItem.Key can hold any key, so a mapping or sequence key keeps
+		// its decoded value.
+		var key any
 		switch keyNode.kind {
 		case nodeScalar:
-			keyStr = keyNode.value
-		case nodeAlias:
+			key = keyNode.value
+		default:
 			resolved, err := d.decodeToAny(keyNode)
 			if err != nil {
 				return nil, err
 			}
-			keyStr = fmt.Sprintf("%v", resolved)
-		default:
-			keyStr = keyNode.value
+			key = resolved
+			if keyNode.kind == nodeAlias && !isCollection(resolved) {
+				key = fmt.Sprintf("%v", resolved)
+			}
 		}
 
 		val, err := d.decodeToAny(valNode)
 		if err != nil {
 			return nil, err
 		}
-		ms = append(ms, MapItem{Key: keyStr, Value: val})
+		if k, isStr := key.(string); isStr {
+			if at, ok := index[k]; ok && merged[k] {
+				ms[at].Value = val
+				merged[k] = false
+				continue
+			}
+			if _, ok := index[k]; !ok {
+				index[k] = len(ms)
+			}
+		}
+		ms = append(ms, MapItem{Key: key, Value: val})
 	}
 	return ms, nil
+}
+
+// isCollection reports whether v is a decoded mapping or sequence.
+func isCollection(v any) bool {
+	switch v.(type) {
+	case map[string]any, []any, MapSlice:
+		return true
+	}
+	return false
 }
 
 func (d *decoder) scalarToAny(n *node) any {
@@ -832,6 +983,10 @@ func (d *decoder) scalarToAny(n *node) any {
 
 	if n.tag == "!" {
 		return val
+	}
+
+	if v, ok := resolveCoreTag(n.tag, val); ok {
+		return v
 	}
 
 	if n.implicit && val == "" {
@@ -852,6 +1007,39 @@ func (d *decoder) scalarToAny(n *node) any {
 	}
 }
 
+// Long forms of the YAML 1.2 Core schema scalar tags.
+const (
+	tagNull  = "tag:yaml.org,2002:null"
+	tagBool  = "tag:yaml.org,2002:bool"
+	tagInt   = "tag:yaml.org,2002:int"
+	tagFloat = "tag:yaml.org,2002:float"
+)
+
+// resolveCoreTag returns the value of a scalar explicitly tagged !!null,
+// !!bool, !!int or !!float. It reports false for other tags and for a value
+// the tag cannot represent, which then resolves as if untagged.
+func resolveCoreTag(tag, val string) (any, bool) {
+	switch tag {
+	case tagNull:
+		if isNullValue(val) {
+			return nil, true
+		}
+	case tagBool:
+		if b, err := parseBool(val); err == nil {
+			return b, true
+		}
+	case tagInt:
+		if i, err := parseInt(val); err == nil {
+			return i, true
+		}
+	case tagFloat:
+		if f, err := parseFloat(val); err == nil {
+			return f, true
+		}
+	}
+	return nil, false
+}
+
 func scalarToAnyCore(val string) any {
 	if isNullValue(val) {
 		return nil
@@ -861,14 +1049,14 @@ func scalarToAnyCore(val string) any {
 		return b
 	}
 
-	if i, err := parseInt(val); err == nil {
-		if i >= math.MinInt && i <= math.MaxInt {
-			return i
-		}
+	if i, ok := parseCoreInt(val); ok {
 		return i
 	}
+	if u, ok := parseCoreUint(val); ok {
+		return u
+	}
 
-	if f, err := parseFloat(val); err == nil {
+	if f, ok := parseCoreFloat(val); ok {
 		return f
 	}
 
@@ -887,15 +1075,17 @@ func scalarToAnyJSON(val string) any {
 		return false
 	}
 
-	if i, err := parseInt(val); err == nil {
-		if i >= math.MinInt && i <= math.MaxInt {
-			return i
-		}
+	// JSON numbers are decimal and take no leading '+'.
+	if val == "" || val[0] == '+' {
+		return val
+	}
+	if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 		return i
 	}
-
-	if f, err := parseFloat(val); err == nil {
-		return f
+	if isDecimalFloat(val) {
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			return f
+		}
 	}
 
 	return val
@@ -904,6 +1094,21 @@ func scalarToAnyJSON(val string) any {
 func (d *decoder) addTypeError(n *node, t reflect.Type) {
 	msg := fmt.Sprintf("line %d: cannot unmarshal %s into Go value of type %s", n.pos.Line, nodeKindName(n.kind), t)
 	d.typeErrors = append(d.typeErrors, msg)
+}
+
+// addKeyTypeError records that the mapping or sequence key at n cannot be a
+// key of a map of type mapType.
+func (d *decoder) addKeyTypeError(n *node, kind nodeKind, mapType reflect.Type) {
+	msg := fmt.Sprintf("line %d: cannot use %s as a key of %s", n.pos.Line, nodeKindName(kind), mapType)
+	d.typeErrors = append(d.typeErrors, msg)
+}
+
+// collectionKind returns the node kind a decoded collection came from.
+func collectionKind(v any) nodeKind {
+	if _, ok := v.([]any); ok {
+		return nodeSequence
+	}
+	return nodeMapping
 }
 
 func nodeKindName(k nodeKind) string {
@@ -920,7 +1125,7 @@ func nodeKindName(k nodeKind) string {
 }
 
 func isMergeKey(n *node) bool {
-	return n.kind == nodeScalar && n.value == "<<"
+	return n.kind == nodeMergeKey || n.tag == "tag:yaml.org,2002:merge" || n.kind == nodeScalar && n.value == "<<" && n.style == scalarPlain && n.tag == ""
 }
 
 // Canonical YAML 1.2 / KYAML representations of null and the booleans.
@@ -944,39 +1149,141 @@ func parseBool(s string) (bool, error) {
 	return false, fmt.Errorf("not a bool %q: %w", s, errNotBool)
 }
 
+// intDigits splits an integer for an integer target into its digits and
+// base: unsigned digits after a 0x, 0o or 0b prefix in either case, or an
+// optionally signed decimal.
+func intDigits(s string) (digits string, base int, err error) {
+	for _, p := range []struct {
+		prefix string
+		base   int
+	}{{"0x", 16}, {"0o", 8}, {"0b", 2}} {
+		if len(s) >= 2 && strings.EqualFold(s[:2], p.prefix) {
+			digits = s[2:]
+			if digits == "" || digits[0] == '+' || digits[0] == '-' {
+				return "", 0, fmt.Errorf("invalid integer %q: %w", s, strconv.ErrSyntax)
+			}
+			return digits, p.base, nil
+		}
+	}
+	return s, 10, nil
+}
+
+// parseInt parses s for an integer target. See intDigits for the forms.
 func parseInt(s string) (int64, error) {
-	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
-		return strconv.ParseInt(s[2:], 16, 64)
+	digits, base, err := intDigits(s)
+	if err != nil {
+		return 0, err
 	}
-	if strings.HasPrefix(s, "0o") || strings.HasPrefix(s, "0O") {
-		return strconv.ParseInt(s[2:], 8, 64)
-	}
-	if strings.HasPrefix(s, "0b") || strings.HasPrefix(s, "0B") {
-		return strconv.ParseInt(s[2:], 2, 64)
-	}
-	return strconv.ParseInt(s, 10, 64)
+	return strconv.ParseInt(digits, base, 64)
 }
 
+// parseUint parses s for an unsigned integer target. It accepts the same
+// forms as parseInt.
 func parseUint(s string) (uint64, error) {
-	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
-		return strconv.ParseUint(s[2:], 16, 64)
+	digits, base, err := intDigits(s)
+	if err != nil {
+		return 0, err
 	}
-	if strings.HasPrefix(s, "0o") || strings.HasPrefix(s, "0O") {
-		return strconv.ParseUint(s[2:], 8, 64)
+	if base == 10 {
+		digits = strings.TrimPrefix(digits, "+")
 	}
-	return strconv.ParseUint(s, 10, 64)
+	return strconv.ParseUint(digits, base, 64)
 }
 
+// parseCoreInt parses s as a YAML 1.2 Core schema integer: an optionally
+// signed decimal, or digits after a lowercase 0x or 0o prefix. Binary and
+// uppercase prefixes are not part of the Core schema.
+func parseCoreInt(s string) (int64, bool) {
+	if len(s) >= 2 && s[0] == '0' && strings.ContainsRune("bBXO", rune(s[1])) {
+		return 0, false
+	}
+	i, err := parseInt(s)
+	return i, err == nil
+}
+
+// parseCoreUint parses a Core schema integer too large for int64.
+func parseCoreUint(s string) (uint64, bool) {
+	if len(s) >= 2 && s[0] == '0' && strings.ContainsRune("bBXO", rune(s[1])) {
+		return 0, false
+	}
+	u, err := parseUint(s)
+	return u, err == nil
+}
+
+// parseFloat parses s for a float target. Besides the YAML spellings it
+// accepts anything [strconv.ParseFloat] does, such as "inf" or "NaN".
 func parseFloat(s string) (float64, error) {
-	switch s {
-	case ".inf", ".Inf", ".INF":
-		return math.Inf(1), nil
-	case "-.inf", "-.Inf", "-.INF":
-		return math.Inf(-1), nil
-	case ".nan", ".NaN", ".NAN":
-		return math.NaN(), nil
+	if f, ok := yamlSpecialFloat(s); ok {
+		return f, nil
 	}
 	return strconv.ParseFloat(s, 64)
+}
+
+// yamlSpecialFloat returns the value of a YAML 1.2 Core infinity or NaN
+// spelling.
+func yamlSpecialFloat(s string) (float64, bool) {
+	switch s {
+	case ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF":
+		return math.Inf(1), true
+	case "-.inf", "-.Inf", "-.INF":
+		return math.Inf(-1), true
+	case ".nan", ".NaN", ".NAN":
+		return math.NaN(), true
+	}
+	return 0, false
+}
+
+// parseCoreFloat parses s as a YAML 1.2 Core schema float: an optionally
+// signed decimal with an optional fraction and exponent, or one of the
+// infinity and NaN spellings. Plain "inf", "nan" or "infinity" are strings.
+func parseCoreFloat(s string) (float64, bool) {
+	if f, ok := yamlSpecialFloat(s); ok {
+		return f, true
+	}
+	if !isDecimalFloat(s) {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	return f, err == nil
+}
+
+// isDecimalFloat reports whether s matches
+// [-+]? ( \. [0-9]+ | [0-9]+ ( \. [0-9]* )? ) ( [eE] [-+]? [0-9]+ )?
+func isDecimalFloat(s string) bool {
+	digits := func(i int) int {
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		return i
+	}
+	i := 0
+	if i < len(s) && (s[i] == '-' || s[i] == '+') {
+		i++
+	}
+	start := i
+	i = digits(i)
+	intDigits := i > start
+	if i < len(s) && s[i] == '.' {
+		j := digits(i + 1)
+		if !intDigits && j == i+1 {
+			return false
+		}
+		i = j
+	} else if !intDigits {
+		return false
+	}
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '-' || s[i] == '+') {
+			i++
+		}
+		j := digits(i)
+		if j == i {
+			return false
+		}
+		i = j
+	}
+	return i == len(s)
 }
 
 func parseTime(s string) (time.Time, error) {
@@ -1035,7 +1342,10 @@ type Marshaler interface {
 }
 
 // BytesMarshaler is implemented by types that can encode themselves directly
-// into YAML bytes.
+// into YAML bytes. The bytes are parsed and written again at the position
+// they appear, so multi-line output fits any indent or flow style. Bytes
+// that are not valid YAML, or hold only a comment, are written as a string;
+// more than one document is an error.
 type BytesMarshaler interface {
 	MarshalYAML() ([]byte, error)
 }

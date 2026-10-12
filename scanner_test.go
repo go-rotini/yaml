@@ -393,45 +393,6 @@ func TestScannerMergeKey(t *testing.T) {
 	}
 }
 
-func TestNormalizeLineBreaksNEL(t *testing.T) {
-	input := []byte("a\xc2\x85b")
-	out := normalizeLineBreaks(input)
-	if string(out) != "a\nb" {
-		t.Errorf("expected NEL normalized to LF, got %q", out)
-	}
-}
-
-func TestNormalizeLineBreaksLS(t *testing.T) {
-	input := []byte("a\xe2\x80\xa8b")
-	out := normalizeLineBreaks(input)
-	if string(out) != "a\nb" {
-		t.Errorf("expected LS normalized to LF, got %q", out)
-	}
-}
-
-func TestNormalizeLineBreaksPS(t *testing.T) {
-	input := []byte("a\xe2\x80\xa9b")
-	out := normalizeLineBreaks(input)
-	if string(out) != "a\nb" {
-		t.Errorf("expected PS normalized to LF, got %q", out)
-	}
-}
-
-func TestNormalizeLineBreaksNoChange(t *testing.T) {
-	input := []byte("hello\nworld")
-	out := normalizeLineBreaks(input)
-	if &out[0] != &input[0] {
-		t.Error("expected same slice when no normalization needed")
-	}
-}
-
-func TestNormalizeLineBreaksEmpty(t *testing.T) {
-	out := normalizeLineBreaks(nil)
-	if len(out) != 0 {
-		t.Errorf("expected empty, got %q", out)
-	}
-}
-
 func TestValid(t *testing.T) {
 	if !Valid([]byte("key: value")) {
 		t.Error("expected valid YAML")
@@ -1350,7 +1311,7 @@ func TestScanFlowEndResetDepth(t *testing.T) {
 func TestScanFlowColonAfterSequence(t *testing.T) {
 	input := "{[a]: 1}\n"
 	var out any
-	err := Unmarshal([]byte(input), &out)
+	err := UnmarshalWithOptions([]byte(input), &out, WithOrderedMap())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -306,8 +306,14 @@ func Filter(n *Node, fn func(*Node) bool) []*Node {
 }
 
 // NodeToBytes serializes a [Node] tree back into block-style YAML bytes using
-// default encoding options. Structure, scalar values, anchors and aliases
-// are written; tags, comments and scalar styles are not preserved.
+// default encoding options. Structure, scalar values, anchors, aliases,
+// merge keys and tags are written, and the output parses back to the same
+// values and types: a scalar with a quoted [ScalarStyle] or a !!str tag
+// reads back as a string, a plain scalar that reads as null, a bool or a
+// number is written unquoted, and a mapping or sequence key uses the
+// explicit "? key" form. A tag the written form already implies, such as
+// !!int on a plain 5, is left out. Comments, flow style and the choice of
+// quote character are not preserved.
 func NodeToBytes(n *Node) ([]byte, error) {
 	internal := importNode(n)
 	enc := newEncoder(defaultEncodeOptions())
