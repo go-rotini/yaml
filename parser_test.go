@@ -955,3 +955,83 @@ func TestPropertiesStartKeyAfterEmptyValue(t *testing.T) {
 		t.Errorf("RawValue: %v", err)
 	}
 }
+
+func TestEmptyKeyAfterFlowValue(t *testing.T) {
+	valid := map[string]string{
+		"a: {}\n!t : 1\nb: 2":  `{"":1,"a":{},"b":2}`,
+		"a: [x]\n!!str : 1":    `{"":1,"a":["x"]}`,
+		"a: {}\n: 1":           `{"":1,"a":{}}`,
+		"a: &b {}\n!0 : 1":     `{"":1,"a":{}}`,
+		"a: !t []\n&k : 1":     `{"":1,"a":[]}`,
+		"a: {x: 1}\n: 2":       `{"":2,"a":{"x":1}}`,
+		"a:\n  b: [1]\n  : 2":  `{"a":{"":2,"b":[1]}}`,
+		"a: [x,\n  y]\n!t : 1": `{"":1,"a":["x","y"]}`,
+	}
+	for in, want := range valid {
+		if got, err := ToJSON([]byte(in)); err != nil || string(got) != want {
+			t.Errorf("%q: got %s, %v, want %s", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"a: {}\n? !t\n: 1", "a: &b {}\n? !t\n: 1", ": &b{}\n#00\n!0 :"} {
+		if err := nodeRoundTrip([]byte(in)); err != nil {
+			t.Errorf("%q: %v", in, err)
+		}
+	}
+}
+
+func TestNodeNotIndentedEnough(t *testing.T) {
+	for _, in := range []string{"a: !t\nb", "a: &x\nb", "q:\nx", "q:\n'x'", "q:\n|\n  x", "q:\n>\n  x", "- a: !t\n  b", "a:\n{b: 1}"} {
+		var v any
+		if err := Unmarshal([]byte(in), &v); err == nil || !strings.Contains(err.Error(), "not indented enough") {
+			t.Errorf("%q: got %#v, %v", in, v, err)
+		}
+	}
+	valid := map[string]string{
+		"a:\n- 1":          `{"a":[1]}`,
+		"a: !t\n- 1":       `{"a":[1]}`,
+		"a:\n# c\nb: 1":    `{"a":null,"b":1}`,
+		"a:\n'b': 1":       `{"a":null,"b":1}`,
+		"a:\n[b]: 1\nc: 2": "",
+	}
+	for in, want := range valid {
+		if want == "" {
+			if _, err := Parse([]byte(in)); err != nil {
+				t.Errorf("%q: %v", in, err)
+			}
+			continue
+		}
+		if got, err := ToJSON([]byte(in)); err != nil || string(got) != want {
+			t.Errorf("%q: got %s, %v, want %s", in, got, err, want)
+		}
+	}
+}
+
+func TestPlainScalarCannotStartWithComma(t *testing.T) {
+	for _, in := range []string{", : 1", "a: ,b", "- ,x", "a: &x\n&k , : 1", "? ,x\n: 1"} {
+		var v any
+		if err := Unmarshal([]byte(in), &v); err == nil || !strings.Contains(err.Error(), "cannot start with ','") {
+			t.Errorf("%q: got %#v, %v", in, v, err)
+		}
+	}
+	for in, want := range map[string]string{"a: x,y": `{"a":"x,y"}`, "a: b\n  ,x": `{"a":"b ,x"}`, "{a: ,x}": `{"a":null,"x":null}`} {
+		if got, err := ToJSON([]byte(in)); err != nil || string(got) != want {
+			t.Errorf("%q: got %s, %v, want %s", in, got, err, want)
+		}
+	}
+}
+
+func TestPropertiesBeforeFlowKeyOnDocumentStartLine(t *testing.T) {
+	for _, in := range []string{"--- !!map\n[b]: 1", "--- &a\n[b]: 1", "!!map\n[b]: 1", "--- !!map\n{b: 1}: 1\nc: 2"} {
+		var ms MapSlice
+		if err := Unmarshal([]byte(in), &ms); err != nil || len(ms) == 0 || ms[0].Value != int64(1) {
+			t.Errorf("%q: got %#v, %v", in, ms, err)
+		}
+	}
+	f, err := Parse([]byte("--- !!map\n[b]: 1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := f.Docs[0].Children[0]; m.Kind != MappingNode || m.Tag != "tag:yaml.org,2002:map" {
+		t.Errorf("got kind %v tag %q, want a !!map mapping", m.Kind, m.Tag)
+	}
+}

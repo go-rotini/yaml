@@ -30,6 +30,36 @@ type decoder struct {
 	// mappings it names keep the first of a repeated key, as merging into a
 	// typed target does.
 	mergeSource bool
+	// merged holds the merge-source mappings already decoded for the mapping
+	// whose merges are being decoded, so that a source reached again through
+	// another merge is not decoded again.
+	merged map[*node]any
+}
+
+// mergeScope starts a fresh set of decoded merge sources for a mapping that
+// is not itself a merge source. The returned function restores the previous
+// set.
+func (d *decoder) mergeScope() func() {
+	prev := d.merged
+	d.merged = nil
+	return func() { d.merged = prev }
+}
+
+// decodeMergeSourceToAny decodes mapping n as a merge source with decode,
+// reusing the result when n was already decoded for the same mapping.
+func (d *decoder) decodeMergeSourceToAny(n *node, decode func() (any, error)) (any, error) {
+	if v, ok := d.merged[n]; ok {
+		return v, nil
+	}
+	v, err := decode()
+	if err != nil {
+		return nil, err
+	}
+	if d.merged == nil {
+		d.merged = make(map[*node]any)
+	}
+	d.merged[n] = v
+	return v, nil
 }
 
 func newDecoder(opts *decoderOptions) *decoder {
@@ -525,6 +555,9 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 			continue
 		}
 
+		if !d.scalarKeyFitsTag(keyNode) {
+			continue
+		}
 		keyName, _ := d.keyText(keyNode)
 
 		idx, ok := sf.byName[keyName]
@@ -934,6 +967,9 @@ func (d *decoder) mergeEntry(v reflect.Value, sf *structFields, keyNode, valNode
 	if err := d.countAliasNode(keyNode); err != nil {
 		return err
 	}
+	if !d.scalarKeyFitsTag(keyNode) {
+		return nil
+	}
 	name, scalar := d.keyText(keyNode)
 	if scalar && filled.names[name] {
 		return nil
@@ -1056,82 +1092,11 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 		return d.scalarToAny(n), nil
 
 	case nodeMapping:
-		if err := d.checkDuplicateKeys(n); err != nil {
-			return nil, err
+		if !mergeSource {
+			defer d.mergeScope()()
+			return d.decodeMappingToAny(n, false)
 		}
-		if d.opts.useOrderedMap {
-			return d.decodeMappingToOrderedMap(n)
-		}
-		m := make(map[string]any, len(n.children)/2)
-		var written map[string]bool
-		if mergeSource {
-			written = make(map[string]bool, len(n.children)/2)
-		}
-		for i := 0; i < len(n.children)-1; i += 2 {
-			keyNode := n.children[i]
-			valNode := n.children[i+1]
-
-			if isMergeKey(keyNode) {
-				d.mergeSource = true
-				merged, err := d.decodeToAny(valNode)
-				d.mergeSource = false
-				if err != nil {
-					return nil, err
-				}
-				sources, ok := mergeSources[map[string]any](merged)
-				if !ok {
-					d.addMergeError(valNode)
-				}
-				for _, mm := range sources {
-					for k, v := range mm {
-						if _, exists := m[k]; !exists {
-							m[k] = v
-						}
-					}
-				}
-				continue
-			}
-
-			// A mapping or sequence key cannot be a string key; report it
-			// rather than letting such keys collide.
-			var keyStr string
-			switch keyNode.kind {
-			case nodeScalar:
-				if !d.keyFitsTag(keyNode) {
-					continue
-				}
-				keyStr = keyNode.value
-			case nodeAlias:
-				target, err := d.aliasTarget(keyNode)
-				if err != nil {
-					return nil, err
-				}
-				if target.kind != nodeScalar {
-					d.addKeyTypeError(keyNode, target.kind, reflect.TypeFor[map[string]any]())
-					continue
-				}
-				if !d.keyFitsTag(target) {
-					continue
-				}
-				keyStr = target.value
-			default:
-				d.addKeyTypeError(keyNode, keyNode.kind, reflect.TypeFor[map[string]any]())
-				continue
-			}
-
-			if written != nil {
-				if written[keyStr] {
-					continue
-				}
-				written[keyStr] = true
-			}
-			val, err := d.decodeToAny(valNode)
-			if err != nil {
-				return nil, err
-			}
-			m[keyStr] = val
-		}
-		return m, nil
+		return d.decodeMergeSourceToAny(n, func() (any, error) { return d.decodeMappingToAny(n, true) })
 
 	case nodeSequence:
 		s := make([]any, 0, len(n.children))
@@ -1147,6 +1112,87 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 	}
 
 	return nil, nil
+}
+
+// decodeMappingToAny decodes mapping n into a map[string]any, or a MapSlice
+// under [WithOrderedMap]. A merge source keeps the first of a repeated key.
+func (d *decoder) decodeMappingToAny(n *node, mergeSource bool) (any, error) {
+	if err := d.checkDuplicateKeys(n); err != nil {
+		return nil, err
+	}
+	if d.opts.useOrderedMap {
+		return d.decodeMappingToOrderedMap(n)
+	}
+	m := make(map[string]any, len(n.children)/2)
+	var written map[string]bool
+	if mergeSource {
+		written = make(map[string]bool, len(n.children)/2)
+	}
+	for i := 0; i < len(n.children)-1; i += 2 {
+		keyNode := n.children[i]
+		valNode := n.children[i+1]
+
+		if isMergeKey(keyNode) {
+			d.mergeSource = true
+			merged, err := d.decodeToAny(valNode)
+			d.mergeSource = false
+			if err != nil {
+				return nil, err
+			}
+			sources, ok := mergeSources[map[string]any](merged)
+			if !ok {
+				d.addMergeError(valNode)
+			}
+			for _, mm := range sources {
+				for k, v := range mm {
+					if _, exists := m[k]; !exists {
+						m[k] = v
+					}
+				}
+			}
+			continue
+		}
+
+		// A mapping or sequence key cannot be a string key; report it
+		// rather than letting such keys collide.
+		var keyStr string
+		switch keyNode.kind {
+		case nodeScalar:
+			if !d.keyFitsTag(keyNode) {
+				continue
+			}
+			keyStr = keyNode.value
+		case nodeAlias:
+			target, err := d.aliasTarget(keyNode)
+			if err != nil {
+				return nil, err
+			}
+			if target.kind != nodeScalar {
+				d.addKeyTypeError(keyNode, target.kind, reflect.TypeFor[map[string]any]())
+				continue
+			}
+			if !d.keyFitsTag(target) {
+				continue
+			}
+			keyStr = target.value
+		default:
+			d.addKeyTypeError(keyNode, keyNode.kind, reflect.TypeFor[map[string]any]())
+			continue
+		}
+
+		if written != nil {
+			if written[keyStr] {
+				continue
+			}
+			written[keyStr] = true
+		}
+		val, err := d.decodeToAny(valNode)
+		if err != nil {
+			return nil, err
+		}
+		m[keyStr] = val
+	}
+	return m, nil
 }
 
 // mergeSources returns the mappings of type M that a decoded merge value
@@ -1177,6 +1223,7 @@ func (d *decoder) decodeIntoMapSlice(n *node, v reflect.Value) error {
 	prev := d.opts.useOrderedMap
 	d.opts.useOrderedMap = true
 	defer func() { d.opts.useOrderedMap = prev }()
+	defer d.mergeScope()()
 	if err := d.checkDuplicateKeys(n); err != nil {
 		return err
 	}
@@ -1201,7 +1248,9 @@ func (d *decoder) decodeMappingToOrderedMap(n *node) (MapSlice, error) {
 		valNode := n.children[i+1]
 
 		if isMergeKey(keyNode) {
+			d.mergeSource = true
 			src, err := d.decodeToAny(valNode)
+			d.mergeSource = false
 			if err != nil {
 				return nil, err
 			}
@@ -1368,9 +1417,6 @@ func resolveCoreTag(tag, val string) (any, bool) {
 		if errors.Is(err, strconv.ErrRange) && isDecimalFloat(val) {
 			return Number(val), true
 		}
-		if errors.Is(err, strconv.ErrRange) {
-			return val, true
-		}
 	}
 	return nil, false
 }
@@ -1398,6 +1444,20 @@ func bigIntNumber(s string) (Number, bool) {
 // which a null spelling is not null.
 func isNonNullTag(tag string) bool {
 	return tag == tagBool || tag == tagInt || tag == tagFloat || tag == tagStr
+}
+
+// scalarKeyFitsTag reports whether key k, or the scalar an alias key names,
+// fits its core tag, recording a type error when it does not. A mapping or
+// sequence key, or an alias with no anchor, is left to the caller.
+func (d *decoder) scalarKeyFitsTag(k *node) bool {
+	if k.kind == nodeAlias {
+		target, err := d.aliasTarget(k)
+		if err != nil {
+			return true
+		}
+		k = target
+	}
+	return k.kind != nodeScalar || d.keyFitsTag(k)
 }
 
 // keyFitsTag reports whether scalar key k fits its !!null, !!bool, !!int or

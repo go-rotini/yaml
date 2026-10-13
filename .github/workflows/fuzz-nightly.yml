@@ -24,7 +24,7 @@ jobs:
           go-version: "1.26.x"
           check-latest: true
 
-      # The matrix is every fuzz target go test finds, so a new target runs here as well.
+      # The matrix is every fuzz target go test finds, so a new or renamed target runs here too.
       - name: List the fuzz targets
         id: list
         run: |

@@ -29,10 +29,10 @@ type scanner struct {
 	propCheck         *propertyCheck
 }
 
-// propertyCheck is a node property at the start of a line that is not
-// indented enough to belong to the value before it. It is valid only when
-// the line holds an implicit key that the property starts, which shows as a
-// key token inserted at idx by the time the line is scanned.
+// propertyCheck is a node, or a node property, at the start of a line that
+// is not indented enough to belong to the value before it. It is valid only
+// when the line holds an implicit key that it starts, which shows as a key
+// token inserted at idx by the time the line is scanned.
 type propertyCheck struct {
 	line int
 	idx  int
@@ -226,6 +226,31 @@ func (s *scanner) scanBlockToken() error {
 		return s.scanBlockValue()
 	}
 
+	if ch != '}' && ch != ']' && s.col-1 <= s.indent {
+		for _, tk := range slices.Backward(s.tokens) {
+			// Properties before this node are skipped; an alias is a whole
+			// node, so one before this ends the check.
+			if tk.kind == tokenComment || tk.kind == tokenAnchor || tk.kind == tokenTag {
+				continue
+			}
+			// A node here is not indented enough to be the pending value,
+			// so it must start an implicit key on this line; the check waits
+			// until the line is scanned to see whether one was found.
+			if tk.kind == tokenValue && tk.pos.Line < s.line && s.propCheck == nil {
+				msg := "node not indented enough"
+				if ch == '&' || ch == '!' {
+					msg = "node property not indented enough"
+				}
+				s.propCheck = &propertyCheck{
+					line: s.line,
+					idx:  len(s.tokens),
+					err:  &SyntaxError{Message: msg, Pos: s.position()},
+				}
+			}
+			break
+		}
+	}
+
 	if ch == '{' {
 		return s.scanFlowStart(tokenFlowMappingStart)
 	}
@@ -236,26 +261,6 @@ func (s *scanner) scanBlockToken() error {
 		return &SyntaxError{Message: fmt.Sprintf("unexpected '%c' in block context", ch), Pos: s.position()}
 	}
 
-	if (ch == '&' || ch == '*' || ch == '!') && s.col-1 <= s.indent {
-		for _, tk := range slices.Backward(s.tokens) {
-			// Properties before this one are skipped; an alias is a whole
-			// node, so one before this ends the check.
-			if tk.kind == tokenComment || tk.kind == tokenAnchor || tk.kind == tokenTag {
-				continue
-			}
-			// These properties cannot belong to the pending value, so they
-			// must start an implicit key on this line; the check waits until
-			// the line is scanned to see whether one was found.
-			if tk.kind == tokenValue && tk.pos.Line < s.line && s.propCheck == nil {
-				s.propCheck = &propertyCheck{
-					line: s.line,
-					idx:  len(s.tokens),
-					err:  &SyntaxError{Message: "node property not indented enough", Pos: s.position()},
-				}
-			}
-			break
-		}
-	}
 	if ch == '&' {
 		return s.scanAnchor()
 	}
@@ -449,7 +454,9 @@ blockValueLoop:
 				insertIdx--
 				continue
 			}
-			if prev.kind == tokenFlowSequenceEnd || prev.kind == tokenFlowMappingEnd {
+			// An implicit key is on one line, so a collection that ended on an
+			// earlier line is the value before an empty key.
+			if (prev.kind == tokenFlowSequenceEnd || prev.kind == tokenFlowMappingEnd) && prev.pos.Line == colonLine {
 				flowDepth := 1
 				startKind := tokenFlowSequenceStart
 				if prev.kind == tokenFlowMappingEnd {
@@ -566,8 +573,10 @@ func (s *scanner) scanFlowEnd(kind tokenKind) error {
 					keyInsertIdx++
 				}
 			}
-			if mapInsertIdx >= 0 && mapInsertIdx < len(s.tokens) {
-				col = s.tokens[mapInsertIdx].pos.Column - 1
+			// The mapping is indented to its first key, which properties on an
+			// earlier line do not move.
+			if keyInsertIdx >= 0 && keyInsertIdx < len(s.tokens) {
+				col = s.tokens[keyInsertIdx].pos.Column - 1
 			}
 			if s.flow == 0 && insertIdx >= 0 && insertIdx < len(s.tokens) &&
 				s.tokens[insertIdx].pos.Line < pos.Line {
@@ -1181,6 +1190,9 @@ func (s *scanner) scanPlainScalar() error {
 	pos := s.position()
 	startIndent := s.col
 
+	if s.flow == 0 && s.peek() == ',' {
+		return &SyntaxError{Message: "plain scalar cannot start with ','", Pos: pos}
+	}
 	if s.flow > 0 {
 		ch := s.peek()
 		if ch == '-' || ch == '?' || ch == ':' {

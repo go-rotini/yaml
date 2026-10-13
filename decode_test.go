@@ -5403,6 +5403,7 @@ func FuzzNodeRoundTrip(f *testing.F) {
 	f.Add([]byte("--- !!map\n!!str a: !!int 1\n--- !local%21 x"))
 	f.Add([]byte("{0: !0,!0 0}"))
 	f.Add([]byte("a: &x\n&k b: 1\n"))
+	f.Add([]byte(": &b{}\n#00\n!0 :"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > 4096 {

@@ -1555,9 +1555,22 @@ func TestMergeFanOutIsBounded(t *testing.T) {
 	if err := Unmarshal(in, &m); err != nil || m["top"]["a"] != 1 {
 		t.Errorf("map: got %v, %v", m["top"], err)
 	}
-	var a any
-	if err := Unmarshal(in, &a); !errors.Is(err, ErrAliasExpansion) {
-		t.Errorf("any: got %v, want an alias expansion error", err)
+	var a map[string]any
+	if err := Unmarshal(in, &a); err != nil || !reflect.DeepEqual(a["top"], map[string]any{"a": int64(1)}) {
+		t.Errorf("any: got %v, %v", a["top"], err)
+	}
+	var o any
+	if err := UnmarshalWithOptions(in, &o, WithOrderedMap()); err != nil {
+		t.Errorf("ordered: %v", err)
+	} else if ms := o.(MapSlice); !reflect.DeepEqual(ms[len(ms)-1].Value, MapSlice{{Key: "a", Value: int64(1)}}) {
+		t.Errorf("ordered: got %v", ms[len(ms)-1].Value)
+	}
+	var ms MapSlice
+	if err := Unmarshal(in, &ms); err != nil {
+		t.Errorf("MapSlice: %v", err)
+	}
+	if _, err := ToJSON(in); err != nil {
+		t.Errorf("ToJSON: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("decoding took %v", elapsed)
@@ -1690,6 +1703,26 @@ func TestCoreTagsCheckedForPointersAndAnyKeys(t *testing.T) {
 	var v any
 	if err := Unmarshal([]byte("? !!int 1\n: a"), &v); err != nil || !reflect.DeepEqual(v, map[string]any{"1": "a"}) {
 		t.Errorf("fitting key tag: got %#v, %v", v, err)
+	}
+
+	// Struct keys, written or merged, are checked too.
+	for _, in := range []string{"!!int a: 1\nb: 2", "z: &k !!int a\n*k : 1\nb: 2", "m: &m {!!bool x: 1}\n<<: *m\nb: 2"} {
+		var st struct{ A, X, B int }
+		if err := Unmarshal([]byte(in), &st); !errors.Is(err, ErrType) || st.A != 0 || st.X != 0 || st.B != 2 {
+			t.Errorf("%q into struct: got %+v, %v", in, st, err)
+		}
+	}
+
+	// A !!float out of range that is not a decimal is a type error, not text.
+	for _, in := range []string{"x: !!float 0x1p99999", "x: !!float 1_0e400"} {
+		var a any
+		if err := Unmarshal([]byte(in), &a); !errors.Is(err, ErrType) {
+			t.Errorf("%q into any: got %#v, %v", in, a, err)
+		}
+	}
+	var big any
+	if err := Unmarshal([]byte("x: !!float 1e400"), &big); err != nil || !reflect.DeepEqual(big, map[string]any{"x": Number("1e400")}) {
+		t.Errorf("decimal !!float 1e400: got %#v, %v", big, err)
 	}
 }
 

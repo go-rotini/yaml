@@ -1496,23 +1496,46 @@ func collectKYAMLComments(docs []*node) map[string][]Comment {
 // countKYAMLKeys counts how often each scalar key value appears in the AST,
 // so collectKYAMLComments can drop comments anchored on ambiguous keys.
 func countKYAMLKeys(n *node, counts map[string]int) {
+	c := keyCounter{counts: counts}
+	c.count(n, 1)
+}
+
+// keyCounter counts key names for countKYAMLKeys. Format writes an anchored
+// node again in place of each alias to it, so the keys below an alias count
+// as repeated.
+type keyCounter struct {
+	counts   map[string]int
+	expanded map[*node]bool
+}
+
+func (c *keyCounter) count(n *node, weight int) {
 	if n == nil {
 		return
 	}
 	switch n.kind {
+	case nodeAlias:
+		if n.ref == nil || n.ref.n == nil || c.expanded[n.ref.n] {
+			return
+		}
+		if c.expanded == nil {
+			c.expanded = make(map[*node]bool)
+		}
+		c.expanded[n.ref.n] = true
+		c.count(n.ref.n, 2)
 	case nodeMapping:
 		for i := 0; i+1 < len(n.children); i += 2 {
 			k := n.children[i]
+			if k != nil && k.kind == nodeAlias && k.ref != nil && k.ref.n != nil {
+				k = k.ref.n
+			}
 			if k != nil && k.kind == nodeScalar && k.value != "" {
-				counts[k.value]++
+				c.counts[k.value] += weight
 			}
-			if i+1 < len(n.children) {
-				countKYAMLKeys(n.children[i+1], counts)
-			}
+			c.count(n.children[i+1], weight)
 		}
 	case nodeSequence:
-		for _, c := range n.children {
-			countKYAMLKeys(c, counts)
+		for _, child := range n.children {
+			c.count(child, weight)
 		}
 	}
 }
