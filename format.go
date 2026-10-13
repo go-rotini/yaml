@@ -746,6 +746,9 @@ func quoteKYAMLString(s string) string {
 // escapeKYAMLLine applies the KYAML escape table to s and returns the body
 // without surrounding quotes.
 func escapeKYAMLLine(s string) string {
+	if !needsKYAMLEscape(s) {
+		return s
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
@@ -802,6 +805,17 @@ func escapeKYAMLLine(s string) string {
 		i += size
 	}
 	return b.String()
+}
+
+// needsKYAMLEscape reports whether escapeKYAMLLine changes s: whether s holds
+// a byte other than printable ASCII, or a double quote or backslash.
+func needsKYAMLEscape(s string) bool {
+	for i := range len(s) {
+		if c := s[i]; c < 0x20 || c >= 0x7F || c == '"' || c == '\\' {
+			return true
+		}
+	}
+	return false
 }
 
 // typeAmbiguousKeys lists scalars that KYAML requires be double-quoted

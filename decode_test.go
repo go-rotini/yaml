@@ -5265,9 +5265,9 @@ func BenchmarkUnmarshalMedium(b *testing.B) {
 }
 
 func BenchmarkUnmarshalLarge(b *testing.B) {
-	data, err := os.ReadFile("../../k8s.yaml")
+	data, err := os.ReadFile("testdata/acceptance/k8s.yaml")
 	if err != nil {
-		b.Skip("k8s.yaml not found")
+		b.Fatal(err)
 	}
 	var out map[string]any
 	b.ResetTimer()

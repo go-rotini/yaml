@@ -1,6 +1,7 @@
 package yaml
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"strings"
@@ -17,6 +18,7 @@ type scanner struct {
 	tokens            []token
 	indent            int
 	indents           []int
+	blockBuf          []byte // scratch for block scalar values, reused across them
 	flow              int
 	docStarted        bool
 	scanErr           error
@@ -58,7 +60,7 @@ func (s *scanner) checkProperty() error {
 func newScanner(src []byte) *scanner {
 	return &scanner{
 		src:               src,
-		tokens:            make([]token, 0, len(src)/8+4),
+		tokens:            make([]token, 0, tokenCapacity(src)),
 		line:              1,
 		col:               1,
 		indent:            -1,
@@ -66,6 +68,15 @@ func newScanner(src []byte) *scanner {
 		docStartMapIndent: -1,
 		flowBlockIndent:   -1,
 	}
+}
+
+// tokenCapacity estimates how many tokens src scans to, so the token slice
+// rarely grows. Block YAML yields about four to five tokens per line; the
+// estimate is capped so blank-line-heavy input does not over-allocate, and
+// never falls below one token per eight bytes, which suits flow input.
+func tokenCapacity(src []byte) int {
+	lines := bytes.Count(src, []byte{'\n'}) + 1
+	return max(len(src)/8+4, min(lines*6+16, len(src)/2+16))
 }
 
 func (s *scanner) scan() ([]token, error) {
@@ -780,7 +791,7 @@ headerLoop:
 		blockIndent = s.indent + 1
 	}
 
-	var lines []string
+	b := blockBuilder{buf: s.blockBuf[:0], folded: style == scalarFolded}
 	var trailingNewlines int
 
 	for !s.atEnd() {
@@ -794,10 +805,10 @@ headerLoop:
 		if s.atEnd() || s.peek() == '\n' || s.peek() == '\r' {
 			if lineCol > blockIndent {
 				for range trailingNewlines {
-					lines = append(lines, "")
+					b.addEmpty()
 				}
 				trailingNewlines = 0
-				lines = append(lines, strings.Repeat(" ", lineCol-blockIndent))
+				b.addLine(lineCol-blockIndent, nil)
 			} else {
 				trailingNewlines++
 			}
@@ -826,7 +837,7 @@ headerLoop:
 		}
 
 		for range trailingNewlines {
-			lines = append(lines, "")
+			b.addEmpty()
 		}
 		trailingNewlines = 0
 
@@ -834,11 +845,7 @@ headerLoop:
 		for !s.atEnd() && s.peek() != '\n' && s.peek() != '\r' {
 			s.advance(1)
 		}
-		line := string(s.src[contentStart:s.pos])
-		if lineCol > blockIndent {
-			line = strings.Repeat(" ", lineCol-blockIndent) + line
-		}
-		lines = append(lines, line)
+		b.addLine(lineCol-blockIndent, s.src[contentStart:s.pos])
 
 		if !s.atEnd() {
 			s.advanceLine()
@@ -846,7 +853,7 @@ headerLoop:
 	}
 
 	var result string
-	if len(lines) == 0 {
+	if b.lines == 0 {
 		switch chomp {
 		case 1:
 			if trailingNewlines > 0 {
@@ -856,76 +863,151 @@ headerLoop:
 			result = ""
 		}
 	} else {
-		if style == scalarLiteral {
-			result = strings.Join(lines, "\n")
-		} else {
-			var buf strings.Builder
-			emptyCount := 0
-			lastContentLine := ""
-			wroteContent := false
-			for _, line := range lines {
-				if line == "" {
-					emptyCount++
-					continue
-				}
-				if !wroteContent {
-					for range emptyCount {
-						buf.WriteByte('\n')
-					}
-					buf.WriteString(line)
-					emptyCount = 0
-					wroteContent = true
-					lastContentLine = line
-					continue
-				}
-				if emptyCount > 0 {
-					n := emptyCount
-					moreIndented := (line != "" && (line[0] == ' ' || line[0] == '\t')) ||
-						(lastContentLine != "" && (lastContentLine[0] == ' ' || lastContentLine[0] == '\t'))
-					if moreIndented {
-						n++
-					}
-					for range n {
-						buf.WriteByte('\n')
-					}
-					buf.WriteString(line)
-					emptyCount = 0
-				} else {
-					moreIndentPrev := lastContentLine != "" && (lastContentLine[0] == ' ' || lastContentLine[0] == '\t')
-					moreIndentCurr := line != "" && (line[0] == ' ' || line[0] == '\t')
-					if moreIndentPrev || moreIndentCurr {
-						buf.WriteByte('\n')
-					} else {
-						buf.WriteByte(' ')
-					}
-					buf.WriteString(line)
-				}
-				lastContentLine = line
-			}
-			for range emptyCount {
-				buf.WriteByte('\n')
-			}
-			result = buf.String()
-		}
-
+		b.finish()
 		switch chomp {
 		case -1:
 		case 0:
-			result += "\n"
+			b.buf = append(b.buf, '\n')
 		case 1:
-			result += "\n"
-			result += strings.Repeat("\n", trailingNewlines)
+			b.buf = append(b.buf, '\n')
+			for range trailingNewlines {
+				b.buf = append(b.buf, '\n')
+			}
 		}
+		result = string(b.buf)
 	}
+	s.blockBuf = b.buf
 
 	s.emit(tokenScalar, result, pos)
 	s.tokens[len(s.tokens)-1].style = style
 	return nil
 }
 
+// blockBuilder assembles the value of a block scalar line by line: joined
+// with newlines for a literal scalar, folded for a folded one. A line is
+// pad spaces followed by content, and an empty line is one with neither.
+type blockBuilder struct {
+	buf    []byte
+	folded bool
+	lines  int // lines added, empty ones included
+
+	// Folding state: the empty lines not yet written, whether a non-empty
+	// line has been written, and whether the last one began with a space
+	// or tab.
+	emptyCount   int
+	wroteContent bool
+	lastIndented bool
+}
+
+// addEmpty adds an empty line.
+func (b *blockBuilder) addEmpty() {
+	if b.folded {
+		b.emptyCount++
+	} else if b.lines > 0 {
+		b.buf = append(b.buf, '\n')
+	}
+	b.lines++
+}
+
+// addLine adds a line of pad spaces followed by content; pad below zero
+// counts as zero. The line is not empty: pad is positive or content is not
+// empty.
+func (b *blockBuilder) addLine(pad int, content []byte) {
+	pad = max(pad, 0)
+	if !b.folded {
+		if b.lines > 0 {
+			b.buf = append(b.buf, '\n')
+		}
+		b.appendLine(pad, content)
+		b.lines++
+		return
+	}
+	indented := pad > 0 || content[0] == ' ' || content[0] == '\t'
+	switch {
+	case !b.wroteContent:
+		for range b.emptyCount {
+			b.buf = append(b.buf, '\n')
+		}
+		b.wroteContent = true
+	case b.emptyCount > 0:
+		n := b.emptyCount
+		if indented || b.lastIndented {
+			n++
+		}
+		for range n {
+			b.buf = append(b.buf, '\n')
+		}
+	case indented || b.lastIndented:
+		b.buf = append(b.buf, '\n')
+	default:
+		b.buf = append(b.buf, ' ')
+	}
+	b.appendLine(pad, content)
+	b.emptyCount = 0
+	b.lastIndented = indented
+	b.lines++
+}
+
+func (b *blockBuilder) appendLine(pad int, content []byte) {
+	for range pad {
+		b.buf = append(b.buf, ' ')
+	}
+	b.buf = append(b.buf, content...)
+}
+
+// finish writes the empty lines that end a folded scalar.
+func (b *blockBuilder) finish() {
+	for range b.emptyCount {
+		b.buf = append(b.buf, '\n')
+	}
+	b.emptyCount = 0
+}
+
+// simpleQuotedEnd reports the offset of the closing quote when the quoted
+// scalar starting at s.pos is one line with no escapes, so its value is the
+// source bytes as they are. A doubled single quote is an escape.
+func (s *scanner) simpleQuotedEnd(quote byte) (int, bool) {
+	for i := s.pos; i < len(s.src); i++ {
+		switch c := s.src[i]; c {
+		case quote:
+			if quote == '\'' && i+1 < len(s.src) && s.src[i+1] == '\'' {
+				return 0, false
+			}
+			return i, true
+		case '\n', '\r':
+			return 0, false
+		case '\\':
+			if quote == '"' {
+				return 0, false
+			}
+		}
+	}
+	return 0, false
+}
+
+// finishSimpleQuoted emits the quoted scalar that simpleQuotedEnd found to
+// close at end, and moves past its closing quote.
+func (s *scanner) finishSimpleQuoted(end int, pos Position, style scalarStyle) error {
+	value := string(s.src[s.pos:end])
+	s.col += end + 1 - s.pos
+	s.pos = end + 1
+	return s.finishQuoted(value, pos, style)
+}
+
+// finishQuoted emits a quoted scalar and checks what follows it.
+func (s *scanner) finishQuoted(value string, pos Position, style scalarStyle) error {
+	s.emitScalar(value, pos)
+	s.tokens[len(s.tokens)-1].style = style
+	s.skipSpaces()
+	return s.checkTrailingAfterQuoted()
+}
+
 func (s *scanner) scanSingleQuotedScalar() error {
 	pos := s.position()
 	s.advance(1)
+	if end, ok := s.simpleQuotedEnd('\''); ok {
+		return s.finishSimpleQuoted(end, pos, scalarSingleQuoted)
+	}
 	var buf []byte
 
 	for {
@@ -977,18 +1059,15 @@ func (s *scanner) scanSingleQuotedScalar() error {
 		s.advance(1)
 	}
 
-	s.emitScalar(string(buf), pos)
-	s.tokens[len(s.tokens)-1].style = scalarSingleQuoted
-	s.skipSpaces()
-	if err := s.checkTrailingAfterQuoted(); err != nil {
-		return err
-	}
-	return nil
+	return s.finishQuoted(string(buf), pos, scalarSingleQuoted)
 }
 
 func (s *scanner) scanDoubleQuotedScalar() error {
 	pos := s.position()
 	s.advance(1)
+	if end, ok := s.simpleQuotedEnd('"'); ok {
+		return s.finishSimpleQuoted(end, pos, scalarDoubleQuoted)
+	}
 	var buf []byte
 	lastEscapeEnd := 0
 
@@ -1137,13 +1216,7 @@ func (s *scanner) scanDoubleQuotedScalar() error {
 		s.advance(1)
 	}
 
-	s.emitScalar(string(buf), pos)
-	s.tokens[len(s.tokens)-1].style = scalarDoubleQuoted
-	s.skipSpaces()
-	if err := s.checkTrailingAfterQuoted(); err != nil {
-		return err
-	}
-	return nil
+	return s.finishQuoted(string(buf), pos, scalarDoubleQuoted)
 }
 
 func (s *scanner) checkTrailingAfterQuoted() error {
@@ -1186,6 +1259,40 @@ func (s *scanner) scanHexEscape(n int) (rune, error) {
 	return val, nil
 }
 
+// scalarParts collects the line pieces of a plain scalar. A single-line
+// scalar, the common case, is held in first without allocating a slice.
+type scalarParts struct {
+	first string
+	rest  []string // every piece, once there is more than one
+	n     int
+}
+
+func (p *scalarParts) add(piece string) {
+	switch p.n {
+	case 0:
+		p.first = piece
+	case 1:
+		p.rest = append(make([]string, 0, 4), p.first, piece)
+	default:
+		p.rest = append(p.rest, piece)
+	}
+	p.n++
+}
+
+func (p *scalarParts) last() string {
+	if p.n == 1 {
+		return p.first
+	}
+	return p.rest[len(p.rest)-1]
+}
+
+func (p *scalarParts) join() string {
+	if p.n <= 1 {
+		return p.first
+	}
+	return strings.Join(p.rest, "")
+}
+
 func (s *scanner) scanPlainScalar() error {
 	pos := s.position()
 	startIndent := s.col
@@ -1207,7 +1314,7 @@ func (s *scanner) scanPlainScalar() error {
 		}
 	}
 
-	var parts []string
+	var parts scalarParts
 	hadNewline := false
 	lastTextLine := pos.Line
 
@@ -1245,20 +1352,19 @@ func (s *scanner) scanPlainScalar() error {
 			s.advance(1)
 		}
 
-		text := strings.TrimRight(string(s.src[start:s.pos]), " \t")
+		text := string(bytes.TrimRight(s.src[start:s.pos], " \t"))
 		if text == "" && hadNewline {
 			break
 		}
 
-		if hadNewline && len(parts) > 0 {
-			lastPart := parts[len(parts)-1]
-			if lastPart == "\n" {
-				parts = append(parts, text)
+		if hadNewline && parts.n > 0 {
+			if parts.last() == "\n" {
+				parts.add(text)
 			} else {
-				parts = append(parts, " "+text)
+				parts.add(" " + text)
 			}
 		} else {
-			parts = append(parts, text)
+			parts.add(text)
 		}
 		lastTextLine = s.line
 
@@ -1335,13 +1441,13 @@ func (s *scanner) scanPlainScalar() error {
 
 		if emptyLines > 0 {
 			for range emptyLines {
-				parts = append(parts, "\n")
+				parts.add("\n")
 			}
 		}
 		hadNewline = true
 	}
 
-	value := strings.Join(parts, "")
+	value := parts.join()
 
 	if s.line != pos.Line {
 		if s.flow == 0 && s.line == lastTextLine {
@@ -1419,6 +1525,9 @@ func (s *scanner) pushIndent(col int, kind tokenKind) {
 func (s *scanner) pushIndentLevel(col int) {
 	if s.flow+len(s.indents) >= maxNestingDepth && s.scanErr == nil {
 		s.scanErr = &SyntaxError{Message: fmt.Sprintf("exceeded max nesting depth %d", maxNestingDepth), Pos: s.position()}
+	}
+	if s.indents == nil {
+		s.indents = make([]int, 0, 8)
 	}
 	s.indents = append(s.indents, s.indent)
 	s.indent = col

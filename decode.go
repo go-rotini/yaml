@@ -505,12 +505,13 @@ func (d *decoder) decodeMappingToMap(n *node, v reflect.Value) error {
 		written = make(map[any]bool, len(n.children)/2)
 	}
 
+	sc := d.entryScratchFor(v.Type())
 	for i := 0; i < len(n.children)-1; i += 2 {
 		keyNode := n.children[i]
 		if isMergeKey(keyNode) {
 			continue
 		}
-		if _, err := d.decodeMapEntry(v, keyNode, n.children[i+1], written, false); err != nil {
+		if _, err := d.decodeMapEntry(v, keyNode, n.children[i+1], written, false, &sc); err != nil {
 			return err
 		}
 	}
@@ -566,7 +567,7 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 		}
 		if !ok {
 			if m, found := inlineMapField(v, sf); found {
-				if _, err := d.decodeMapEntry(m, keyNode, valNode, inlineWritten, false); err != nil {
+				if _, err := d.decodeMapEntry(m, keyNode, valNode, inlineWritten, false, nil); err != nil {
 					return err
 				}
 				continue
@@ -740,9 +741,10 @@ func inlineMapField(v reflect.Value, sf *structFields) (reflect.Value, bool) {
 // set it. written, when not nil, holds the decoded keys the mapping has set
 // and gains this one. A merged entry (merge true) whose key is in written is
 // skipped; a written entry whose key is in written is a [DuplicateKeyError]
-// under [WithDisallowDuplicateKey].
-func (d *decoder) decodeMapEntry(m reflect.Value, keyNode, valNode *node, written map[any]bool, merge bool) (bool, error) {
-	key := reflect.New(m.Type().Key()).Elem()
+// under [WithDisallowDuplicateKey]. sc, when not nil, supplies the key and
+// value to decode into.
+func (d *decoder) decodeMapEntry(m reflect.Value, keyNode, valNode *node, written map[any]bool, merge bool, sc *entryScratch) (bool, error) {
+	key := sc.keyFor(m.Type().Key())
 	typeErrs := len(d.typeErrors)
 	if err := d.decode(keyNode, key); err != nil {
 		return false, err
@@ -769,12 +771,75 @@ func (d *decoder) decodeMapEntry(m reflect.Value, keyNode, valNode *node, writte
 		}
 		written[k] = true
 	}
-	val := reflect.New(m.Type().Elem()).Elem()
+	val := sc.valFor(m.Type().Elem())
 	if err := d.decode(valNode, val); err != nil {
 		return false, err
 	}
 	m.SetMapIndex(key, val)
 	return true, nil
+}
+
+// entryScratch holds a key and a value that the entries of one map decode
+// into in turn, which is safe because SetMapIndex copies them. Each is
+// reused only when its type is reusable; otherwise every entry gets a fresh
+// one.
+type entryScratch struct {
+	reuseKey, reuseVal bool
+	key, val           reflect.Value
+}
+
+// entryScratchFor returns the scratch for the entries of map type t.
+func (d *decoder) entryScratchFor(t reflect.Type) entryScratch {
+	return entryScratch{
+		reuseKey: d.reusableEntryType(t.Key()),
+		reuseVal: d.reusableEntryType(t.Elem()),
+	}
+}
+
+// keyFor returns the zero key of type t to decode an entry's key into.
+func (sc *entryScratch) keyFor(t reflect.Type) reflect.Value {
+	if sc == nil || !sc.reuseKey {
+		return reflect.New(t).Elem()
+	}
+	return reuseZero(&sc.key, t)
+}
+
+// valFor returns the zero value of type t to decode an entry's value into.
+func (sc *entryScratch) valFor(t reflect.Type) reflect.Value {
+	if sc == nil || !sc.reuseVal {
+		return reflect.New(t).Elem()
+	}
+	return reuseZero(&sc.val, t)
+}
+
+// reuseZero zeroes and returns *slot, making it on first use.
+func reuseZero(slot *reflect.Value, t reflect.Type) reflect.Value {
+	if slot.IsValid() {
+		slot.SetZero()
+	} else {
+		*slot = reflect.New(t).Elem()
+	}
+	return *slot
+}
+
+// reusableEntryType reports whether a map key or element of type t can be
+// decoded into a reused value: a boolean, number or string type with no
+// methods and no custom unmarshaler, so no code but the decoder's sees its
+// address.
+func (d *decoder) reusableEntryType(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+	default:
+		return false
+	}
+	if t.NumMethod() > 0 || reflect.PointerTo(t).NumMethod() > 0 {
+		return false
+	}
+	_, custom := d.opts.customUnmarshalers[t]
+	return !custom
 }
 
 func (d *decoder) applyDefaults(v reflect.Value, sf *structFields, seen map[string]bool) error {
@@ -959,7 +1024,7 @@ func (d *decoder) decodeMappingMerge(n *node, v reflect.Value, filled *mergeSet)
 // shows it is already set, and records it in filled when it sets it.
 func (d *decoder) mergeEntry(v reflect.Value, sf *structFields, keyNode, valNode *node, filled *mergeSet) error {
 	if sf == nil {
-		_, err := d.decodeMapEntry(v, keyNode, valNode, filled.keys, true)
+		_, err := d.decodeMapEntry(v, keyNode, valNode, filled.keys, true, nil)
 		return err
 	}
 	// A struct target reads the key's text without decoding it, so count it
@@ -987,7 +1052,7 @@ func (d *decoder) mergeField(v reflect.Value, sf *structFields, name string, key
 	idx, ok := sf.byName[name]
 	if !ok || sf.fields[idx].inline {
 		if m, found := inlineMapField(v, sf); found {
-			return d.decodeMapEntry(m, keyNode, valNode, filled.keys, true)
+			return d.decodeMapEntry(m, keyNode, valNode, filled.keys, true, nil)
 		}
 		return false, nil
 	}

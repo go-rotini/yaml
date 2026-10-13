@@ -284,14 +284,15 @@ func TestParserEmptyFlowSequence(t *testing.T) {
 func TestNewParserFields(t *testing.T) {
 	tokens := []token{{kind: tokenStreamStart}, {kind: tokenStreamEnd}}
 	p := newParser(tokens)
-	if p.anchors == nil {
-		t.Error("expected non-nil anchors map")
+	if p.anchors != nil || p.docAnchors != nil || p.tagHandles != nil {
+		t.Error("expected anchor and tag handle maps to be allocated lazily")
 	}
-	if p.tagHandles == nil {
-		t.Error("expected non-nil tagHandles map")
+	if got, err := p.resolveTag("!!str"); err != nil || got != "tag:yaml.org,2002:str" {
+		t.Errorf("expected default !! handle, got %q, %v", got, err)
 	}
-	if p.tagHandles["!!"] != "tag:yaml.org,2002:" {
-		t.Errorf("expected default !! handle, got %q", p.tagHandles["!!"])
+	p.setTagHandle("!e!", "tag:example.com,")
+	if p.tagHandles["!!"] != "tag:yaml.org,2002:" || p.tagHandles["!"] != "!" {
+		t.Errorf("expected default handles kept, got %v", p.tagHandles)
 	}
 }
 
@@ -344,7 +345,7 @@ func TestResolveTagEmpty(t *testing.T) {
 
 func TestResolveTagCustomHandle(t *testing.T) {
 	p := newParser(nil)
-	p.tagHandles["!e!"] = "tag:example.com,"
+	p.setTagHandle("!e!", "tag:example.com,")
 	got, err := p.resolveTag("!e!name")
 	if err != nil {
 		t.Fatal(err)
@@ -356,7 +357,7 @@ func TestResolveTagCustomHandle(t *testing.T) {
 
 func TestResolveTagCustomPrimaryHandle(t *testing.T) {
 	p := newParser(nil)
-	p.tagHandles["!"] = "tag:example.com,"
+	p.setTagHandle("!", "tag:example.com,")
 	got, err := p.resolveTag("!name")
 	if err != nil {
 		t.Fatal(err)
@@ -610,7 +611,7 @@ func TestParseBlockSequenceErrorInItem(t *testing.T) {
 
 func TestParseResolveTagCustomHandleFallthrough(t *testing.T) {
 	p := newParser(nil)
-	p.tagHandles["!custom!"] = "tag:custom.org,"
+	p.setTagHandle("!custom!", "tag:custom.org,")
 	got, err := p.resolveTag("!custom!type")
 	if err != nil {
 		t.Fatal(err)

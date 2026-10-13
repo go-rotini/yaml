@@ -122,10 +122,18 @@ func (e *encoder) encode(v reflect.Value) ([]byte, error) {
 	if err := checkBlockIndent(e.opts); err != nil {
 		return nil, err
 	}
+	// Most documents fit the initial buffer, which saves growing it from
+	// nothing one doubling at a time.
+	if e.buf == nil {
+		e.buf = make([]byte, 0, 256)
+	}
 	e.buf = e.buf[:0]
 	e.keys = keyTracker{on: e.opts.comments != nil}
 	if err := e.marshalValue(v, 0, false); err != nil {
 		return nil, err
+	}
+	if len(e.buf) == 0 {
+		e.buf = nil // as if nothing was ever appended
 	}
 	if len(e.buf) > 0 && e.buf[len(e.buf)-1] != '\n' {
 		e.buf = append(e.buf, '\n')
@@ -378,7 +386,7 @@ func (e *encoder) marshalNonPointer(v reflect.Value, indent int, inline bool) er
 		}
 	}
 
-	if v.CanInterface() {
+	if v.CanInterface() && v.Type().NumMethod() > 0 {
 		iface := v.Interface()
 		if m, ok := iface.(MarshalerContext); ok {
 			result, err := m.MarshalYAML(e.ctx)
@@ -935,7 +943,7 @@ func (e *encoder) rawMarshal(v reflect.Value) (raw []byte, ok bool, err error) {
 		}
 		return out[0].Bytes(), true, nil
 	}
-	switch m := v.Interface().(type) {
+	switch m := methodValue(v).(type) {
 	case BytesMarshaler:
 		raw, err = m.MarshalYAML()
 		return raw, true, err
@@ -1005,6 +1013,16 @@ func (e *encoder) writeRawYAML(raw []byte, indent int, inline bool) error {
 	return nil
 }
 
+// methodValue returns v as an interface value for asserting the marshaler
+// interfaces, or nil when v's type has no methods and so implements none,
+// which spares boxing a copy of v.
+func methodValue(v reflect.Value) any {
+	if v.Type().NumMethod() == 0 {
+		return nil
+	}
+	return v.Interface()
+}
+
 // maxMarshalerChain bounds how many MarshalYAML results resolveMarshaler
 // follows when each returns another marshaler.
 const maxMarshalerChain = 64
@@ -1028,7 +1046,7 @@ func (e *encoder) resolveMarshaler(v reflect.Value) (reflect.Value, error) {
 			result any
 			err    error
 		)
-		switch m := v.Interface().(type) {
+		switch m := methodValue(v).(type) {
 		case MarshalerContext:
 			result, err = m.MarshalYAML(e.ctx)
 		case Marshaler:

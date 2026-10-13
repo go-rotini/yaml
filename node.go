@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 )
 
-type nodeKind int
+type nodeKind uint8
 
 const (
 	nodeDocument nodeKind = iota
@@ -19,22 +19,22 @@ const (
 )
 
 type node struct {
-	kind             nodeKind
 	pos              Position
 	tag              string
 	anchor           string
 	alias            string
 	ref              *anchorSlot // the anchor an alias refers to, nil if not defined before it in its document
 	value            string
-	style            scalarStyle
 	children         []*node
+	headComment      string
+	lineComment      string
+	footComment      string
+	kind             nodeKind
+	style            scalarStyle
 	implicit         bool
 	flow             bool
 	docStartExplicit bool
 	docEndExplicit   bool
-	headComment      string
-	lineComment      string
-	footComment      string
 }
 
 // NodeKind identifies the type of a YAML [Node] in the AST.
@@ -134,6 +134,9 @@ func exportNode(n *node) *Node {
 		HeadComment:   n.headComment,
 		Comment:       n.lineComment,
 		FootComment:   n.footComment,
+	}
+	if len(n.children) > 0 {
+		pub.Children = make([]*Node, 0, len(n.children))
 	}
 	for _, child := range n.children {
 		pub.Children = append(pub.Children, exportNode(child))

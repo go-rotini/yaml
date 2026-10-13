@@ -20,9 +20,9 @@ type parser struct {
 	tokens            []token
 	pos               int
 	depth             int
-	anchors           map[string]*node
+	anchors           map[string]*node       // nil until an anchor is defined
 	docAnchors        map[string]*anchorSlot // anchors defined so far in the current document
-	tagHandles        map[string]string
+	tagHandles        map[string]string      // nil for the default handles, until a %TAG directive
 	maxNodes          int
 	nodeCount         int
 	seenYAMLDirective bool
@@ -33,24 +33,110 @@ type parser struct {
 	// accepts a head comment consumes it via attachPendingHead. Powers
 	// comment preservation through Format() for KYAML re-emission.
 	pendingHead string
+
+	// slab holds preallocated nodes that newNode hands out, so a parse
+	// allocates nodes in a few chunks rather than one at a time.
+	// slabTotal counts the nodes allocated so far and nodeEstimate is the
+	// expected total, from the token stream.
+	slab         []node
+	slabTotal    int
+	nodeEstimate int
+
+	// stack holds the children of the collections being parsed, so each
+	// collection's children are allocated once, at their final length.
+	stack []*node
 }
 
 func newParser(tokens []token) *parser {
+	est := 1
+	for i := range tokens {
+		switch tokens[i].kind {
+		case tokenScalar, tokenAlias, tokenDocumentStart,
+			tokenBlockMappingStart, tokenBlockSequenceStart,
+			tokenFlowMappingStart, tokenFlowSequenceStart:
+			est++
+		}
+	}
 	return &parser{
-		tokens:     tokens,
-		anchors:    make(map[string]*node),
-		docAnchors: make(map[string]*anchorSlot),
-		tagHandles: map[string]string{
+		tokens:       tokens,
+		nodeEstimate: est,
+	}
+}
+
+// newNode returns a zeroed node. Nodes come from chunks that double in size
+// up to the estimate of nodes still to parse, so a parse that fails early
+// allocates little more than it used.
+func (p *parser) newNode() *node {
+	if len(p.slab) == 0 {
+		p.growSlab()
+	}
+	n := &p.slab[0]
+	p.slab = p.slab[1:]
+	return n
+}
+
+// growSlab allocates the next chunk of nodes.
+func (p *parser) growSlab() {
+	size := max(min(max(p.slabTotal, 32), p.nodeEstimate-p.slabTotal), 8)
+	p.slab = make([]node, size)
+	p.slabTotal += size
+}
+
+// collectionNode returns a document, mapping or sequence node at pos.
+func (p *parser) collectionNode(kind nodeKind, pos Position, flow bool) *node {
+	n := p.newNode()
+	n.kind = kind
+	n.pos = pos
+	n.flow = flow
+	return n
+}
+
+// stackMark returns the stack height a new collection starts its children
+// at. The stack is allocated on first use, sized for small documents.
+func (p *parser) stackMark() int {
+	if p.stack == nil {
+		p.stack = make([]*node, 0, min(p.nodeEstimate, 64))
+	}
+	return len(p.stack)
+}
+
+// emptyScalar returns an implicit empty scalar node at pos. These nodes are
+// not in the slab estimate and are allocated on their own.
+func (p *parser) emptyScalar(pos Position) *node {
+	return &node{kind: nodeScalar, pos: pos, implicit: true}
+}
+
+// popChildren returns the children pushed on the stack since mark, in a
+// slice of their exact length, or nil when there are none, and pops them.
+func (p *parser) popChildren(mark int) []*node {
+	if len(p.stack) == mark {
+		return nil
+	}
+	children := make([]*node, len(p.stack)-mark)
+	copy(children, p.stack[mark:])
+	clear(p.stack[mark:])
+	p.stack = p.stack[:mark]
+	return children
+}
+
+// setTagHandle defines a tag handle for the current document.
+func (p *parser) setTagHandle(handle, prefix string) {
+	if p.tagHandles == nil {
+		p.tagHandles = map[string]string{
 			"!":  "!",
 			"!!": "tag:yaml.org,2002:",
-		},
+		}
 	}
+	p.tagHandles[handle] = prefix
 }
 
 // defineAnchor starts the definition of anchor name in the current document.
 // Aliases that follow refer to it, until the name is defined again.
 func (p *parser) defineAnchor(name string) *anchorSlot {
 	slot := &anchorSlot{}
+	if p.docAnchors == nil {
+		p.docAnchors = make(map[string]*anchorSlot)
+	}
 	p.docAnchors[name] = slot
 	return slot
 }
@@ -59,6 +145,9 @@ func (p *parser) defineAnchor(name string) *anchorSlot {
 func (p *parser) setAnchor(slot *anchorSlot, name string, n *node) {
 	n.anchor = name
 	slot.n = n
+	if p.anchors == nil {
+		p.anchors = make(map[string]*node)
+	}
 	p.anchors[name] = n
 }
 
@@ -90,10 +179,7 @@ func (p *parser) parse() ([]*node, error) {
 			}
 		}
 
-		p.tagHandles = map[string]string{
-			"!":  "!",
-			"!!": "tag:yaml.org,2002:",
-		}
+		p.tagHandles = nil
 		p.seenYAMLDirective = false
 		clear(p.docAnchors)
 		hasDirectives := false
@@ -150,7 +236,7 @@ func (p *parser) parseDirective() error {
 		}
 		handle := parts[1]
 		prefix := parts[2]
-		p.tagHandles[handle] = prefix
+		p.setTagHandle(handle, prefix)
 	case strings.HasPrefix(text, "%YAML"):
 		parts := strings.Fields(text)
 		if len(parts) != 2 {
@@ -246,10 +332,7 @@ func unhex(c byte) int {
 func (p *parser) parseDocument() (*node, error) {
 	p.skipComments()
 
-	doc := &node{
-		kind: nodeDocument,
-		pos:  p.peek().pos,
-	}
+	doc := p.collectionNode(nodeDocument, p.peek().pos, false)
 
 	if p.peek().kind == tokenDocumentStart {
 		doc.docStartExplicit = true
@@ -261,7 +344,7 @@ func (p *parser) parseDocument() (*node, error) {
 	if p.peek().kind == tokenDocumentEnd {
 		doc.docEndExplicit = true
 		if doc.docStartExplicit {
-			doc.children = append(doc.children, &node{kind: nodeScalar, value: "", pos: p.peek().pos, implicit: true})
+			doc.children = append(doc.children, p.emptyScalar(p.peek().pos))
 		}
 		p.advance()
 		if !doc.docStartExplicit && len(doc.children) == 0 {
@@ -272,7 +355,7 @@ func (p *parser) parseDocument() (*node, error) {
 
 	if p.peek().kind == tokenStreamEnd {
 		if doc.docStartExplicit {
-			doc.children = append(doc.children, &node{kind: nodeScalar, value: "", pos: p.peek().pos, implicit: true})
+			doc.children = append(doc.children, p.emptyScalar(p.peek().pos))
 			return doc, nil
 		}
 		return nil, nil
@@ -374,7 +457,7 @@ func (p *parser) parseNode() (*node, error) {
 		t.kind == tokenFlowEntry || t.kind == tokenFlowMappingEnd ||
 		t.kind == tokenFlowSequenceEnd
 	if (anchor != "" || tag != "") && emptyTokens {
-		n := &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true}
+		n := p.emptyScalar(t.pos)
 		if anchor != "" {
 			p.setAnchor(slot, anchor, n)
 		}
@@ -396,21 +479,19 @@ func (p *parser) parseNode() (*node, error) {
 		if anchor != "" {
 			return nil, &SyntaxError{Message: "anchor on alias node is not allowed", Pos: t.pos}
 		}
-		n = &node{
-			kind:  nodeAlias,
-			alias: t.value,
-			pos:   t.pos,
-			ref:   p.docAnchors[t.value],
-		}
+		n = p.newNode()
+		n.kind = nodeAlias
+		n.alias = t.value
+		n.pos = t.pos
+		n.ref = p.docAnchors[t.value]
 		p.advance()
 
 	case tokenScalar:
-		n = &node{
-			kind:  nodeScalar,
-			value: t.value,
-			style: t.style,
-			pos:   t.pos,
-		}
+		n = p.newNode()
+		n.kind = nodeScalar
+		n.value = t.value
+		n.style = t.style
+		n.pos = t.pos
 		p.advance()
 
 	case tokenBlockMappingStart:
@@ -455,7 +536,7 @@ func (p *parser) parseNode() (*node, error) {
 		return p.parseNode()
 
 	case tokenBlockEnd, tokenDocumentStart, tokenDocumentEnd, tokenStreamEnd:
-		n = &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true}
+		n = p.emptyScalar(t.pos)
 
 	default:
 		return nil, &SyntaxError{
@@ -481,10 +562,8 @@ func (p *parser) parseNode() (*node, error) {
 }
 
 func (p *parser) parseBlockMapping() (*node, error) {
-	mapping := &node{
-		kind: nodeMapping,
-		pos:  p.peek().pos,
-	}
+	mark := p.stackMark()
+	mapping := p.collectionNode(nodeMapping, p.peek().pos, false)
 
 	// A mapping reached without a start token opened no indentation level
 	// of its own, so the next BlockEnd belongs to an enclosing collection.
@@ -541,12 +620,12 @@ func (p *parser) parseBlockMapping() (*node, error) {
 				return nil, err
 			}
 			p.attachPendingHead(key)
-			mapping.children = append(mapping.children, key, val)
+			p.stack = append(p.stack, key, val)
 			continue
 		}
 
 		if t.kind == tokenValue {
-			key := &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true}
+			key := p.emptyScalar(t.pos)
 			p.attachPendingHead(key)
 			p.advance()
 			p.skipComments()
@@ -554,7 +633,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 			vk := p.peek().kind
 			if vk == tokenBlockEnd || vk == tokenKey || vk == tokenDocumentStart ||
 				vk == tokenDocumentEnd || vk == tokenStreamEnd || vk == tokenValue {
-				val = &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true}
+				val = p.emptyScalar(t.pos)
 			} else {
 				var parseErr error
 				val, parseErr = p.parseNode()
@@ -563,9 +642,9 @@ func (p *parser) parseBlockMapping() (*node, error) {
 				}
 			}
 			if val == nil {
-				val = &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true}
+				val = p.emptyScalar(t.pos)
 			}
-			mapping.children = append(mapping.children, key, val)
+			p.stack = append(p.stack, key, val)
 			continue
 		}
 
@@ -591,7 +670,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 				return nil, err
 			}
 			p.attachPendingHead(key)
-			mapping.children = append(mapping.children, key, val)
+			p.stack = append(p.stack, key, val)
 			continue
 		}
 
@@ -602,6 +681,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 		p.advance()
 	}
 
+	mapping.children = p.popChildren(mark)
 	return mapping, nil
 }
 
@@ -609,7 +689,7 @@ func (p *parser) parseMappingEntry() (*node, *node, error) {
 	var key *node
 	var err error
 	if p.peek().kind == tokenValue {
-		key = &node{kind: nodeScalar, value: "", pos: p.peek().pos, implicit: true}
+		key = p.emptyScalar(p.peek().pos)
 	} else {
 		key, err = p.parseNode()
 		if err != nil {
@@ -633,7 +713,7 @@ func (p *parser) parseMappingEntry() (*node, *node, error) {
 	tk := p.peek().kind
 	if tk == tokenBlockEnd || tk == tokenKey || tk == tokenDocumentStart ||
 		tk == tokenDocumentEnd || tk == tokenStreamEnd {
-		value = &node{kind: nodeScalar, value: "", pos: key.pos, implicit: true}
+		value = p.emptyScalar(key.pos)
 	} else {
 		value, err = p.parseNode()
 		if err != nil {
@@ -642,7 +722,7 @@ func (p *parser) parseMappingEntry() (*node, *node, error) {
 	}
 
 	if value == nil {
-		value = &node{kind: nodeScalar, value: "", pos: key.pos, implicit: true}
+		value = p.emptyScalar(key.pos)
 	}
 
 	// Detect an inline comment on the same source line as the value's last
@@ -661,10 +741,8 @@ func (p *parser) parseMappingEntry() (*node, *node, error) {
 }
 
 func (p *parser) parseBlockSequence() (*node, error) {
-	seq := &node{
-		kind: nodeSequence,
-		pos:  p.peek().pos,
-	}
+	mark := p.stackMark()
+	seq := p.collectionNode(nodeSequence, p.peek().pos, false)
 
 	// An indentless sequence (entries at the same column as the parent
 	// mapping key) opens no indentation level, so the scanner emits no
@@ -691,7 +769,7 @@ func (p *parser) parseBlockSequence() (*node, error) {
 		if siblingKey || t.kind == tokenBlockEntry || t.kind == tokenBlockEnd ||
 			t.kind == tokenDocumentStart || t.kind == tokenDocumentEnd ||
 			t.kind == tokenStreamEnd {
-			seq.children = append(seq.children, &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true})
+			p.stack = append(p.stack, p.emptyScalar(t.pos))
 			continue
 		}
 
@@ -715,7 +793,7 @@ func (p *parser) parseBlockSequence() (*node, error) {
 		}
 		if (peekAnchor != "" || peekTag != "") && (p.peek().kind == tokenBlockEntry || p.peek().kind == tokenBlockEnd ||
 			p.peek().kind == tokenDocumentStart || p.peek().kind == tokenDocumentEnd || p.peek().kind == tokenStreamEnd) {
-			empty := &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true}
+			empty := p.emptyScalar(t.pos)
 			if peekAnchor != "" {
 				p.setAnchor(p.defineAnchor(peekAnchor), peekAnchor, empty)
 			}
@@ -726,7 +804,7 @@ func (p *parser) parseBlockSequence() (*node, error) {
 				}
 				empty.tag = resolved
 			}
-			seq.children = append(seq.children, empty)
+			p.stack = append(p.stack, empty)
 			continue
 		}
 		p.pos = savedPos
@@ -736,7 +814,7 @@ func (p *parser) parseBlockSequence() (*node, error) {
 			return nil, err
 		}
 		if item != nil {
-			seq.children = append(seq.children, item)
+			p.stack = append(p.stack, item)
 		}
 	}
 
@@ -751,15 +829,13 @@ func (p *parser) parseBlockSequence() (*node, error) {
 		}
 	}
 
+	seq.children = p.popChildren(mark)
 	return seq, nil
 }
 
 func (p *parser) parseFlowMapping() (*node, error) {
-	mapping := &node{
-		kind: nodeMapping,
-		pos:  p.peek().pos,
-		flow: true,
-	}
+	mark := p.stackMark()
+	mapping := p.collectionNode(nodeMapping, p.peek().pos, true)
 
 	p.advance()
 	// Comments before the first entry attach as a head comment to
@@ -787,7 +863,7 @@ func (p *parser) parseFlowMapping() (*node, error) {
 		var key *node
 		var err error
 		if p.peek().kind == tokenValue || p.peek().kind == tokenFlowMappingEnd || (explicitKey && p.peek().kind == tokenFlowEntry) {
-			key = &node{kind: nodeScalar, value: "", pos: p.peek().pos, implicit: true}
+			key = p.emptyScalar(p.peek().pos)
 		} else {
 			key, err = p.parseNode()
 			if err != nil {
@@ -809,7 +885,7 @@ func (p *parser) parseFlowMapping() (*node, error) {
 			}
 		}
 		if value == nil {
-			value = &node{kind: nodeScalar, value: "", pos: key.pos, implicit: true}
+			value = p.emptyScalar(key.pos)
 		}
 
 		// Detect an inline comment on the same source line as the value's
@@ -824,7 +900,7 @@ func (p *parser) parseFlowMapping() (*node, error) {
 			}
 		}
 
-		mapping.children = append(mapping.children, key, value)
+		p.stack = append(p.stack, key, value)
 
 		p.collectIntoPending()
 		if p.peek().kind == tokenFlowEntry {
@@ -833,8 +909,8 @@ func (p *parser) parseFlowMapping() (*node, error) {
 			// separator also belongs to the value just emitted.
 			if p.pos > 0 && p.peek().kind == tokenComment {
 				prev := p.tokens[p.pos-2]
-				if p.peek().pos.Line == prev.pos.Line && len(mapping.children) >= 2 {
-					tail := mapping.children[len(mapping.children)-1]
+				if p.peek().pos.Line == prev.pos.Line && len(p.stack)-mark >= 2 {
+					tail := p.stack[len(p.stack)-1]
 					if tail.lineComment == "" {
 						tail.lineComment = p.peek().value
 						p.advance()
@@ -848,15 +924,13 @@ func (p *parser) parseFlowMapping() (*node, error) {
 	}
 
 	p.advance()
+	mapping.children = p.popChildren(mark)
 	return mapping, nil
 }
 
 func (p *parser) parseFlowSequence() (*node, error) {
-	seq := &node{
-		kind: nodeSequence,
-		pos:  p.peek().pos,
-		flow: true,
-	}
+	mark := p.stackMark()
+	seq := p.collectionNode(nodeSequence, p.peek().pos, true)
 
 	p.advance()
 	p.skipComments()
@@ -875,7 +949,7 @@ func (p *parser) parseFlowSequence() (*node, error) {
 
 			var key *node
 			if p.peek().kind == tokenValue {
-				key = &node{kind: nodeScalar, value: "", pos: keyPos, implicit: true}
+				key = p.emptyScalar(keyPos)
 			} else {
 				var err error
 				key, err = p.parseNode()
@@ -898,13 +972,13 @@ func (p *parser) parseFlowSequence() (*node, error) {
 					}
 				}
 				if val == nil {
-					val = &node{kind: nodeScalar, value: "", pos: key.pos, implicit: true}
+					val = p.emptyScalar(key.pos)
 				}
-				pair := &node{kind: nodeMapping, pos: key.pos, flow: true}
+				pair := p.collectionNode(nodeMapping, key.pos, true)
 				pair.children = append(pair.children, key, val)
-				seq.children = append(seq.children, pair)
+				p.stack = append(p.stack, pair)
 			} else {
-				seq.children = append(seq.children, key)
+				p.stack = append(p.stack, key)
 			}
 		} else {
 			item, err := p.parseNode()
@@ -912,7 +986,7 @@ func (p *parser) parseFlowSequence() (*node, error) {
 				return nil, err
 			}
 			if item != nil {
-				seq.children = append(seq.children, item)
+				p.stack = append(p.stack, item)
 			}
 		}
 
@@ -926,6 +1000,7 @@ func (p *parser) parseFlowSequence() (*node, error) {
 	}
 
 	p.advance()
+	seq.children = p.popChildren(mark)
 	return seq, nil
 }
 
