@@ -26,6 +26,33 @@ type scanner struct {
 	flowBlockIndent   int
 	explicitKeyLine   int
 	explicitKeyCol    int
+	propCheck         *propertyCheck
+}
+
+// propertyCheck is a node property at the start of a line that is not
+// indented enough to belong to the value before it. It is valid only when
+// the line holds an implicit key that the property starts, which shows as a
+// key token inserted at idx by the time the line is scanned.
+type propertyCheck struct {
+	line int
+	idx  int
+	err  error
+}
+
+// checkProperty reports the pending propertyCheck's error once its line has
+// been scanned without the property starting a key.
+func (s *scanner) checkProperty() error {
+	c := s.propCheck
+	if c == nil || (s.line == c.line && !s.atEnd()) {
+		return nil
+	}
+	s.propCheck = nil
+	if c.idx < len(s.tokens) {
+		if k := s.tokens[c.idx].kind; k == tokenKey || k == tokenBlockMappingStart {
+			return nil
+		}
+	}
+	return c.err
 }
 
 func newScanner(src []byte) *scanner {
@@ -55,6 +82,9 @@ func (s *scanner) scan() ([]token, error) {
 		}
 		if s.scanErr != nil {
 			return nil, s.scanErr
+		}
+		if err := s.checkProperty(); err != nil {
+			return nil, err
 		}
 		if s.pos == prevPos && !s.atEnd() {
 			return nil, &SyntaxError{
@@ -213,8 +243,15 @@ func (s *scanner) scanBlockToken() error {
 			if tk.kind == tokenComment || tk.kind == tokenAnchor || tk.kind == tokenTag {
 				continue
 			}
-			if tk.kind == tokenValue && tk.pos.Line < s.line {
-				return &SyntaxError{Message: "node property not indented enough", Pos: s.position()}
+			// These properties cannot belong to the pending value, so they
+			// must start an implicit key on this line; the check waits until
+			// the line is scanned to see whether one was found.
+			if tk.kind == tokenValue && tk.pos.Line < s.line && s.propCheck == nil {
+				s.propCheck = &propertyCheck{
+					line: s.line,
+					idx:  len(s.tokens),
+					err:  &SyntaxError{Message: "node property not indented enough", Pos: s.position()},
+				}
 			}
 			break
 		}
@@ -503,14 +540,20 @@ func (s *scanner) scanFlowEnd(kind tokenKind) error {
 				}
 				insertIdx--
 			}
+			// Properties before the key belong to it. Ones on earlier lines
+			// belong to the mapping it starts, unless the key is not indented
+			// past the current block, when they belong to the value before it.
 			mapInsertIdx := insertIdx
 			for mapInsertIdx > 0 {
-				pk := s.tokens[mapInsertIdx-1].kind
-				if pk == tokenAnchor || pk == tokenTag {
-					mapInsertIdx--
-				} else {
+				p := s.tokens[mapInsertIdx-1]
+				if p.kind != tokenAnchor && p.kind != tokenTag {
 					break
 				}
+				if s.flow == 0 && insertIdx < len(s.tokens) && p.pos.Line < s.tokens[insertIdx].pos.Line &&
+					s.tokens[mapInsertIdx].pos.Column-1 <= s.indent {
+					break
+				}
+				mapInsertIdx--
 			}
 			keyInsertIdx := insertIdx
 			if insertIdx > 0 && insertIdx < len(s.tokens) {

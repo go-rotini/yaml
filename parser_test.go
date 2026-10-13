@@ -911,3 +911,47 @@ func TestIsValidYAMLVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestPropertiesStartKeyAfterEmptyValue(t *testing.T) {
+	valid := map[string]string{
+		"a: &x\n&k b: 1":         `{"a":null,"b":1}`,
+		"a: !t\n!u b: 1":         `{"a":null,"b":1}`,
+		"- a: !t\n  !u b: 1":     `[{"a":null,"b":1}]`,
+		"a:\n&k b: 1":            `{"a":null,"b":1}`,
+		"a: &x # c\n&k \"b\": 1": `{"a":null,"b":1}`,
+	}
+	for in, want := range valid {
+		if got, err := ToJSON([]byte(in)); err != nil || string(got) != want {
+			t.Errorf("%q: got %s, %v, want %s", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"a: &x\n&k b: 1", "a: !t\n!u b: 1", "- a: !t\n  !u b: 1", "a: &x\n&k [b]: 1\nc: 2", "{0: !0,!0 0}"} {
+		f, err := Parse([]byte(in))
+		if err != nil {
+			t.Errorf("%q: Parse: %v", in, err)
+			continue
+		}
+		out, err := NodeToBytes(f.Docs[0])
+		if err != nil {
+			t.Errorf("%q: NodeToBytes: %v", in, err)
+			continue
+		}
+		if _, err := Parse(out); err != nil {
+			t.Errorf("%q: NodeToBytes wrote %q, which does not parse: %v", in, out, err)
+		}
+	}
+	// A property that cannot start a key on its own line stays an error.
+	for _, in := range []string{"key: &x\n!!map\n  a: b", "a:\n&x b", "a: &x\n&k\nb: 1", "a:\n!t\nb: 1", "a:\n&k [1]"} {
+		var v any
+		if err := Unmarshal([]byte(in), &v); err == nil || !strings.Contains(err.Error(), "not indented enough") {
+			t.Errorf("%q: got %#v, %v", in, v, err)
+		}
+	}
+	// The raw bytes a BytesUnmarshaler receives parse.
+	var r struct {
+		V RawValue `yaml:"v"`
+	}
+	if err := Unmarshal([]byte("v: {0: !t, !u 1: 2}"), &r); err != nil {
+		t.Errorf("RawValue: %v", err)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -244,6 +245,17 @@ func (e *kyamlEmitter) dispatchMarshaler(v reflect.Value, indent int) (handled b
 			// and re-emit to keep the output strictly KYAML.
 			return true, e.emitRawJSONOrText(data, indent)
 		}
+	}
+
+	// A Number is written as a JSON number, or as a string when its text
+	// is not a number, rather than failing in MarshalJSON.
+	if v.Type() == reflect.TypeFor[Number]() {
+		if s, ok := numberJSON(v.String()); ok {
+			e.buf = append(e.buf, s...)
+		} else {
+			e.emitString(v.String(), indent)
+		}
+		return true, nil
 	}
 
 	if v.CanInterface() {
@@ -1346,7 +1358,12 @@ func validateKYAMLScalar(n *node, asKey bool, out *[]KYAMLViolation) {
 	if _, err := strconv.ParseInt(val, 10, 64); err == nil {
 		return
 	}
-	if _, err := strconv.ParseFloat(val, 64); err == nil {
+	_, err := strconv.ParseFloat(val, 64)
+	if errors.Is(err, strconv.ErrRange) && isJSONNumber(val) {
+		// A number beyond the float64 range is still a number.
+		return
+	}
+	if err == nil {
 		lower := strings.ToLower(val)
 		if strings.Contains(lower, "inf") || strings.Contains(lower, "nan") {
 			*out = append(*out, KYAMLViolation{

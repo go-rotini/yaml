@@ -1224,7 +1224,7 @@ func TestTaggedScalarsMustFitTheirTag(t *testing.T) {
 		if err := UnmarshalWithOptions([]byte(in), &v, WithSchema(s)); err != nil {
 			t.Fatal(err)
 		}
-		want := map[string]any{"u": uint64(math.MaxUint64), "big": "18446744073709551616", "f": 1.0, "s": int64(5)}
+		want := map[string]any{"u": uint64(math.MaxUint64), "big": Number("18446744073709551616"), "f": 1.0, "s": int64(5)}
 		if !reflect.DeepEqual(v, want) {
 			t.Errorf("schema %d: got %#v", s, v)
 		}
@@ -1238,11 +1238,11 @@ func TestTaggedScalarsMustFitTheirTag(t *testing.T) {
 func TestNumbersBeyondGoRangesKeepTheirText(t *testing.T) {
 	in := "a: 123456789012345678901234567890\nb: -9223372036854775809\nc: 18446744073709551615\nd: 9223372036854775808\ne: 1e400\nf: 1.5\n"
 	want := map[string]any{
-		"a": "123456789012345678901234567890",
-		"b": "-9223372036854775809",
+		"a": Number("123456789012345678901234567890"),
+		"b": Number("-9223372036854775809"),
 		"c": uint64(math.MaxUint64),
 		"d": uint64(9223372036854775808),
-		"e": "1e400",
+		"e": Number("1e400"),
 		"f": 1.5,
 	}
 	for _, s := range []Schema{CoreSchema, JSONSchema} {
@@ -1251,7 +1251,7 @@ func TestNumbersBeyondGoRangesKeepTheirText(t *testing.T) {
 			t.Errorf("schema %d: got %#v, %v", s, v, err)
 		}
 	}
-	// The text is written back quoted, so it stays exact.
+	// The text is written back as the same plain number.
 	var v map[string]any
 	if err := Unmarshal([]byte(in), &v); err != nil {
 		t.Fatal(err)
@@ -1261,7 +1261,7 @@ func TestNumbersBeyondGoRangesKeepTheirText(t *testing.T) {
 		t.Fatal(err)
 	}
 	var back map[string]any
-	if err := Unmarshal(out, &back); err != nil || !reflect.DeepEqual(back, want) {
+	if err := Unmarshal(out, &back); err != nil || !reflect.DeepEqual(back, want) || string(out) != in {
 		t.Errorf("round trip: wrote %q, read %#v, %v", out, back, err)
 	}
 	// Typed targets still report the overflow.
@@ -1518,4 +1518,243 @@ func TestReferenceDirFilesAreTheCheckedTargets(t *testing.T) {
 	if len(files) != 1 || files[0] != realTarget {
 		t.Errorf("files = %v, want [%s]", files, realTarget)
 	}
+}
+
+// mergeFanOut returns a document whose mapping at each level merges the one
+// below it fan times, so that a naive merge visits fan^levels entries.
+func mergeFanOut(levels, fan int) []byte {
+	var b strings.Builder
+	b.WriteString("l0: &l0 {a: 1}\n")
+	for i := 1; i <= levels; i++ {
+		fmt.Fprintf(&b, "l%d: &l%d {<<: [", i, i)
+		for j := range fan {
+			if j > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "*l%d", i-1)
+		}
+		b.WriteString("]}\n")
+	}
+	fmt.Fprintf(&b, "top:\n  <<: *l%d\n", levels)
+	return []byte(b.String())
+}
+
+func TestMergeFanOutIsBounded(t *testing.T) {
+	in := mergeFanOut(12, 10)
+
+	start := time.Now()
+	var s struct {
+		Top struct {
+			A int `yaml:"a"`
+		} `yaml:"top"`
+	}
+	if err := Unmarshal(in, &s); err != nil || s.Top.A != 1 {
+		t.Errorf("struct: got %+v, %v", s, err)
+	}
+	var m map[string]map[string]int
+	if err := Unmarshal(in, &m); err != nil || m["top"]["a"] != 1 {
+		t.Errorf("map: got %v, %v", m["top"], err)
+	}
+	var a any
+	if err := Unmarshal(in, &a); !errors.Is(err, ErrAliasExpansion) {
+		t.Errorf("any: got %v, want an alias expansion error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("decoding took %v", elapsed)
+	}
+
+	// Merged entries a struct skips still count toward the limit.
+	wide := []byte("base: &b {a: 1, b: 2, c: 3, d: 4, e: 5, f: 6}\ntop: {<<: *b}\n")
+	var none struct {
+		Top struct{} `yaml:"top"`
+	}
+	if err := UnmarshalWithOptions(wide, &none, WithMaxAliasNodes(5)); !errors.Is(err, ErrAliasExpansion) {
+		t.Errorf("struct with skipped keys: got %v, want an alias expansion error", err)
+	}
+}
+
+func TestNumberBeyondGoRanges(t *testing.T) {
+	in := "a: 18446744073709551616\nb: 0x1ffffffffffffffff\nc: +1.e400\nd: !!int 0X1FFFFFFFFFFFFFFFF\n"
+	var v map[string]any
+	if err := Unmarshal([]byte(in), &v); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"a": Number("18446744073709551616"),
+		"b": Number("0x1ffffffffffffffff"),
+		"c": Number("+1.e400"),
+		"d": Number("36893488147419103231"),
+	}
+	if !reflect.DeepEqual(v, want) {
+		t.Fatalf("got %#v", v)
+	}
+
+	out, err := Marshal(v)
+	if err != nil || string(out) != "a: 18446744073709551616\nb: 0x1ffffffffffffffff\nc: +1.e400\nd: 36893488147419103231\n" {
+		t.Errorf("Marshal: got %q, %v", out, err)
+	}
+	js, err := ToJSON([]byte(in))
+	if err != nil || string(js) != `{"a":18446744073709551616,"b":36893488147419103231,"c":1e400,"d":36893488147419103231}` {
+		t.Errorf("ToJSON: got %s, %v", js, err)
+	}
+	ky, err := Format([]byte(in))
+	if err != nil || !strings.Contains(string(ky), "b: 36893488147419103231,") || !strings.Contains(string(ky), "c: 1e400,") {
+		t.Errorf("Format: got %s, %v", ky, err)
+	}
+	jc, err := MarshalWithOptions(map[string]any{"x": Number("-007.5e999")}, WithJSON(true))
+	if err != nil || !strings.Contains(string(jc), "-7.5e999") {
+		t.Errorf("WithJSON: got %s, %v", jc, err)
+	}
+
+	// A JSON unmarshaler sees a number.
+	var f struct {
+		J jsonFloat `yaml:"j"`
+	}
+	if err := UnmarshalWithOptions([]byte("j: {x: 18446744073709551616}"), &f, WithJSONUnmarshaler()); err != nil || f.J.X != 1.8446744073709552e19 {
+		t.Errorf("JSON unmarshaler: got %v, %v", f.J.X, err)
+	}
+
+	// An !!int whose digits overflow before a bad character is not an int.
+	var tagged any
+	if err := Unmarshal([]byte("x: !!int 20000000000000000000A"), &tagged); !errors.Is(err, ErrType) {
+		t.Errorf("malformed big !!int: got %#v, %v", tagged, err)
+	}
+	// KYAML output holds a number beyond float64 as a number.
+	if out, err := Format([]byte("x: 1E700")); err != nil || !ValidKYAML(out) || !strings.Contains(string(out), "x: 1E700") {
+		t.Errorf("Format 1E700: got %s, %v", out, err)
+	}
+
+	// Text that is not a number is a string.
+	bad := map[string]any{"x": Number("abc")}
+	if out, err := Marshal(bad); err != nil || string(out) != "x: abc\n" {
+		t.Errorf("Marshal non-number: got %q, %v", out, err)
+	}
+	if out, err := MarshalKYAML(bad); err != nil || !strings.Contains(string(out), `x: "abc"`) {
+		t.Errorf("MarshalKYAML non-number: got %q, %v", out, err)
+	}
+	if _, err := json.Marshal(bad); err == nil {
+		t.Error("json.Marshal non-number: want an error")
+	}
+}
+
+type jsonFloat struct{ X float64 }
+
+func (j *jsonFloat) UnmarshalJSON(b []byte) error {
+	var m struct {
+		X float64 `json:"x"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return err
+	}
+	j.X = m.X
+	return nil
+}
+
+func TestCoreTagsCheckedForPointersAndAnyKeys(t *testing.T) {
+	for _, in := range []string{"p: !!int ~", "p: !!int", "p: !!float null", "p: !!bool ~"} {
+		var v struct{ P *int }
+		if err := Unmarshal([]byte(in), &v); !errors.Is(err, ErrType) {
+			t.Errorf("%q into *int: got %v, %v", in, v.P, err)
+		}
+	}
+	var s struct{ S *string }
+	if err := Unmarshal([]byte("s: !!bool null"), &s); !errors.Is(err, ErrType) {
+		t.Errorf("!!bool null into *string: got %v", err)
+	}
+	if err := Unmarshal([]byte("s: !!str null"), &s); err != nil || s.S == nil || *s.S != "null" {
+		t.Errorf("!!str null into *string: got %v, %v", s.S, err)
+	}
+	var i struct{ I int }
+	if err := Unmarshal([]byte("i: !!int"), &i); !errors.Is(err, ErrType) {
+		t.Errorf("empty !!int into int: got %v", err)
+	}
+	var str struct{ S string }
+	if err := Unmarshal([]byte("s: !!str null"), &str); err != nil || str.S != "null" {
+		t.Errorf("!!str null into string: got %q, %v", str.S, err)
+	}
+	for _, in := range []string{"p: ~", "p: !!null ~", "p:"} {
+		v := struct{ P *int }{P: new(int)}
+		if err := Unmarshal([]byte(in), &v); err != nil || v.P != nil {
+			t.Errorf("%q into *int: got %v, %v", in, v.P, err)
+		}
+	}
+
+	for _, in := range []string{"? !!int A\n: 1\nb: 2", "a: &k !!int A\n*k : 1"} {
+		for _, opts := range [][]DecodeOption{nil, {WithOrderedMap()}} {
+			var v any
+			if err := UnmarshalWithOptions([]byte(in), &v, opts...); !errors.Is(err, ErrType) {
+				t.Errorf("%q (%d options) into any: got %#v, %v", in, len(opts), v, err)
+			}
+		}
+	}
+	var v any
+	if err := Unmarshal([]byte("? !!int 1\n: a"), &v); err != nil || !reflect.DeepEqual(v, map[string]any{"1": "a"}) {
+		t.Errorf("fitting key tag: got %#v, %v", v, err)
+	}
+}
+
+func TestMergeSourceDuplicateKeysKeepFirst(t *testing.T) {
+	in := "m:\n  <<: [{z, z: 0}, {y: 1, y: 2}]\n  n: {x: 1, x: 2}\n"
+	var a map[string]map[string]any
+	if err := Unmarshal([]byte(in), &a); err != nil {
+		t.Fatal(err)
+	}
+	var v any
+	if err := Unmarshal([]byte(in), &v); err != nil {
+		t.Fatal(err)
+	}
+	var ms MapSlice
+	if err := Unmarshal([]byte(in), &ms); err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		M struct {
+			Z *int           `yaml:"z"`
+			Y int            `yaml:"y"`
+			N map[string]any `yaml:"n"`
+		} `yaml:"m"`
+	}
+	if err := Unmarshal([]byte(in), &s); err != nil {
+		t.Fatal(err)
+	}
+	m := v.(map[string]any)["m"].(map[string]any)
+	if m["z"] != nil || m["y"] != int64(1) || a["m"]["z"] != nil || a["m"]["y"] != int64(1) || s.M.Z != nil || s.M.Y != 1 {
+		t.Errorf("merged duplicates: any %v, typed map %v, struct %+v", m, a["m"], s.M)
+	}
+	inner := ms[0].Value.(MapSlice)
+	if inner[0].Key != "z" || inner[0].Value != nil || inner[1].Key != "y" || inner[1].Value != int64(1) {
+		t.Errorf("MapSlice: %v", inner)
+	}
+	// A repeated key in an ordinary mapping keeps the last value.
+	if n := m["n"].(map[string]any); n["x"] != int64(2) || s.M.N["x"] != int64(2) {
+		t.Errorf("nested duplicates: any %v, struct %v", n, s.M.N)
+	}
+}
+
+func TestDecoderKeepsParseError(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("a: 1\n---\nb: [\n"))
+	var v any
+	first := dec.Decode(&v)
+	if first == nil || errors.Is(first, io.EOF) {
+		t.Fatalf("first Decode: %v", first)
+	}
+	if again := dec.Decode(&v); again != first {
+		t.Errorf("second Decode: %v, want %v", again, first)
+	}
+}
+
+func TestUnmarshalerErrorSinglePrefix(t *testing.T) {
+	var r struct {
+		V positionedRaw `yaml:"v"`
+	}
+	err := Unmarshal([]byte("v: x"), &r)
+	if err == nil || strings.Count(err.Error(), "yaml: ") != 1 {
+		t.Errorf("got %v", err)
+	}
+}
+
+type positionedRaw struct{}
+
+func (*positionedRaw) UnmarshalYAML([]byte) error {
+	return Unmarshal([]byte("a: &x\n!!map\n  b: c"), new(any))
 }

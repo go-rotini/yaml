@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"slices"
 	"strconv"
@@ -25,6 +26,10 @@ type decoder struct {
 	aliasLimit int // limit on aliasNodes; zero means no limit
 	depth      int
 	typeErrors []string
+	// mergeSource is set while decoding a merge value into any: the
+	// mappings it names keep the first of a repeated key, as merging into a
+	// typed target does.
+	mergeSource bool
 }
 
 func newDecoder(opts *decoderOptions) *decoder {
@@ -99,7 +104,7 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 	}
 
 	if v.Kind() == reflect.Pointer {
-		if n.kind == nodeScalar && n.style == scalarPlain && isNullValue(n.value) {
+		if n.kind == nodeScalar && n.style == scalarPlain && isNullValue(n.value) && !isNonNullTag(n.tag) {
 			v.Set(reflect.Zero(v.Type()))
 			return nil
 		}
@@ -223,7 +228,8 @@ func (d *decoder) decodeAlias(n *node, v reflect.Value) error {
 }
 
 func (d *decoder) decodeScalar(n *node, v reflect.Value) error {
-	if n.implicit && n.value == "" {
+	// An empty value is absent unless a tag says it is not null.
+	if n.implicit && n.value == "" && !isNonNullTag(n.tag) {
 		return d.fillAbsent(v, n.pos)
 	}
 
@@ -255,7 +261,7 @@ func (d *decoder) decodeScalar(n *node, v reflect.Value) error {
 		}
 	}
 
-	if n.style == scalarPlain && isNullValue(val) {
+	if n.style == scalarPlain && isNullValue(val) && n.tag != tagStr {
 		v.Set(reflect.Zero(v.Type()))
 		return d.fillAbsent(v, n.pos)
 	}
@@ -428,10 +434,12 @@ func hasMergeKey(n *node) bool {
 
 // mergeSet records the entries a mapping has set, so that its merges never
 // replace one: field and key names for a struct target, decoded keys for a
-// map target.
+// map target. done holds the source mappings already merged in full; merging
+// one again cannot set anything new, so it is skipped.
 type mergeSet struct {
 	names map[string]bool
 	keys  map[any]bool
+	done  map[*node]bool
 }
 
 // explicitNames returns the scalar keys written in mapping n itself, or nil
@@ -866,7 +874,17 @@ func (d *decoder) decodeMerge(n *node, v reflect.Value, filled *mergeSet) error 
 		}
 		return nil
 	case nodeMapping:
-		return d.decodeMappingMerge(n, v, filled)
+		if filled.done[n] {
+			return nil
+		}
+		if err := d.decodeMappingMerge(n, v, filled); err != nil {
+			return err
+		}
+		if filled.done == nil {
+			filled.done = make(map[*node]bool)
+		}
+		filled.done[n] = true
+		return nil
 	}
 	d.addMergeError(n)
 	return nil
@@ -909,6 +927,11 @@ func (d *decoder) decodeMappingMerge(n *node, v reflect.Value, filled *mergeSet)
 func (d *decoder) mergeEntry(v reflect.Value, sf *structFields, keyNode, valNode *node, filled *mergeSet) error {
 	if sf == nil {
 		_, err := d.decodeMapEntry(v, keyNode, valNode, filled.keys, true)
+		return err
+	}
+	// A struct target reads the key's text without decoding it, so count it
+	// here, as decoding it into a map would.
+	if err := d.countAliasNode(keyNode); err != nil {
 		return err
 	}
 	name, scalar := d.keyText(keyNode)
@@ -1018,6 +1041,9 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 		return d.decodeToAny(target)
 	}
 
+	mergeSource := d.mergeSource
+	d.mergeSource = false
+
 	if n.kind == nodeDocument {
 		if len(n.children) == 0 {
 			return nil, nil
@@ -1037,12 +1063,18 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 			return d.decodeMappingToOrderedMap(n)
 		}
 		m := make(map[string]any, len(n.children)/2)
+		var written map[string]bool
+		if mergeSource {
+			written = make(map[string]bool, len(n.children)/2)
+		}
 		for i := 0; i < len(n.children)-1; i += 2 {
 			keyNode := n.children[i]
 			valNode := n.children[i+1]
 
 			if isMergeKey(keyNode) {
+				d.mergeSource = true
 				merged, err := d.decodeToAny(valNode)
+				d.mergeSource = false
 				if err != nil {
 					return nil, err
 				}
@@ -1065,6 +1097,9 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 			var keyStr string
 			switch keyNode.kind {
 			case nodeScalar:
+				if !d.keyFitsTag(keyNode) {
+					continue
+				}
 				keyStr = keyNode.value
 			case nodeAlias:
 				target, err := d.aliasTarget(keyNode)
@@ -1075,12 +1110,21 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 					d.addKeyTypeError(keyNode, target.kind, reflect.TypeFor[map[string]any]())
 					continue
 				}
+				if !d.keyFitsTag(target) {
+					continue
+				}
 				keyStr = target.value
 			default:
 				d.addKeyTypeError(keyNode, keyNode.kind, reflect.TypeFor[map[string]any]())
 				continue
 			}
 
+			if written != nil {
+				if written[keyStr] {
+					continue
+				}
+				written[keyStr] = true
+			}
 			val, err := d.decodeToAny(valNode)
 			if err != nil {
 				return nil, err
@@ -1092,6 +1136,7 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 	case nodeSequence:
 		s := make([]any, 0, len(n.children))
 		for _, child := range n.children {
+			d.mergeSource = mergeSource
 			val, err := d.decodeToAny(child)
 			if err != nil {
 				return nil, err
@@ -1185,6 +1230,9 @@ func (d *decoder) decodeMappingToOrderedMap(n *node) (MapSlice, error) {
 		var key any
 		switch keyNode.kind {
 		case nodeScalar:
+			if !d.keyFitsTag(keyNode) {
+				continue
+			}
 			key = keyNode.value
 		case nodeAlias:
 			target, err := d.aliasTarget(keyNode)
@@ -1192,6 +1240,9 @@ func (d *decoder) decodeMappingToOrderedMap(n *node) (MapSlice, error) {
 				return nil, err
 			}
 			if target.kind == nodeScalar {
+				if !d.keyFitsTag(target) {
+					continue
+				}
 				key = target.value
 				break
 			}
@@ -1283,8 +1334,8 @@ func isCoreTag(tag string) bool {
 
 // resolveCoreTag returns the value of a scalar explicitly tagged !!null,
 // !!bool, !!int or !!float: an !!int is an int64, or a uint64 above the
-// int64 range, and a number beyond those ranges or the float64 range keeps
-// its text. It reports false for other tags and for a value that does not
+// int64 range, and a number beyond those ranges or the float64 range is a
+// [Number]. It reports false for other tags and for a value that does not
 // fit its tag.
 func resolveCoreTag(tag, val string) (any, bool) {
 	switch tag {
@@ -1305,18 +1356,62 @@ func resolveCoreTag(tag, val string) (any, bool) {
 			return u, true
 		}
 		if errors.Is(err, strconv.ErrRange) {
-			return val, true
+			if n, ok := bigIntNumber(val); ok {
+				return n, true
+			}
 		}
 	case tagFloat:
 		f, err := parseFloat(val)
 		if err == nil {
 			return f, true
 		}
+		if errors.Is(err, strconv.ErrRange) && isDecimalFloat(val) {
+			return Number(val), true
+		}
 		if errors.Is(err, strconv.ErrRange) {
 			return val, true
 		}
 	}
 	return nil, false
+}
+
+// bigIntNumber returns the integer s, which parseInt rejects as out of
+// range, as a [Number]: its own text when that is a Core schema integer,
+// otherwise in decimal. It reports false when s is not an integer at all,
+// as parseInt can report the range before it reaches a bad character.
+func bigIntNumber(s string) (Number, bool) {
+	if coreIntSyntax(s) {
+		return Number(s), true
+	}
+	digits, base, err := intDigits(s)
+	if err != nil {
+		return "", false
+	}
+	z, ok := new(big.Int).SetString(digits, base)
+	if !ok {
+		return "", false
+	}
+	return Number(z.String()), true
+}
+
+// isNonNullTag reports whether tag is !!bool, !!int, !!float or !!str, under
+// which a null spelling is not null.
+func isNonNullTag(tag string) bool {
+	return tag == tagBool || tag == tagInt || tag == tagFloat || tag == tagStr
+}
+
+// keyFitsTag reports whether scalar key k fits its !!null, !!bool, !!int or
+// !!float tag, if it has one, recording a type error when it does not. A key
+// decoded into any keeps its text, but is checked as its value would be.
+func (d *decoder) keyFitsTag(k *node) bool {
+	if !isCoreTag(k.tag) {
+		return true
+	}
+	if _, ok := resolveCoreTag(k.tag, k.value); !ok {
+		d.addTagError(k)
+		return false
+	}
+	return true
 }
 
 // addTagError records that scalar n carries a !!null, !!bool, !!int or
@@ -1338,12 +1433,9 @@ func scalarToAnyCore(val string) any {
 	case coreUint:
 		return c.u
 	case coreFloat:
-		if coreIntSyntax(val) {
-			// An integer beyond the int64 and uint64 ranges keeps its
-			// exact text rather than losing digits as a float64.
-			return val
-		}
 		return c.f
+	case coreNumber:
+		return Number(val)
 	}
 	return val
 }
@@ -1358,6 +1450,7 @@ const (
 	coreInt  // fits int64
 	coreUint // fits uint64 but not int64
 	coreFloat
+	coreNumber // an int or float beyond those ranges
 )
 
 // coreValue is a plain scalar resolved under the Core schema: its kind and,
@@ -1390,9 +1483,13 @@ func resolveCore(s string) coreValue {
 		if u, ok := parseCoreUint(s); ok {
 			return coreValue{kind: coreUint, u: u}
 		}
+		return coreValue{kind: coreNumber}
 	}
 	if f, ok := parseCoreFloat(s); ok {
 		return coreValue{kind: coreFloat, f: f}
+	}
+	if isDecimalFloat(s) {
+		return coreValue{kind: coreNumber}
 	}
 	return coreValue{}
 }
@@ -1459,16 +1556,20 @@ func scalarToAnyJSON(val string) any {
 		return i
 	}
 	if errors.Is(err, strconv.ErrRange) {
-		// As under the Core schema: uint64 above the int64 range, and the
-		// exact text beyond it.
+		// As under the Core schema: uint64 above the int64 range, and a
+		// Number beyond it.
 		if u, err := strconv.ParseUint(val, 10, 64); err == nil {
 			return u
 		}
-		return val
+		return Number(val)
 	}
 	if isDecimalFloat(val) {
-		if f, err := strconv.ParseFloat(val, 64); err == nil {
+		f, err := strconv.ParseFloat(val, 64)
+		if err == nil {
 			return f
+		}
+		if errors.Is(err, strconv.ErrRange) {
+			return Number(val)
 		}
 	}
 
@@ -1540,15 +1641,11 @@ func (d *decoder) nodeTagName(n *node) string {
 		return "!!int"
 	case float64:
 		return "!!float"
-	}
-	// A number beyond the Go ranges decodes as its text but is a number.
-	if d.opts.schema != JSONSchema || isJSONNumber(n.value) {
-		switch {
-		case coreIntSyntax(n.value):
+	case Number:
+		if coreIntSyntax(n.value) {
 			return "!!int"
-		case isDecimalFloat(n.value):
-			return "!!float"
 		}
+		return "!!float"
 	}
 	return "!!str"
 }

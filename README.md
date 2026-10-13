@@ -23,7 +23,7 @@ This package is used as the default YAML support package for [rotini](https://gi
 - `FormatError` for human-readable error output with source line and column pointer (handles KYAML rule-ID violations)
 - Context-aware encoding/decoding via `EncodeContext`/`DecodeContext`
 - UTF-8, UTF-16 (LE/BE), and UTF-32 (LE/BE) encoding detection
-- DoS protection: exponential alias expansion (billion laughs), quadratic blowup, deep nesting (input nested more than 10,000 levels is rejected while it is scanned, and decoded values are limited by `WithMaxDepth`), and oversized documents (`WithMaxDocumentSize`)
+- DoS protection: exponential alias expansion (billion laughs) and merge-key fan-out, quadratic blowup, deep nesting (input nested more than 10,000 levels is rejected while it is scanned, and decoded values are limited by `WithMaxDepth`), and oversized documents (`WithMaxDocumentSize`)
 
 ## Installation
 

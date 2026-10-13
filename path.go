@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Path is a compiled JSONPath-like expression for querying and mutating a
@@ -490,7 +491,8 @@ func (p *Path) String() string {
 
 // isPlainPathKey reports whether key can be written as ".key" in a path.
 func isPlainPathKey(key string) bool {
-	return key != "" && key != "*" && !strings.ContainsAny(key, ".[]'\"\\ ") && key[0] != '$'
+	return key != "" && key != "*" && !strings.ContainsAny(key, ".[]'\"\\") && key[0] != '$' &&
+		!strings.ContainsFunc(key, unicode.IsSpace)
 }
 
 func isRecursive(seg pathSegment) bool {

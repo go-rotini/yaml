@@ -83,6 +83,12 @@ jobs:
       - name: Lint
         run: make lint
 
+      # int is 32 bits wide here, so constant overflows only show up on these targets.
+      - name: Vet 32-bit targets
+        run: |
+          GOOS=linux GOARCH=386 go vet ./...
+          GOOS=linux GOARCH=arm go vet ./...
+
   fuzz:
     runs-on: ubuntu-latest
     steps:

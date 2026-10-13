@@ -437,6 +437,15 @@ func (e *encoder) marshalNonPointer(v reflect.Value, indent int, inline bool) er
 		}
 	}
 
+	if v.Type() == reflect.TypeFor[Number]() && isNumberText(v.String()) {
+		if e.opts.jsonCompat {
+			s, _ := numberJSON(v.String())
+			e.buf = append(e.buf, s...)
+		} else {
+			e.buf = append(e.buf, v.String()...)
+		}
+		return nil
+	}
 	if v.Type() == reflect.TypeFor[json.Number]() && isDecimalFloat(v.String()) {
 		// A JSON number is written as the number it holds.
 		e.buf = append(e.buf, v.String()...)
@@ -1513,8 +1522,9 @@ func coreTag(s string) string {
 	case coreInt, coreUint:
 		return tagInt
 	case coreFloat:
+		return tagFloat
+	case coreNumber:
 		if coreIntSyntax(s) {
-			// An integer beyond the uint64 range.
 			return tagInt
 		}
 		return tagFloat
@@ -1682,9 +1692,10 @@ var yaml11Words = map[string]struct{}{
 
 // readsAsYAML11NonString reports whether a YAML 1.1 reader, or one that
 // parses numbers with Go literal syntax, would resolve the plain scalar s to
-// something other than a string: a 1.1 bool word, a number with a 0b, 0o or
-// 0x prefix in either case, underscores, a leading zero or an inf or nan
-// spelling, a number out of range, or a timestamp.
+// something other than a string: a 1.1 bool word, a 1.1 integer or float
+// (digits with underscores anywhere), a number with a 0b, 0o or 0x prefix in
+// either case, underscores, a leading zero or an inf or nan spelling, a
+// number out of range, or a timestamp.
 func readsAsYAML11NonString(s string) bool {
 	if _, ok := yaml11Words[s]; ok {
 		return true
@@ -1696,18 +1707,152 @@ func readsAsYAML11NonString(s string) bool {
 	switch {
 	case c >= '0' && c <= '9', c == '.':
 	case c == 'i' || c == 'I' || c == 'n' || c == 'N':
-		_, err := strconv.ParseFloat(s, 64)
-		return err == nil
+		return isGoSpecialFloat(s)
 	default:
 		return false
 	}
-	if _, err := strconv.ParseInt(s, 0, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+	if isYAML11Number(s) {
 		return true
 	}
-	if _, err := strconv.ParseFloat(s, 64); err == nil || errors.Is(err, strconv.ErrRange) {
-		return true
+	// strconv allocates an error for text it rejects, so it is called only
+	// for text shaped like a Go number literal, or, for ParseInt, text whose
+	// leading digits are enough to overflow, which it reports as out of
+	// range before reaching what follows.
+	shape := goNumberShape(s)
+	if shape || longDigitPrefix(s) {
+		if _, err := strconv.ParseInt(s, 0, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+			return true
+		}
+	}
+	if shape {
+		if _, err := strconv.ParseFloat(s, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+			return true
+		}
 	}
 	return isYAML11Date(s)
+}
+
+// longDigitPrefix reports whether s, after an optional sign, starts with at
+// least 17 characters that can make up a Go integer literal: fewer cannot
+// overflow 64 bits in any base.
+func longDigitPrefix(s string) bool {
+	if s[0] == '+' || s[0] == '-' {
+		s = s[1:]
+	}
+	if len(s) < 17 {
+		return false
+	}
+	for i := range 17 {
+		c := s[i]
+		if !isHexDigit(c) && c != '_' && !strings.ContainsRune("xXoObB", rune(c)) {
+			return false
+		}
+	}
+	return true
+}
+
+// isGoSpecialFloat reports whether [strconv.ParseFloat] reads s as an
+// infinity or NaN: an optionally signed "inf" or "infinity", or "nan", in
+// any case.
+func isGoSpecialFloat(s string) bool {
+	t := s
+	signed := t[0] == '+' || t[0] == '-'
+	if signed {
+		t = t[1:]
+	}
+	return asciiEqualFold(t, "inf") || asciiEqualFold(t, "infinity") || !signed && asciiEqualFold(t, "nan")
+}
+
+// asciiEqualFold reports whether s equals the lowercase ASCII word lower,
+// ignoring ASCII case.
+func asciiEqualFold(s, lower string) bool {
+	if len(s) != len(lower) {
+		return false
+	}
+	for i := range len(s) {
+		c := s[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lower[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// goNumberShape reports whether s could be a Go integer or float literal:
+// it holds only digits, letters that can appear in one, underscores and at
+// most one dot, with a sign only at the start or after an exponent letter.
+// Every literal [strconv.ParseInt] or [strconv.ParseFloat] accepts has this
+// shape, apart from the inf and nan spellings.
+func goNumberShape(s string) bool {
+	dots := 0
+	for i := range len(s) {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F', c == '_':
+		case c == 'x' || c == 'X' || c == 'o' || c == 'O' || c == 'p' || c == 'P':
+		case c == '.':
+			dots++
+			if dots > 1 {
+				return false
+			}
+		case c == '+' || c == '-':
+			if i > 0 && !strings.ContainsRune("eEpP", rune(s[i-1])) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isYAML11Number reports whether s is a YAML 1.1 integer or float, whose
+// underscores may fall anywhere after the first digit:
+// [-+]?[0-9][0-9_]*, [-+]?0x[0-9a-fA-F_]+, [-+]?0b[01_]+, or
+// [-+]?[0-9][0-9_]*\.[0-9_]*([eE][-+][0-9]+)? and [-+]?\.[0-9][0-9_]*.
+func isYAML11Number(s string) bool {
+	if s[0] == '+' || s[0] == '-' {
+		s = s[1:]
+	}
+	run := func(s string, ok func(byte) bool) int {
+		i := 0
+		for i < len(s) && ok(s[i]) {
+			i++
+		}
+		return i
+	}
+	decimal := func(c byte) bool { return c >= '0' && c <= '9' || c == '_' }
+	switch {
+	case len(s) > 2 && s[0] == '0' && s[1] == 'x':
+		return run(s[2:], func(c byte) bool { return isHexDigit(c) || c == '_' }) == len(s)-2
+	case len(s) > 2 && s[0] == '0' && s[1] == 'b':
+		return run(s[2:], func(c byte) bool { return c == '0' || c == '1' || c == '_' }) == len(s)-2
+	}
+	var whole int
+	if s != "" && s[0] >= '0' && s[0] <= '9' {
+		whole = run(s, decimal)
+	}
+	if whole == len(s) {
+		return whole > 0
+	}
+	if s[whole] != '.' {
+		return false
+	}
+	rest := s[whole+1:]
+	frac := run(rest, decimal)
+	if whole == 0 && (frac == 0 || rest[0] == '_') {
+		return false
+	}
+	rest = rest[frac:]
+	if rest == "" {
+		return true
+	}
+	if len(rest) < 3 || rest[0] != 'e' && rest[0] != 'E' || rest[1] != '+' && rest[1] != '-' {
+		return false
+	}
+	return run(rest[2:], isDecDigit) == len(rest)-2
 }
 
 // isYAML11Date reports whether s starts with a YAML 1.1 timestamp's date,

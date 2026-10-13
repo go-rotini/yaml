@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -293,40 +294,117 @@ func (n *Node) Validate() error {
 
 // checkTree returns an error for a tree that cannot be written as YAML: one
 // with a cycle, nested too deep, or with an anchor or alias name that does
-// not read back. structure also checks mappings and empty alias names.
+// not read back. structure also checks mappings and empty alias names. A
+// large subtree reached by more than one path is checked once, so a tree
+// that shares subtrees is checked in time linear in its distinct nodes.
 func checkTree(root *Node, structure bool) error {
-	onPath := make(map[*Node]bool)
-	var check func(n *Node, depth int) error
-	check = func(n *Node, depth int) error {
+	var onPath ancestors
+	// checked holds the height, in levels below it, of each subtree of at
+	// least checkedMinSize nodes already checked in full.
+	var checked map[*Node]int
+	var check func(n *Node, depth int) (height, size int, err error)
+	check = func(n *Node, depth int) (height, size int, err error) {
 		if n == nil {
-			return nil
+			return 0, 0, nil
 		}
-		if onPath[n] {
-			return fmt.Errorf("yaml: node at %s contains itself: %w", n.Pos, ErrUnsupported)
+		if len(n.Children) > 0 {
+			if onPath.has(n) {
+				return 0, 0, fmt.Errorf("yaml: node at %s contains itself: %w", n.Pos, ErrUnsupported)
+			}
+			if h, ok := checked[n]; ok {
+				if depth+h > maxNestingDepth {
+					return 0, 0, errTreeTooDeep
+				}
+				return h, 1, nil
+			}
 		}
 		if depth > maxNestingDepth {
-			return fmt.Errorf("yaml: node tree nested more than %d levels deep: %w", maxNestingDepth, ErrUnsupported)
+			return 0, 0, errTreeTooDeep
 		}
 		switch {
 		case structure && n.Kind == MappingNode && len(n.Children)%2 != 0:
-			return fmt.Errorf("yaml: mapping at %s has odd number of children (%d): %w", n.Pos, len(n.Children), errOddChildren)
+			return 0, 0, fmt.Errorf("yaml: mapping at %s has odd number of children (%d): %w", n.Pos, len(n.Children), errOddChildren)
 		case structure && n.Kind == AliasNode && n.Alias == "":
-			return fmt.Errorf("yaml: alias at %s has %w", n.Pos, errEmptyAlias)
+			return 0, 0, fmt.Errorf("yaml: alias at %s has %w", n.Pos, errEmptyAlias)
 		case n.Anchor != "" && !validAnchorName(n.Anchor):
-			return fmt.Errorf("yaml: anchor %q at %s: %w", n.Anchor, n.Pos, errInvalidAnchor)
+			return 0, 0, fmt.Errorf("yaml: anchor %q at %s: %w", n.Anchor, n.Pos, errInvalidAnchor)
 		case n.Kind == AliasNode && !validAnchorName(n.Alias):
-			return fmt.Errorf("yaml: alias %q at %s: %w", n.Alias, n.Pos, errInvalidAnchor)
+			return 0, 0, fmt.Errorf("yaml: alias %q at %s: %w", n.Alias, n.Pos, errInvalidAnchor)
 		}
-		onPath[n] = true
+		size = 1
+		if len(n.Children) == 0 {
+			return 0, size, nil
+		}
+		onPath.push(n)
 		for _, child := range n.Children {
-			if err := check(child, depth+1); err != nil {
-				return err
+			h, sz, err := check(child, depth+1)
+			if err != nil {
+				return 0, 0, err
+			}
+			if child != nil {
+				height = max(height, h+1)
+				size += sz
 			}
 		}
-		delete(onPath, n)
-		return nil
+		onPath.pop()
+		if size >= checkedMinSize {
+			if checked == nil {
+				checked = make(map[*Node]int)
+			}
+			checked[n] = height
+		}
+		return height, size, nil
 	}
-	return check(root, 0)
+	_, _, err := check(root, 0)
+	return err
+}
+
+// checkedMinSize is the size of the smallest subtree checkTree remembers:
+// checking a smaller one again costs less than remembering every one.
+const checkedMinSize = 16
+
+// errTreeTooDeep reports a node tree nested more than maxNestingDepth levels.
+var errTreeTooDeep = fmt.Errorf("yaml: node tree nested more than %d levels deep: %w", maxNestingDepth, ErrUnsupported)
+
+// ancestorScan is the path length up to which ancestors searches its path
+// rather than keeping a set.
+const ancestorScan = 32
+
+// ancestors is the set of nodes on the path from the root to the node being
+// visited. Only a node with children can contain itself, so only those are
+// pushed. A short path is searched directly, which is cheaper than a map.
+type ancestors struct {
+	path []*Node
+	set  map[*Node]bool // the nodes in path, once it has grown past ancestorScan
+}
+
+func (a *ancestors) has(n *Node) bool {
+	if a.set != nil {
+		return a.set[n]
+	}
+	return slices.Contains(a.path, n)
+}
+
+func (a *ancestors) push(n *Node) {
+	a.path = append(a.path, n)
+	if a.set != nil {
+		a.set[n] = true
+		return
+	}
+	if len(a.path) > ancestorScan {
+		a.set = make(map[*Node]bool, 2*len(a.path))
+		for _, p := range a.path {
+			a.set[p] = true
+		}
+	}
+}
+
+func (a *ancestors) pop() {
+	n := a.path[len(a.path)-1]
+	a.path = a.path[:len(a.path)-1]
+	if a.set != nil {
+		delete(a.set, n)
+	}
 }
 
 // validAnchorName reports whether name can be written after & or * and
@@ -350,23 +428,30 @@ type WalkFunc func(n *Node) bool
 
 // Walk traverses the AST rooted at n in depth-first pre-order, calling fn
 // for each node. If fn returns false, the node's children are not visited.
-// A node that contains itself is not entered again below itself.
+// A node that appears in more than one place in the tree is visited once
+// for each place, and a node that contains itself is not entered again
+// below itself.
 func Walk(n *Node, fn WalkFunc) {
-	walk(n, fn, make(map[*Node]bool))
+	var onPath ancestors
+	walk(n, fn, &onPath)
 }
 
-func walk(n *Node, fn WalkFunc, onPath map[*Node]bool) {
-	if n == nil || onPath[n] {
+func walk(n *Node, fn WalkFunc, onPath *ancestors) {
+	if n == nil {
 		return
 	}
-	if !fn(n) {
+	if len(n.Children) == 0 {
+		fn(n)
 		return
 	}
-	onPath[n] = true
+	if onPath.has(n) || !fn(n) {
+		return
+	}
+	onPath.push(n)
 	for _, child := range n.Children {
 		walk(child, fn, onPath)
 	}
-	delete(onPath, n)
+	onPath.pop()
 }
 
 // Filter walks the AST rooted at n and returns all nodes for which fn

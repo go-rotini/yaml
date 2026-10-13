@@ -11,9 +11,11 @@ import (
 	"net/netip"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ─── newDecoder ─────────────────────────────────────────────────────────────
@@ -5399,6 +5401,8 @@ func FuzzNodeRoundTrip(f *testing.F) {
 	f.Add([]byte("!<tag:example.com,2000:x> v\n"))
 	f.Add([]byte("- |\n  literal\n- >-\n  folded\n- 'single'\n- \"double\\n\""))
 	f.Add([]byte("--- !!map\n!!str a: !!int 1\n--- !local%21 x"))
+	f.Add([]byte("{0: !0,!0 0}"))
+	f.Add([]byte("a: &x\n&k b: 1\n"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > 4096 {
@@ -5464,6 +5468,100 @@ func FuzzTypedDecode(f *testing.F) {
 			_, _ = MarshalKYAML(&c)
 		}
 	})
+}
+
+// rawAny decodes itself from the bytes a BytesUnmarshaler receives.
+type rawAny struct{ v any }
+
+func (r *rawAny) UnmarshalYAML(data []byte) error { return Unmarshal(data, &r.v) }
+
+// FuzzDecodeDifferential decodes each input into any, into an ordered map,
+// through a BytesUnmarshaler (whose bytes are the value re-encoded) and into
+// map[string]any, and checks that they agree.
+func FuzzDecodeDifferential(f *testing.F) {
+	f.Add([]byte("a: &a {x: 1, <<: {y: 2}}\nb:\n  <<: [*a, {x: 3, z: 4}]\n  x: 9\n"))
+	f.Add([]byte("k: &k key\nm:\n  *k : v\n  <<: {key: w}\n"))
+	f.Add([]byte("a: &x\n&k b: 1\nc: !t\n!u d: [1, 2]\n"))
+	f.Add([]byte("{0: !0,!0 0}"))
+	f.Add([]byte("m:\n  <<: [{z, z: 0}]\nbig: 18446744073709551616\n"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 2048 || !utf8.Valid(data) {
+			return
+		}
+		var direct any
+		if err := Unmarshal(data, &direct); err != nil || hasNullKey(direct) {
+			return
+		}
+		var ordered any
+		if err := UnmarshalWithOptions(data, &ordered, WithOrderedMap()); err != nil {
+			t.Fatalf("ordered map: %v", err)
+		}
+		if plain, ok := orderedToPlain(ordered); ok && !sameValue(direct, plain) {
+			t.Fatalf("ordered map differs\nany:     %#v\nordered: %#v", direct, ordered)
+		}
+		var raw rawAny
+		if err := Unmarshal(data, &raw); err != nil {
+			t.Fatalf("BytesUnmarshaler: %v", err)
+		}
+		if !sameValue(direct, raw.v) {
+			t.Fatalf("BytesUnmarshaler differs\nany: %#v\nraw: %#v", direct, raw.v)
+		}
+		if _, ok := direct.(map[string]any); ok {
+			var m map[string]any
+			if err := Unmarshal(data, &m); err != nil || !sameValue(direct, m) {
+				t.Fatalf("map[string]any differs: %v\nany: %#v\nmap: %#v", err, direct, m)
+			}
+		}
+	})
+}
+
+// hasNullKey reports whether v holds a mapping key that spells null, which
+// keeps its text in any but may be written back as a different spelling.
+func hasNullKey(v any) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, v := range x {
+			if isNullValue(k) || hasNullKey(v) {
+				return true
+			}
+		}
+	case []any:
+		return slices.ContainsFunc(x, hasNullKey)
+	}
+	return false
+}
+
+// orderedToPlain converts the MapSlice values in v to map[string]any,
+// reporting false when a key is not a string.
+func orderedToPlain(v any) (any, bool) {
+	switch x := v.(type) {
+	case MapSlice:
+		m := make(map[string]any, len(x))
+		for _, item := range x {
+			k, ok := item.Key.(string)
+			if !ok {
+				return nil, false
+			}
+			val, ok := orderedToPlain(item.Value)
+			if !ok {
+				return nil, false
+			}
+			m[k] = val
+		}
+		return m, true
+	case []any:
+		out := make([]any, len(x))
+		for i, item := range x {
+			val, ok := orderedToPlain(item)
+			if !ok {
+				return nil, false
+			}
+			out[i] = val
+		}
+		return out, true
+	}
+	return v, true
 }
 
 // sameValue reports whether decoded values a and b are equal, treating
@@ -6288,12 +6386,8 @@ func TestDecodeSequenceToNonSlice(t *testing.T) {
 func TestDecodeScalarToAnyIntOverflow(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	n := &node{kind: nodeScalar, value: "99999999999999999999", style: scalarPlain}
-	result := d.scalarToAny(n)
-	// Should fall through to float or string
-	_, isString := result.(string)
-	_, isFloat := result.(float64)
-	if !isString && !isFloat {
-		t.Errorf("expected string or float for overflow int, got %T: %v", result, result)
+	if result := d.scalarToAny(n); result != Number("99999999999999999999") {
+		t.Errorf("got %T: %v, want the Number", result, result)
 	}
 }
 

@@ -17,7 +17,7 @@ import (
 //
 // A number that does not fit the target type is reported in a [TypeError]
 // rather than wrapped or rounded; into any, numbers decode as int64, uint64
-// or float64, and one beyond those ranges keeps its text (see
+// or float64, and one beyond those ranges as a [Number] (see
 // [CoreSchema]). An alias must follow its anchor in the same document, or
 // name an anchor of a reference file. Mapping keys decoded into any keep
 // their source text, so "1" and "0x1" are different keys; an alias key
@@ -216,6 +216,7 @@ type Decoder struct {
 	init  bool
 	anch  map[string]*node
 	nodes int
+	err   error // the read or parse error, returned by every later Decode
 }
 
 // NewDecoder returns a new [Decoder] that reads from r.
@@ -229,6 +230,8 @@ func NewDecoder(r io.Reader, opts ...DecodeOption) *Decoder {
 
 // Decode reads the next YAML document from the stream and stores it in the
 // value pointed to by v. It returns [io.EOF] when the stream is exhausted.
+// A stream that cannot be read or parsed yields no documents: Decode returns
+// that error, and so does every later call.
 func (dec *Decoder) Decode(v any) error {
 	return dec.DecodeContext(context.Background(), v)
 }
@@ -236,18 +239,23 @@ func (dec *Decoder) Decode(v any) error {
 // DecodeContext reads the next YAML document, passing ctx to types that
 // implement [UnmarshalerContext].
 func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
+	if dec.err != nil {
+		return dec.err
+	}
 	if !dec.init {
 		r := dec.r
-		if limit := dec.opts.maxDocumentSize; limit > 0 && limit < math.MaxInt64 {
+		if limit := dec.opts.maxDocumentSize; limit > 0 && int64(limit) < math.MaxInt64 {
 			r = io.LimitReader(r, int64(limit)+1)
 		}
 		data, err := io.ReadAll(r)
 		if err != nil {
-			return fmt.Errorf("yaml: read input: %w", err)
+			dec.err = fmt.Errorf("yaml: read input: %w", err)
+			return dec.err
 		}
 
 		dec.docs, dec.anch, dec.nodes, err = parseStream(data, dec.opts)
 		if err != nil {
+			dec.err = err
 			return err
 		}
 		dec.init = true
@@ -317,7 +325,7 @@ func referenceDirFiles(dir string, recursive bool) ([]string, error) {
 	}
 
 	if recursive {
-		err = filepath.WalkDir(realDir, func(path string, d os.DirEntry, err error) error { //nolint:gosec // G703: walks the caller's reference dir by design
+		err = filepath.WalkDir(realDir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -368,7 +376,7 @@ func loadReferences(docAnchors map[string]*node, o *decoderOptions) (map[string]
 	}
 
 	for _, file := range files {
-		data, err := os.ReadFile(file) //nolint:gosec // G703: reads the caller's reference files by design
+		data, err := os.ReadFile(file)
 		if err != nil {
 			return nil, 0, fmt.Errorf("yaml: cannot read reference file %q: %w", file, err)
 		}

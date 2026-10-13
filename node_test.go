@@ -1,10 +1,12 @@
 package yaml
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNodeKindConstants(t *testing.T) {
@@ -666,4 +668,48 @@ func TestNodeToBytesComplexKeys(t *testing.T) {
 		t.Fatalf("re-parse: %v\n%s", err, out)
 	}
 	sameNodes(t, "doc", file.Docs[0], again.Docs[0])
+}
+
+func TestValidateSharedSubtrees(t *testing.T) {
+	// 60 levels whose two children are the same node: 2^60 paths, 121 nodes.
+	n := &Node{Kind: ScalarNode, Value: "x"}
+	for range 60 {
+		n = &Node{Kind: SequenceNode, Children: []*Node{n, n}}
+	}
+	start := time.Now()
+	if err := n.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Validate took %v", elapsed)
+	}
+
+	// A shared subtree checked shallow is still too deep where it is
+	// reached again deeper down.
+	shared := &Node{Kind: ScalarNode, Value: "x"}
+	for range maxNestingDepth - 10 {
+		shared = &Node{Kind: SequenceNode, Children: []*Node{shared}}
+	}
+	deep := shared
+	for range 20 {
+		deep = &Node{Kind: SequenceNode, Children: []*Node{deep}}
+	}
+	root := &Node{Kind: SequenceNode, Children: []*Node{shared, deep}}
+	if err := root.Validate(); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "levels deep") {
+		t.Errorf("deep shared subtree: got %v", err)
+	}
+
+	// A shared subtree that holds an invalid name fails wherever it is.
+	bad := &Node{Kind: SequenceNode, Children: []*Node{{Kind: AliasNode}}}
+	if err := (&Node{Kind: SequenceNode, Children: []*Node{bad, bad}}).Validate(); !errors.Is(err, errEmptyAlias) {
+		t.Errorf("shared invalid subtree: got %v", err)
+	}
+
+	// Walk visits a shared node once per path to it.
+	count := 0
+	leaf := &Node{Kind: ScalarNode, Value: "v"}
+	Walk(&Node{Kind: SequenceNode, Children: []*Node{leaf, leaf}}, func(*Node) bool { count++; return true })
+	if count != 3 {
+		t.Errorf("Walk: %d visits, want 3", count)
+	}
 }

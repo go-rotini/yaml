@@ -986,3 +986,23 @@ func TestPathPointerNotFound(t *testing.T) {
 		t.Errorf("expected no matches, got %+v", nodes)
 	}
 }
+
+func TestPathStringQuotesWhiteSpaceKeys(t *testing.T) {
+	for _, key := range []string{"a\t", "\ta", "a\n", "a b", "a "} {
+		doc := &Node{Kind: MappingNode, Children: []*Node{
+			{Kind: ScalarNode, Value: key}, {Kind: ScalarNode, Value: "v"},
+		}}
+		p, err := PathString("$['" + key + "']")
+		if err != nil {
+			t.Fatalf("%q: %v", key, err)
+		}
+		again, err := PathString(p.String())
+		if err != nil {
+			t.Errorf("%q: String %q does not parse: %v", key, p.String(), err)
+			continue
+		}
+		if got, err := again.Read(doc); err != nil || len(got) != 1 || got[0].Value != "v" {
+			t.Errorf("%q: String %q reads %v, %v", key, p.String(), got, err)
+		}
+	}
+}

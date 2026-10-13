@@ -4971,3 +4971,23 @@ func TestKYAMLSequenceMixingScalarsAndMappings(t *testing.T) {
 		t.Errorf("got %q, want %q", out, want)
 	}
 }
+
+func TestYAML11NumberQuoting(t *testing.T) {
+	for _, s := range []string{"1__0", "1_", "-1__0", "0x1__F", "0b1__0", "1__0.5", "1_.5e+3", ".5_"} {
+		out, err := Marshal(map[string]string{"v": s})
+		if err != nil || string(out) != "v: \""+s+"\"\n" {
+			t.Errorf("%q: got %q, %v", s, out, err)
+		}
+	}
+	for _, s := range []string{"name", "image", "1.2.3", "10.0.0.1", "_1", "1_a", "infinite", "+nan"} {
+		out, err := Marshal(map[string]string{"v": s})
+		if err != nil || string(out) != "v: "+s+"\n" {
+			t.Errorf("%q: got %q, %v", s, out, err)
+		}
+	}
+	for _, s := range []string{"name", "nginx", "image", "1.2.3", "10.0.0.1"} {
+		if n := testing.AllocsPerRun(10, func() { readsAsYAML11NonString(s) }); n != 0 {
+			t.Errorf("%q: %v allocations", s, n)
+		}
+	}
+}

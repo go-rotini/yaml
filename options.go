@@ -200,8 +200,8 @@ const (
 	// optional exponent, and .inf, -.inf, .nan in lower, title or upper case).
 	// Plain inf, nan and infinity are strings. Into any, an int decodes as an
 	// int64, or as a uint64 above the int64 range, and a float as a float64;
-	// a number beyond those ranges keeps its exact text as a string rather
-	// than losing digits. Scalars tagged !!null, !!bool, !!int or !!float
+	// a number beyond those ranges decodes as a [Number] holding its exact
+	// text rather than losing digits. Scalars tagged !!null, !!bool, !!int or !!float
 	// resolve to that type under every schema, and one whose value does not
 	// fit its tag is reported in a [TypeError]. Timestamps are not resolved,
 	// so a date decodes into any as a string (decode into time.Time for a

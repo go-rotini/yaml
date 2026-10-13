@@ -193,7 +193,9 @@ type UnmarshalerError struct {
 }
 
 func (e *UnmarshalerError) Error() string {
-	return fmt.Sprintf("yaml: line %d, column %d: %s", e.Pos.Line, e.Pos.Column, e.Err.Error())
+	// An error from this package already says where it comes from.
+	msg := strings.TrimPrefix(e.Err.Error(), "yaml: ")
+	return fmt.Sprintf("yaml: line %d, column %d: %s", e.Pos.Line, e.Pos.Column, msg)
 }
 
 // Unwrap returns the unmarshaler's error.
@@ -334,6 +336,7 @@ var (
 	errJSONTrailingData       = errors.New("invalid data after top-level value")
 	errPathTooShortReplace    = fmt.Errorf("yaml: path too short for replace: %w", ErrPathSyntax)
 	errPathTooShortDelete     = fmt.Errorf("yaml: path too short for delete: %w", ErrPathSyntax)
+	errInvalidNumber          = errors.New("yaml: invalid number")
 	errInvalidBoolDefault     = errors.New("invalid bool default")
 	errInvalidDurationDefault = errors.New("invalid duration default")
 	errInvalidIntDefault      = errors.New("invalid int default")

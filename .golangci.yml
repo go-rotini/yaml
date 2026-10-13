@@ -109,6 +109,7 @@ linters:
     gosec:
       excludes:
         - G304
+        - G703 # the taint form of G304: reference files and dirs are read by design
         - G115
 
     nakedret:
