@@ -3,6 +3,8 @@ package yaml
 // MapSlice is an ordered slice of key-value pairs. It is used as the
 // decoded representation of YAML mappings when [WithOrderedMap] is enabled,
 // preserving the original key order that a plain map[string]any would lose.
+// It encodes as a mapping with its items in order, as does any other slice
+// of [MapItem].
 // A MapSlice target (or *MapSlice, field or element) decodes the same way
 // without the option, its nested mappings becoming MapSlice too. Merge keys
 // (<<) add the merged entries where the merge appears; an explicit key that

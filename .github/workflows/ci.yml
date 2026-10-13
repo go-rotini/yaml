@@ -31,6 +31,29 @@ jobs:
           name: coverage
           path: test.out
 
+  # Line endings, paths and file handling differ by OS; the conformance suites run on Linux.
+  test-os:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Keep the checkout byte-identical to Linux: golden files and fixtures compare bytes.
+      - name: Check out with LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Race detector
+        run: go test -race -count=1 ./...
+
   acceptance:
     runs-on: ubuntu-latest
     steps:
@@ -133,13 +156,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A squash merge makes the pull request's title the commit semantic-release reads, so the
+      # title is checked too. Merge commits (main merged into the branch) are skipped.
       - name: Check conventional commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          TITLE: ${{ github.event.pull_request.title }}
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
           PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+'
           FAILED=0
-          for SHA in $(git rev-list "$BASE".."$HEAD"); do
+          if ! printf '%s\n' "$TITLE" | grep -qE "$PATTERN"; then
+            echo "BAD pull request title: $TITLE"
+            FAILED=1
+          fi
+          for SHA in $(git rev-list --no-merges "$BASE".."$HEAD"); do
             MSG=$(git log --format=%s -n1 "$SHA")
             if ! echo "$MSG" | grep -qE "$PATTERN"; then
               echo "BAD: $MSG"
@@ -147,6 +178,6 @@ jobs:
             fi
           done
           if [ "$FAILED" -eq 1 ]; then
-            echo "::error::Some commits do not follow Conventional Commits (https://www.conventionalcommits.org)"
+            echo "::error::The pull request title or some commits do not follow Conventional Commits (https://www.conventionalcommits.org)"
             exit 1
           fi

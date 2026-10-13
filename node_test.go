@@ -8,7 +8,7 @@ import (
 )
 
 func TestNodeKindConstants(t *testing.T) {
-	kinds := []nodeKind{nodeDocument, nodeMapping, nodeSequence, nodeScalar, nodeAnchor, nodeAlias, nodeMergeKey}
+	kinds := []nodeKind{nodeDocument, nodeMapping, nodeSequence, nodeScalar, nodeAlias, nodeMergeKey}
 	seen := make(map[nodeKind]bool)
 	for _, k := range kinds {
 		if seen[k] {
@@ -221,7 +221,7 @@ func TestNodeToBytesSequence(t *testing.T) {
 }
 
 func TestNodeToBytesAnchorsAndAliases(t *testing.T) {
-	input := "base: &b\n  x: y\nlist: &l\n  - &s one\n  - *s\nempty: &e {}\nref: *b\nlrefs:\n  - *l\n  - *e\n"
+	input := "base: &b\n  x: z\nlist: &l\n  - &s one\n  - *s\nempty: &e {}\nref: *b\nlrefs:\n  - *l\n  - *e\n"
 	f, err := Parse([]byte(input))
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +230,7 @@ func TestNodeToBytesAnchorsAndAliases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "base: &b\n  x: y\nlist: &l\n  - &s one\n  - *s\nempty: &e {}\nref: *b\nlrefs:\n  - *l\n  - *e"
+	want := "base: &b\n  x: z\nlist: &l\n  - &s one\n  - *s\nempty: &e {}\nref: *b\nlrefs:\n  - *l\n  - *e"
 	if string(data) != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", data, want)
 	}
@@ -293,7 +293,6 @@ func TestExportKindAllValues(t *testing.T) {
 		{nodeSequence, SequenceNode},
 		{nodeScalar, ScalarNode},
 		{nodeAlias, AliasNode},
-		{nodeAnchor, ScalarNode},
 		{nodeMergeKey, ScalarNode},
 		{nodeKind(99), ScalarNode},
 	}
@@ -539,7 +538,7 @@ func TestNodeToBytesKeepsScalarTypes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"i: 1\n", "f: 1.5\n", "b: true\n", "n: null\n", "empty: null\n", `qi: "1"`, `qe: ""`, `str: "3"`, "1: one\n"} {
+	for _, line := range []string{"i: 1\n", "f: 1.5\n", "b: true\n", "\"n\": null\n", "empty: null\n", `qi: "1"`, `qe: ""`, `str: "3"`, "1: one\n"} {
 		if !strings.Contains(string(out)+"\n", line) {
 			t.Errorf("output missing %q:\n%s", line, out)
 		}

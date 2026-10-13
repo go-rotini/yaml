@@ -50,6 +50,8 @@ func defaultEncodeOptions() *encoderOptions {
 }
 
 // WithIndent sets the number of spaces per indentation level (default 2).
+// Block-style output needs at least 1; a smaller value fails with an error
+// wrapping [ErrOptionConflict].
 func WithIndent(n int) EncodeOption {
 	return func(o *encoderOptions) { o.indent = n }
 }
@@ -105,7 +107,8 @@ func WithOmitEmpty(b bool) EncodeOption {
 // a head comment on the line before it, a line comment at the end of its
 // first line, and a foot comment after its value. A path that names no entry
 // falls back to the first entry whose last segment matches, and is otherwise
-// not placed.
+// not placed. Text with line breaks is written as one comment line per
+// line, and any other non-printable character or invalid UTF-8 as U+FFFD.
 func WithComment(comments map[string][]Comment) EncodeOption {
 	return func(o *encoderOptions) { o.comments = comments }
 }
@@ -195,15 +198,20 @@ const (
 	// null (~, null, Null, NULL, empty), bool (true, True, TRUE and the same
 	// for false), int (decimal, hex 0x, octal 0o), float (decimal with an
 	// optional exponent, and .inf, -.inf, .nan in lower, title or upper case).
-	// Plain inf, nan and infinity are strings. Scalars tagged !!null, !!bool,
-	// !!int or !!float resolve to that type under every schema. Timestamps
-	// are not resolved, so a date decodes into any as a string (decode into
-	// time.Time for a time), and a !!binary scalar decodes into any as its
-	// base64 text (decode into []byte for the bytes).
+	// Plain inf, nan and infinity are strings. Into any, an int decodes as an
+	// int64, or as a uint64 above the int64 range, and a float as a float64;
+	// a number beyond those ranges keeps its exact text as a string rather
+	// than losing digits. Scalars tagged !!null, !!bool, !!int or !!float
+	// resolve to that type under every schema, and one whose value does not
+	// fit its tag is reported in a [TypeError]. Timestamps are not resolved,
+	// so a date decodes into any as a string (decode into time.Time for a
+	// time), and a !!binary scalar decodes into any as its base64 text
+	// (decode into []byte for the bytes).
 	CoreSchema Schema = iota
 
 	// JSONSchema resolves plain scalars like JSON: null (lowercase only),
-	// true/false (lowercase only), and JSON-format numbers.
+	// true/false (lowercase only), and JSON-format numbers, with the same Go
+	// types as [CoreSchema].
 	JSONSchema
 
 	// FailsafeSchema treats all plain scalars as strings with no type
@@ -249,6 +257,8 @@ func WithSchema(s Schema) DecodeOption {
 
 // WithDefaults enables applying default values from struct tags when a YAML
 // key is absent from the input and the field still holds its zero value.
+// Defaults also apply in a struct whose whole mapping is absent or null,
+// including an empty document.
 // Default values are specified with the "default=<value>" tag option (e.g.
 // `yaml:"port,default=8080"`). Only scalar types are supported: string, bool, int/uint variants, float
 // variants, and time.Duration. Without this option, default tags are ignored.
@@ -263,7 +273,10 @@ func WithStrict() DecodeOption {
 }
 
 // WithDisallowDuplicateKey causes decoding to return a [DuplicateKeyError] if a
-// mapping contains the same key more than once.
+// mapping contains the same key more than once, whatever the target type.
+// Entries a target map already holds, and keys set by a merge, are not
+// duplicates; two spellings that decode to the same map key (1 and 01 into
+// map[int]T) are.
 func WithDisallowDuplicateKey() DecodeOption {
 	return func(o *decoderOptions) { o.disallowDuplicates = true }
 }
@@ -282,9 +295,11 @@ func WithJSONUnmarshaler() DecodeOption {
 	return func(o *decoderOptions) { o.useJSONUnmarshaler = true }
 }
 
-// WithMaxDepth limits the nesting depth of the decoded value (default 100).
-// Deeper documents are rejected with a [SyntaxError]. Zero or less means no
-// limit.
+// WithMaxDepth limits the nesting depth of the decoded value (default 100),
+// for every target type including any. Deeper documents are rejected with a
+// [SyntaxError]. Zero or less means no limit here, but input nested more
+// than 10,000 levels is always rejected while it is parsed, so that it
+// cannot exhaust the stack.
 func WithMaxDepth(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDepth = n }
 }
@@ -340,7 +355,8 @@ func WithRecursiveDir(b bool) DecodeOption {
 }
 
 // WithMaxDocumentSize rejects input that exceeds n bytes before parsing
-// begins, with an error wrapping [ErrDocumentSize]. Zero means no limit.
+// begins, with an error wrapping [ErrDocumentSize]. A [Decoder] stops
+// reading once more than n bytes have arrived. Zero means no limit.
 func WithMaxDocumentSize(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDocumentSize = n }
 }

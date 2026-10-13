@@ -5,19 +5,21 @@ import (
 	"encoding"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
-	"math/big"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 type decoder struct {
 	opts       *decoderOptions
 	ctx        context.Context
-	anchors    map[string]*node
+	refAnchors map[string]*node // anchors loaded from reference files
 	aliasDepth int
 	aliasNodes int // nodes decoded inside alias expansions
 	aliasLimit int // limit on aliasNodes; zero means no limit
@@ -29,7 +31,6 @@ func newDecoder(opts *decoderOptions) *decoder {
 	return &decoder{
 		opts:       opts,
 		ctx:        context.Background(),
-		anchors:    make(map[string]*node),
 		aliasLimit: aliasNodeLimit(opts, 0),
 	}
 }
@@ -47,6 +48,31 @@ func (d *decoder) countAliasNode(n *node) error {
 	return nil
 }
 
+// aliasTarget returns the node alias n refers to: the anchor defined before
+// it in its document, or else an anchor from a reference file.
+func (d *decoder) aliasTarget(n *node) (*node, error) {
+	if n.ref != nil && n.ref.n != nil {
+		return n.ref.n, nil
+	}
+	if target, ok := d.refAnchors[n.alias]; ok {
+		return target, nil
+	}
+	return nil, &SyntaxError{
+		Message: fmt.Sprintf("unknown alias %q", n.alias),
+		Pos:     n.pos,
+	}
+}
+
+// enter counts one level of nesting at n against [WithMaxDepth]. The caller
+// must call d.depth-- when it is done with n.
+func (d *decoder) enter(n *node) error {
+	d.depth++
+	if d.opts.maxDepth > 0 && d.depth > d.opts.maxDepth {
+		return &SyntaxError{Message: fmt.Sprintf("exceeded max depth %d", d.opts.maxDepth), Pos: n.pos}
+	}
+	return nil
+}
+
 func (d *decoder) decode(n *node, v reflect.Value) error {
 	if n == nil {
 		return nil
@@ -55,14 +81,10 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 		return err
 	}
 
-	d.depth++
+	err := d.enter(n)
 	defer func() { d.depth-- }()
-	if d.opts.maxDepth > 0 && d.depth > d.opts.maxDepth {
-		return &SyntaxError{Message: fmt.Sprintf("exceeded max depth %d", d.opts.maxDepth), Pos: n.pos}
-	}
-
-	if n.anchor != "" {
-		d.anchors[n.anchor] = n
+	if err != nil {
+		return err
 	}
 
 	if n.kind == nodeAlias {
@@ -88,20 +110,13 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 	}
 
 	if v.Kind() == reflect.Interface && v.NumMethod() == 0 {
-		result, err := d.decodeToAny(n)
-		if err != nil {
-			return err
-		}
-		if result != nil {
-			v.Set(reflect.ValueOf(result))
-		}
-		return nil
+		return d.decodeIntoAny(n, v)
 	}
 
 	if d.opts.customUnmarshalers != nil {
 		t := v.Type()
 		if fn, ok := d.opts.customUnmarshalers[t]; ok {
-			raw, err := marshalNode(n)
+			raw, err := d.rawBytes(n)
 			if err != nil {
 				return err
 			}
@@ -110,7 +125,7 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 			out := reflect.ValueOf(fn).Call([]reflect.Value{ptr, reflect.ValueOf(raw)})
 			if !out[0].IsNil() {
 				if e, ok := reflect.TypeAssert[error](out[0]); ok {
-					return e
+					return bytesUnmarshalerError(e, n)
 				}
 			}
 			v.Set(ptr.Elem())
@@ -120,43 +135,36 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 
 	if v.CanAddr() {
 		if u, ok := reflect.TypeAssert[UnmarshalerContext](v.Addr()); ok {
-			return u.UnmarshalYAML(d.ctx, func(target any) error {
-				rv := reflect.ValueOf(target)
-				if rv.Kind() == reflect.Pointer {
-					return d.decode(n, rv.Elem())
-				}
-				return d.decode(n, rv)
-			})
+			return unmarshalerError(u.UnmarshalYAML(d.ctx, d.unmarshalFunc(n)), n)
 		}
 		if u, ok := reflect.TypeAssert[Unmarshaler](v.Addr()); ok {
-			return u.UnmarshalYAML(func(target any) error {
-				rv := reflect.ValueOf(target)
-				if rv.Kind() == reflect.Pointer {
-					return d.decode(n, rv.Elem())
-				}
-				return d.decode(n, rv)
-			})
+			return unmarshalerError(u.UnmarshalYAML(d.unmarshalFunc(n)), n)
 		}
 		if u, ok := reflect.TypeAssert[BytesUnmarshaler](v.Addr()); ok {
-			raw, err := marshalNode(n)
+			raw, err := d.rawBytes(n)
 			if err != nil {
 				return err
 			}
-			return u.UnmarshalYAML(raw)
+			return bytesUnmarshalerError(u.UnmarshalYAML(raw), n)
 		}
 	}
 
 	if v.CanAddr() && v.Type() != reflect.TypeFor[time.Time]() {
 		if u, ok := reflect.TypeAssert[encoding.TextUnmarshaler](v.Addr()); ok {
 			if n.kind == nodeScalar {
-				return u.UnmarshalText([]byte(n.value))
+				// Null leaves the zero value, as for any other scalar target.
+				if n.style == scalarPlain && isNullValue(n.value) && n.tag == "" {
+					v.Set(reflect.Zero(v.Type()))
+					return nil
+				}
+				return unmarshalerError(u.UnmarshalText([]byte(n.value)), n)
 			}
 		}
 	}
 
 	if d.opts.useJSONUnmarshaler && v.CanAddr() {
 		if u, ok := reflect.TypeAssert[jsonUnmarshaler](v.Addr()); ok {
-			raw, err := marshalNode(n)
+			raw, err := d.rawBytes(n)
 			if err != nil {
 				return err
 			}
@@ -164,7 +172,7 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 			if err != nil {
 				return err
 			}
-			return u.UnmarshalJSON(jsonBytes)
+			return bytesUnmarshalerError(u.UnmarshalJSON(jsonBytes), n)
 		}
 	}
 
@@ -184,13 +192,25 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 	return nil
 }
 
-func (d *decoder) decodeAlias(n *node, v reflect.Value) error {
-	target, ok := d.anchors[n.alias]
-	if !ok {
-		return &SyntaxError{
-			Message: fmt.Sprintf("unknown alias %q", n.alias),
-			Pos:     n.pos,
+// unmarshalFunc returns the function passed to an [Unmarshaler] decoding n.
+// Its target must be a non-nil pointer, or a non-nil map.
+func (d *decoder) unmarshalFunc(n *node) func(any) error {
+	return func(target any) error {
+		rv := reflect.ValueOf(target)
+		switch {
+		case rv.Kind() == reflect.Pointer && !rv.IsNil():
+			return d.decode(n, rv.Elem())
+		case rv.Kind() == reflect.Map && !rv.IsNil():
+			return d.decode(n, rv)
 		}
+		return fmt.Errorf("yaml: unmarshal requires a non-nil pointer, got %T: %w", target, ErrNilPointer)
+	}
+}
+
+func (d *decoder) decodeAlias(n *node, v reflect.Value) error {
+	target, err := d.aliasTarget(n)
+	if err != nil {
+		return err
 	}
 
 	d.aliasDepth++
@@ -204,7 +224,7 @@ func (d *decoder) decodeAlias(n *node, v reflect.Value) error {
 
 func (d *decoder) decodeScalar(n *node, v reflect.Value) error {
 	if n.implicit && n.value == "" {
-		return nil
+		return d.fillAbsent(v, n.pos)
 	}
 
 	if n.tag != "" && d.opts.tagResolvers != nil {
@@ -228,9 +248,16 @@ func (d *decoder) decodeScalar(n *node, v reflect.Value) error {
 
 	val := n.value
 
+	if isCoreTag(n.tag) {
+		if _, ok := resolveCoreTag(n.tag, val); !ok {
+			d.addTagError(n)
+			return nil
+		}
+	}
+
 	if n.style == scalarPlain && isNullValue(val) {
 		v.Set(reflect.Zero(v.Type()))
-		return nil
+		return d.fillAbsent(v, n.pos)
 	}
 
 	switch v.Kind() {
@@ -255,36 +282,64 @@ func (d *decoder) decodeScalar(n *node, v reflect.Value) error {
 		}
 		i, err := parseInt(val)
 		if err != nil {
-			d.addTypeError(n, v.Type())
+			d.addRangeOrTypeError(n, v.Type(), err)
+			return nil
+		}
+		if v.OverflowInt(i) {
+			d.addOverflowError(n, v.Type())
 			return nil
 		}
 		v.SetInt(i)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		u, err := parseUint(val)
 		if err != nil {
-			d.addTypeError(n, v.Type())
+			d.addRangeOrTypeError(n, v.Type(), err)
+			return nil
+		}
+		if v.OverflowUint(u) {
+			d.addOverflowError(n, v.Type())
 			return nil
 		}
 		v.SetUint(u)
 	case reflect.Float32, reflect.Float64:
 		f, err := parseFloat(val)
 		if err != nil {
-			d.addTypeError(n, v.Type())
+			d.addRangeOrTypeError(n, v.Type(), err)
+			return nil
+		}
+		if v.OverflowFloat(f) {
+			d.addOverflowError(n, v.Type())
 			return nil
 		}
 		v.SetFloat(f)
 	case reflect.Slice:
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			if n.tag == "tag:yaml.org,2002:binary" {
-				decoded, err := decodeBase64(val)
-				if err != nil {
-					d.addTypeError(n, v.Type())
-					return nil
-				}
-				v.SetBytes(decoded)
-			} else {
-				v.SetBytes([]byte(val))
+		if v.Type().Elem().Kind() != reflect.Uint8 {
+			d.addTypeError(n, v.Type())
+			return nil
+		}
+		if n.tag == "tag:yaml.org,2002:binary" {
+			decoded, err := decodeBase64(val)
+			if err != nil {
+				d.addTypeError(n, v.Type())
+				return nil
 			}
+			v.SetBytes(decoded)
+		} else {
+			v.SetBytes([]byte(val))
+		}
+	case reflect.Array:
+		if v.Type().Elem().Kind() != reflect.Uint8 || n.tag != "tag:yaml.org,2002:binary" {
+			d.addTypeError(n, v.Type())
+			return nil
+		}
+		decoded, err := decodeBase64(val)
+		if err != nil || len(decoded) > v.Len() {
+			d.addTypeError(n, v.Type())
+			return nil
+		}
+		reflect.Copy(v, reflect.ValueOf(decoded))
+		for i := len(decoded); i < v.Len(); i++ {
+			v.Index(i).SetUint(0)
 		}
 	case reflect.Struct:
 		if v.Type() == reflect.TypeFor[time.Time]() {
@@ -294,32 +349,6 @@ func (d *decoder) decodeScalar(n *node, v reflect.Value) error {
 				return nil
 			}
 			v.Set(reflect.ValueOf(t))
-			return nil
-		}
-		switch v.Type() {
-		case reflect.TypeFor[big.Int]():
-			bi := new(big.Int)
-			if _, ok := bi.SetString(val, 0); !ok {
-				d.addTypeError(n, v.Type())
-				return nil
-			}
-			v.Set(reflect.ValueOf(*bi))
-			return nil
-		case reflect.TypeFor[big.Float]():
-			bf, _, err := big.ParseFloat(val, 10, 256, big.ToNearestEven)
-			if err != nil {
-				d.addTypeError(n, v.Type())
-				return nil
-			}
-			v.Set(reflect.ValueOf(*bf))
-			return nil
-		case reflect.TypeFor[big.Rat]():
-			br := new(big.Rat)
-			if _, ok := br.SetString(val); !ok {
-				d.addTypeError(n, v.Type())
-				return nil
-			}
-			v.Set(reflect.ValueOf(*br))
 			return nil
 		}
 		d.addTypeError(n, v.Type())
@@ -337,14 +366,7 @@ func (d *decoder) decodeMapping(n *node, v reflect.Value) error {
 		return d.decodeMappingToStruct(n, v)
 	case reflect.Interface:
 		if v.NumMethod() == 0 {
-			result, err := d.decodeToAny(n)
-			if err != nil {
-				return err
-			}
-			if result != nil {
-				v.Set(reflect.ValueOf(result))
-			}
-			return nil
+			return d.decodeIntoAny(n, v)
 		}
 		return &TypeError{Errors: []string{fmt.Sprintf("cannot decode mapping into %s", v.Type())}}
 	default:
@@ -353,52 +375,117 @@ func (d *decoder) decodeMapping(n *node, v reflect.Value) error {
 	}
 }
 
+// checkDuplicateKeys returns a [DuplicateKeyError] for the first scalar key
+// that mapping n holds twice, when [WithDisallowDuplicateKey] is set.
+func (d *decoder) checkDuplicateKeys(n *node) error {
+	if !d.opts.disallowDuplicates || len(n.children) < 4 {
+		return nil
+	}
+	seen := make(map[string]bool, len(n.children)/2)
+	for i := 0; i < len(n.children)-1; i += 2 {
+		k := n.children[i]
+		if isMergeKey(k) {
+			continue
+		}
+		text, ok := d.keyText(k)
+		if !ok {
+			continue
+		}
+		if seen[text] {
+			return &DuplicateKeyError{Key: text, Pos: k.pos}
+		}
+		seen[text] = true
+	}
+	return nil
+}
+
+// keyText returns the text of scalar key k, following an alias to its
+// anchor. It reports false for a mapping or sequence key and for an alias
+// with no anchor.
+func (d *decoder) keyText(k *node) (string, bool) {
+	if k.kind == nodeAlias {
+		target, err := d.aliasTarget(k)
+		if err != nil {
+			return "", false
+		}
+		k = target
+	}
+	if k.kind != nodeScalar {
+		return "", false
+	}
+	return k.value, true
+}
+
+// hasMergeKey reports whether mapping n holds a merge key.
+func hasMergeKey(n *node) bool {
+	for i := 0; i < len(n.children)-1; i += 2 {
+		if isMergeKey(n.children[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeSet records the entries a mapping has set, so that its merges never
+// replace one: field and key names for a struct target, decoded keys for a
+// map target.
+type mergeSet struct {
+	names map[string]bool
+	keys  map[any]bool
+}
+
+// explicitNames returns the scalar keys written in mapping n itself, or nil
+// when n has no merge key.
+func (d *decoder) explicitNames(n *node) *mergeSet {
+	if !hasMergeKey(n) {
+		return nil
+	}
+	names := make(map[string]bool, len(n.children)/2)
+	for i := 0; i < len(n.children)-1; i += 2 {
+		k := n.children[i]
+		if isMergeKey(k) {
+			continue
+		}
+		if text, ok := d.keyText(k); ok {
+			names[text] = true
+		}
+	}
+	return &mergeSet{names: names}
+}
+
+// decodeMappingToMap decodes mapping n into map v. The entries written in n
+// are decoded first and its merges after them, so that a merge never
+// replaces a key n sets, however that key is spelled. Duplicate keys are
+// those n itself writes twice; entries already in v do not count.
 func (d *decoder) decodeMappingToMap(n *node, v reflect.Value) error {
 	if v.IsNil() {
 		v.Set(reflect.MakeMap(v.Type()))
 	}
-	keyType := v.Type().Key()
-	valType := v.Type().Elem()
+	merges := hasMergeKey(n)
+	var written map[any]bool
+	if merges || d.opts.disallowDuplicates {
+		written = make(map[any]bool, len(n.children)/2)
+	}
 
 	for i := 0; i < len(n.children)-1; i += 2 {
 		keyNode := n.children[i]
-		valNode := n.children[i+1]
-
 		if isMergeKey(keyNode) {
-			if err := d.decodeMerge(valNode, v); err != nil {
+			continue
+		}
+		if _, err := d.decodeMapEntry(v, keyNode, n.children[i+1], written, false); err != nil {
+			return err
+		}
+	}
+	if !merges {
+		return nil
+	}
+	filled := &mergeSet{keys: written}
+	for i := 0; i < len(n.children)-1; i += 2 {
+		if isMergeKey(n.children[i]) {
+			if err := d.decodeMerge(n.children[i+1], v, filled); err != nil {
 				return err
 			}
-			continue
 		}
-
-		key := reflect.New(keyType).Elem()
-		typeErrs := len(d.typeErrors)
-		if err := d.decode(keyNode, key); err != nil {
-			return err
-		}
-		if len(d.typeErrors) > typeErrs {
-			// The key could not be decoded; leave the entry out rather than
-			// store it under the zero key.
-			continue
-		}
-		if !key.Comparable() {
-			d.addKeyTypeError(keyNode, collectionKind(key.Interface()), v.Type())
-			continue
-		}
-
-		if d.opts.disallowDuplicates {
-			existing := v.MapIndex(key)
-			if existing.IsValid() {
-				return &DuplicateKeyError{Key: keyNode.value, Pos: keyNode.pos}
-			}
-		}
-
-		val := reflect.New(valType).Elem()
-		if err := d.decode(valNode, val); err != nil {
-			return err
-		}
-
-		v.SetMapIndex(key, val)
 	}
 	return nil
 }
@@ -411,19 +498,26 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 			Pos:     n.pos,
 		}
 	}
+	if err := d.checkDuplicateKeys(n); err != nil {
+		return err
+	}
+	filled := d.explicitNames(n)
+	var inlineWritten map[any]bool
+	if filled != nil || d.opts.disallowDuplicates {
+		inlineWritten = make(map[any]bool)
+	}
 
+	// The entries written in n are decoded before its merges, so that a
+	// merge never replaces one.
 	for i := 0; i < len(n.children)-1; i += 2 {
 		keyNode := n.children[i]
 		valNode := n.children[i+1]
 
 		if isMergeKey(keyNode) {
-			if err := d.decodeMerge(valNode, v); err != nil {
-				return err
-			}
 			continue
 		}
 
-		keyName := keyNode.value
+		keyName, _ := d.keyText(keyNode)
 
 		idx, ok := sf.byName[keyName]
 		if ok && sf.fields[idx].inline {
@@ -431,7 +525,7 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 		}
 		if !ok {
 			if m, found := inlineMapField(v, sf); found {
-				if err := d.decodeMapEntry(m, keyNode, valNode); err != nil {
+				if _, err := d.decodeMapEntry(m, keyNode, valNode, inlineWritten, false); err != nil {
 					return err
 				}
 				continue
@@ -444,6 +538,10 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 
 		fi := sf.fields[idx]
 		field := fieldByIndex(v, fi.index)
+		if !field.IsValid() {
+			d.addEmbeddedPointerError(keyNode, v.Type(), fi.name)
+			continue
+		}
 		if !field.CanSet() {
 			continue
 		}
@@ -453,13 +551,37 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 		}
 	}
 
-	seen := make(map[string]bool)
-	for i := 0; i < len(n.children)-1; i += 2 {
-		if n.children[i].kind == nodeScalar {
-			seen[n.children[i].value] = true
+	if filled != nil {
+		filled.keys = inlineWritten
+		for i := 0; i < len(n.children)-1; i += 2 {
+			if isMergeKey(n.children[i]) {
+				if err := d.decodeMerge(n.children[i+1], v, filled); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
+	// filled holds the keys written in n and those set by its merges.
+	var seen map[string]bool
+	if filled != nil {
+		seen = filled.names
+	} else {
+		seen = make(map[string]bool, len(n.children)/2)
+		for i := 0; i < len(n.children)-1; i += 2 {
+			if text, ok := d.keyText(n.children[i]); ok {
+				seen[text] = true
+			}
+		}
+	}
+
+	return d.finishStruct(v, sf, seen, n.pos, true)
+}
+
+// finishStruct applies defaults and required checks to struct v once the
+// keys in seen have been decoded into it, and does the same for each struct
+// field that was absent. validate runs the validator on v.
+func (d *decoder) finishStruct(v reflect.Value, sf *structFields, seen map[string]bool, pos Position, validate bool) error {
 	if d.opts.applyDefaults {
 		if err := d.applyDefaults(v, sf, seen); err != nil {
 			return err
@@ -468,21 +590,89 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 
 	for _, fi := range sf.fields {
 		if fi.required && !seen[fi.name] {
-			return &SyntaxError{
-				Message: fmt.Sprintf("required field %q is missing", fi.name),
-				Pos:     n.pos,
-			}
+			return &RequiredFieldError{Field: fi.name, Pos: pos}
 		}
 	}
 
-	if d.opts.validator != nil && v.Kind() == reflect.Struct {
+	for i := range sf.fields {
+		fi := &sf.fields[i]
+		if seen[fi.name] || fi.inline {
+			continue
+		}
+		field := fieldForEncode(v, fi.index)
+		if field.Kind() != reflect.Struct || !field.CanSet() || !hasFillRules(field.Type(), d.opts.applyDefaults) {
+			continue
+		}
+		if err := d.finishStruct(field, getStructFields(field.Type()), nil, pos, false); err != nil {
+			return err
+		}
+	}
+
+	if validate && d.opts.validator != nil && v.CanAddr() {
 		iface := v.Addr().Interface()
 		if err := d.opts.validator.Struct(iface); err != nil {
-			return &ValidationError{Err: err, Pos: n.pos}
+			return &ValidationError{Err: err, Pos: pos}
 		}
 	}
 
 	return nil
+}
+
+// fillAbsent applies defaults and required checks to struct v, whose
+// mapping is absent from the input or null.
+func (d *decoder) fillAbsent(v reflect.Value, pos Position) error {
+	if v.Kind() != reflect.Struct || !v.CanSet() || !hasFillRules(v.Type(), d.opts.applyDefaults) {
+		return nil
+	}
+	sf := getStructFields(v.Type())
+	if len(sf.conflicts) > 0 {
+		return nil
+	}
+	return d.finishStruct(v, sf, nil, pos, false)
+}
+
+// fillRules records whether a struct type, or a struct field of it at any
+// depth (not behind a pointer), has a required field or a default.
+type fillRules struct{ required, defaults bool }
+
+var fillRulesCache sync.Map
+
+// hasFillRules reports whether decoding struct type t must check required
+// fields, or apply defaults when defaults is true, even when its mapping is
+// absent.
+func hasFillRules(t reflect.Type, defaults bool) bool {
+	r := structFillRules(t)
+	return r.required || defaults && r.defaults
+}
+
+func structFillRules(t reflect.Type) fillRules {
+	if cached, ok := fillRulesCache.Load(t); ok {
+		r, _ := cached.(fillRules)
+		return r
+	}
+	var r fillRules
+	collectFillRules(t, &r, map[reflect.Type]bool{})
+	fillRulesCache.Store(t, r)
+	return r
+}
+
+// collectFillRules merges into r the rules of t and of every struct type
+// reachable from it through non-inline struct fields. Promoted fields of an
+// embedded pointer can lead back to t, so each type is visited once.
+func collectFillRules(t reflect.Type, r *fillRules, visited map[reflect.Type]bool) {
+	if visited[t] {
+		return
+	}
+	visited[t] = true
+	sf := getStructFields(t)
+	for _, fi := range sf.fields {
+		r.required = r.required || fi.required
+		r.defaults = r.defaults || fi.hasDefault
+		ft := t.FieldByIndex(fi.index).Type
+		if ft.Kind() == reflect.Struct && !fi.inline {
+			collectFillRules(ft, r, visited)
+		}
+	}
 }
 
 // inlineMapField returns the settable inline map field of struct v, making
@@ -505,25 +695,45 @@ func inlineMapField(v reflect.Value, sf *structFields) (reflect.Value, bool) {
 	return reflect.Value{}, false
 }
 
-// decodeMapEntry decodes one mapping entry into map m.
-func (d *decoder) decodeMapEntry(m reflect.Value, keyNode, valNode *node) error {
+// decodeMapEntry decodes one mapping entry into map m and reports whether it
+// set it. written, when not nil, holds the decoded keys the mapping has set
+// and gains this one. A merged entry (merge true) whose key is in written is
+// skipped; a written entry whose key is in written is a [DuplicateKeyError]
+// under [WithDisallowDuplicateKey].
+func (d *decoder) decodeMapEntry(m reflect.Value, keyNode, valNode *node, written map[any]bool, merge bool) (bool, error) {
 	key := reflect.New(m.Type().Key()).Elem()
+	typeErrs := len(d.typeErrors)
 	if err := d.decode(keyNode, key); err != nil {
-		return err
+		return false, err
+	}
+	if len(d.typeErrors) > typeErrs {
+		// The key could not be decoded; leave the entry out rather than
+		// store it under the zero key.
+		return false, nil
 	}
 	if !key.Comparable() {
 		d.addKeyTypeError(keyNode, collectionKind(key.Interface()), m.Type())
-		return nil
+		return false, nil
 	}
-	if d.opts.disallowDuplicates && m.MapIndex(key).IsValid() {
-		return &DuplicateKeyError{Key: keyNode.value, Pos: keyNode.pos}
+	if written != nil {
+		k := key.Interface()
+		if written[k] {
+			if merge {
+				return false, nil
+			}
+			if d.opts.disallowDuplicates {
+				text, _ := d.keyText(keyNode)
+				return false, &DuplicateKeyError{Key: text, Pos: keyNode.pos}
+			}
+		}
+		written[k] = true
 	}
 	val := reflect.New(m.Type().Elem()).Elem()
 	if err := d.decode(valNode, val); err != nil {
-		return err
+		return false, err
 	}
 	m.SetMapIndex(key, val)
-	return nil
+	return true, nil
 }
 
 func (d *decoder) applyDefaults(v reflect.Value, sf *structFields, seen map[string]bool) error {
@@ -593,21 +803,21 @@ func setDefaultValue(v reflect.Value, raw string) error {
 			return nil
 		}
 		i, err := parseInt(raw)
-		if err != nil {
+		if err != nil || v.OverflowInt(i) {
 			return fmt.Errorf("%w %q", errInvalidIntDefault, raw)
 		}
 		v.SetInt(i)
 
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		u, err := parseUint(raw)
-		if err != nil {
+		if err != nil || v.OverflowUint(u) {
 			return fmt.Errorf("%w %q", errInvalidUintDefault, raw)
 		}
 		v.SetUint(u)
 
 	case reflect.Float32, reflect.Float64:
 		f, err := parseFloat(raw)
-		if err != nil {
+		if err != nil || v.OverflowFloat(f) {
 			return fmt.Errorf("%w %q", errInvalidFloatDefault, raw)
 		}
 		v.SetFloat(f)
@@ -619,100 +829,118 @@ func setDefaultValue(v reflect.Value, raw string) error {
 	return nil
 }
 
-func (d *decoder) decodeMerge(n *node, v reflect.Value) error {
-	if n.kind == nodeAlias {
-		target, ok := d.anchors[n.alias]
-		if !ok {
-			return &SyntaxError{
-				Message: fmt.Sprintf("unknown alias %q", n.alias),
-				Pos:     n.pos,
-			}
+// decodeMerge merges the mapping, or sequence of mappings, n into v. Keys in
+// filled are already set and are left alone; the keys it sets are added.
+func (d *decoder) decodeMerge(n *node, v reflect.Value, filled *mergeSet) error {
+	switch n.kind {
+	case nodeAlias:
+		target, err := d.aliasTarget(n)
+		if err != nil {
+			return err
 		}
 		d.aliasDepth++
 		defer func() { d.aliasDepth-- }()
-		return d.decodeMappingMerge(target, v)
-	}
-
-	if n.kind == nodeSequence {
+		if d.aliasDepth > d.opts.maxAliasExpansion {
+			return &CycleError{Anchor: n.alias, Pos: n.pos}
+		}
+		if target.kind != nodeMapping && target.kind != nodeSequence {
+			d.addMergeError(n)
+			return nil
+		}
+		return d.decodeMerge(target, v, filled)
+	case nodeSequence:
 		for _, child := range n.children {
-			if err := d.decodeMerge(child, v); err != nil {
+			if child.kind != nodeMapping && child.kind != nodeAlias {
+				d.addMergeError(child)
+				continue
+			}
+			if child.kind == nodeAlias {
+				if target, err := d.aliasTarget(child); err == nil && target.kind != nodeMapping {
+					d.addMergeError(child)
+					continue
+				}
+			}
+			if err := d.decodeMerge(child, v, filled); err != nil {
 				return err
 			}
 		}
 		return nil
+	case nodeMapping:
+		return d.decodeMappingMerge(n, v, filled)
 	}
-
-	if n.kind == nodeMapping {
-		return d.decodeMappingMerge(n, v)
-	}
-
+	d.addMergeError(n)
 	return nil
 }
 
-func (d *decoder) decodeMappingMerge(n *node, v reflect.Value) error {
-	if n.kind != nodeMapping {
-		return nil
-	}
-
+// decodeMappingMerge merges the entries of mapping n into v: first the keys
+// written in n, then those of n's own merges, so that n's keys win.
+func (d *decoder) decodeMappingMerge(n *node, v reflect.Value, filled *mergeSet) error {
+	var sf *structFields
 	switch v.Kind() {
 	case reflect.Map:
-		for i := 0; i < len(n.children)-1; i += 2 {
-			keyNode := n.children[i]
-			valNode := n.children[i+1]
-
-			key := reflect.New(v.Type().Key()).Elem()
-			if err := d.decode(keyNode, key); err != nil {
-				return err
-			}
-			if !key.Comparable() {
-				d.addKeyTypeError(keyNode, collectionKind(key.Interface()), v.Type())
-				continue
-			}
-			existing := v.MapIndex(key)
-			if existing.IsValid() {
-				continue
-			}
-			val := reflect.New(v.Type().Elem()).Elem()
-			if err := d.decode(valNode, val); err != nil {
-				return err
-			}
-			v.SetMapIndex(key, val)
-		}
-
 	case reflect.Struct:
-		sf := getStructFields(v.Type())
+		sf = getStructFields(v.Type())
+	default:
+		return nil
+	}
+	for _, merges := range []bool{false, true} {
 		for i := 0; i < len(n.children)-1; i += 2 {
 			keyNode := n.children[i]
 			valNode := n.children[i+1]
-
-			if isMergeKey(keyNode) {
-				if err := d.decodeMerge(valNode, v); err != nil {
+			if isMergeKey(keyNode) != merges {
+				continue
+			}
+			if merges {
+				if err := d.decodeMerge(valNode, v, filled); err != nil {
 					return err
 				}
 				continue
 			}
-
-			idx, ok := sf.byName[keyNode.value]
-			if !ok || sf.fields[idx].inline {
-				if m, found := inlineMapField(v, sf); found {
-					if err := d.decodeMappingMerge(&node{kind: nodeMapping, children: []*node{keyNode, valNode}}, m); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			fi := sf.fields[idx]
-			field := fieldByIndex(v, fi.index)
-			if !field.CanSet() || !field.IsZero() {
-				continue
-			}
-			if err := d.decode(valNode, field); err != nil {
+			if err := d.mergeEntry(v, sf, keyNode, valNode, filled); err != nil {
 				return err
 			}
 		}
 	}
-
 	return nil
+}
+
+// mergeEntry decodes one merged entry into map or struct v unless filled
+// shows it is already set, and records it in filled when it sets it.
+func (d *decoder) mergeEntry(v reflect.Value, sf *structFields, keyNode, valNode *node, filled *mergeSet) error {
+	if sf == nil {
+		_, err := d.decodeMapEntry(v, keyNode, valNode, filled.keys, true)
+		return err
+	}
+	name, scalar := d.keyText(keyNode)
+	if scalar && filled.names[name] {
+		return nil
+	}
+	set, err := d.mergeField(v, sf, name, keyNode, valNode, filled)
+	if set && scalar {
+		filled.names[name] = true
+	}
+	return err
+}
+
+// mergeField decodes one merged entry named name into struct v, reporting
+// whether it set a value.
+func (d *decoder) mergeField(v reflect.Value, sf *structFields, name string, keyNode, valNode *node, filled *mergeSet) (bool, error) {
+	idx, ok := sf.byName[name]
+	if !ok || sf.fields[idx].inline {
+		if m, found := inlineMapField(v, sf); found {
+			return d.decodeMapEntry(m, keyNode, valNode, filled.keys, true)
+		}
+		return false, nil
+	}
+	field := fieldByIndex(v, sf.fields[idx].index)
+	if !field.IsValid() {
+		d.addEmbeddedPointerError(keyNode, v.Type(), sf.fields[idx].name)
+		return false, nil
+	}
+	if !field.CanSet() {
+		return false, nil
+	}
+	return true, d.decode(valNode, field)
 }
 
 func (d *decoder) decodeSequence(n *node, v reflect.Value) error {
@@ -726,28 +954,39 @@ func (d *decoder) decodeSequence(n *node, v reflect.Value) error {
 		}
 		v.Set(slice)
 	case reflect.Array:
-		for i, child := range n.children {
-			if i >= v.Len() {
-				break
+		// As in encoding/json, items beyond the array's length are dropped
+		// and elements beyond the sequence's are zeroed.
+		for i := range v.Len() {
+			if i >= len(n.children) {
+				v.Index(i).Set(reflect.Zero(v.Type().Elem()))
+				continue
 			}
-			if err := d.decode(child, v.Index(i)); err != nil {
+			if err := d.decode(n.children[i], v.Index(i)); err != nil {
 				return err
 			}
 		}
 	case reflect.Interface:
 		if v.NumMethod() == 0 {
-			result, err := d.decodeToAny(n)
-			if err != nil {
-				return err
-			}
-			if result != nil {
-				v.Set(reflect.ValueOf(result))
-			}
-			return nil
+			return d.decodeIntoAny(n, v)
 		}
 		return &TypeError{Errors: []string{fmt.Sprintf("cannot decode sequence into %s", v.Type())}}
 	default:
 		d.addTypeError(n, v.Type())
+	}
+	return nil
+}
+
+// decodeIntoAny decodes n, whose nesting level decode has already counted,
+// into the empty interface v.
+func (d *decoder) decodeIntoAny(n *node, v reflect.Value) error {
+	d.depth--
+	result, err := d.decodeToAny(n)
+	d.depth++
+	if err != nil {
+		return err
+	}
+	if result != nil {
+		v.Set(reflect.ValueOf(result))
 	}
 	return nil
 }
@@ -760,17 +999,16 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 		return nil, err
 	}
 
-	if n.anchor != "" {
-		d.anchors[n.anchor] = n
+	err := d.enter(n)
+	defer func() { d.depth-- }()
+	if err != nil {
+		return nil, err
 	}
 
 	if n.kind == nodeAlias {
-		target, ok := d.anchors[n.alias]
-		if !ok {
-			return nil, &SyntaxError{
-				Message: fmt.Sprintf("unknown alias %q", n.alias),
-				Pos:     n.pos,
-			}
+		target, err := d.aliasTarget(n)
+		if err != nil {
+			return nil, err
 		}
 		d.aliasDepth++
 		if d.aliasDepth > d.opts.maxAliasExpansion {
@@ -792,6 +1030,9 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 		return d.scalarToAny(n), nil
 
 	case nodeMapping:
+		if err := d.checkDuplicateKeys(n); err != nil {
+			return nil, err
+		}
 		if d.opts.useOrderedMap {
 			return d.decodeMappingToOrderedMap(n)
 		}
@@ -805,21 +1046,14 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 				if err != nil {
 					return nil, err
 				}
-				if mm, ok := merged.(map[string]any); ok {
+				sources, ok := mergeSources[map[string]any](merged)
+				if !ok {
+					d.addMergeError(valNode)
+				}
+				for _, mm := range sources {
 					for k, v := range mm {
 						if _, exists := m[k]; !exists {
 							m[k] = v
-						}
-					}
-				}
-				if ms, ok := merged.([]any); ok {
-					for _, item := range ms {
-						if mm, ok := item.(map[string]any); ok {
-							for k, v := range mm {
-								if _, exists := m[k]; !exists {
-									m[k] = v
-								}
-							}
 						}
 					}
 				}
@@ -833,15 +1067,15 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 			case nodeScalar:
 				keyStr = keyNode.value
 			case nodeAlias:
-				resolved, err := d.decodeToAny(keyNode)
+				target, err := d.aliasTarget(keyNode)
 				if err != nil {
 					return nil, err
 				}
-				if isCollection(resolved) {
-					d.addKeyTypeError(keyNode, collectionKind(resolved), reflect.TypeFor[map[string]any]())
+				if target.kind != nodeScalar {
+					d.addKeyTypeError(keyNode, target.kind, reflect.TypeFor[map[string]any]())
 					continue
 				}
-				keyStr = fmt.Sprintf("%v", resolved)
+				keyStr = target.value
 			default:
 				d.addKeyTypeError(keyNode, keyNode.kind, reflect.TypeFor[map[string]any]())
 				continue
@@ -870,12 +1104,37 @@ func (d *decoder) decodeToAny(n *node) (any, error) {
 	return nil, nil
 }
 
+// mergeSources returns the mappings of type M that a decoded merge value
+// holds: the value itself, or the items of a sequence of them. It reports
+// false when the value is anything else.
+func mergeSources[M map[string]any | MapSlice](v any) ([]M, bool) {
+	if m, ok := v.(M); ok {
+		return []M{m}, true
+	}
+	seq, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]M, 0, len(seq))
+	for _, item := range seq {
+		m, ok := item.(M)
+		if !ok {
+			return out, false
+		}
+		out = append(out, m)
+	}
+	return out, true
+}
+
 // decodeIntoMapSlice decodes mapping n into the MapSlice v, decoding nested
 // mappings as MapSlice too, as [WithOrderedMap] does.
 func (d *decoder) decodeIntoMapSlice(n *node, v reflect.Value) error {
 	prev := d.opts.useOrderedMap
 	d.opts.useOrderedMap = true
 	defer func() { d.opts.useOrderedMap = prev }()
+	if err := d.checkDuplicateKeys(n); err != nil {
+		return err
+	}
 	ms, err := d.decodeMappingToOrderedMap(n)
 	if err != nil {
 		return err
@@ -901,15 +1160,11 @@ func (d *decoder) decodeMappingToOrderedMap(n *node) (MapSlice, error) {
 			if err != nil {
 				return nil, err
 			}
-			sources := []any{src}
-			if seq, ok := src.([]any); ok {
-				sources = seq
+			sources, ok := mergeSources[MapSlice](src)
+			if !ok {
+				d.addMergeError(valNode)
 			}
-			for _, s := range sources {
-				m, ok := s.(MapSlice)
-				if !ok {
-					continue
-				}
+			for _, m := range sources {
 				for _, item := range m {
 					k, isStr := item.Key.(string)
 					if isStr {
@@ -926,20 +1181,31 @@ func (d *decoder) decodeMappingToOrderedMap(n *node) (MapSlice, error) {
 		}
 
 		// MapItem.Key can hold any key, so a mapping or sequence key keeps
-		// its decoded value.
+		// its decoded value; an alias to a scalar key uses that key's text.
 		var key any
 		switch keyNode.kind {
 		case nodeScalar:
 			key = keyNode.value
+		case nodeAlias:
+			target, err := d.aliasTarget(keyNode)
+			if err != nil {
+				return nil, err
+			}
+			if target.kind == nodeScalar {
+				key = target.value
+				break
+			}
+			resolved, err := d.decodeToAny(keyNode)
+			if err != nil {
+				return nil, err
+			}
+			key = resolved
 		default:
 			resolved, err := d.decodeToAny(keyNode)
 			if err != nil {
 				return nil, err
 			}
 			key = resolved
-			if keyNode.kind == nodeAlias && !isCollection(resolved) {
-				key = fmt.Sprintf("%v", resolved)
-			}
 		}
 
 		val, err := d.decodeToAny(valNode)
@@ -961,15 +1227,6 @@ func (d *decoder) decodeMappingToOrderedMap(n *node) (MapSlice, error) {
 	return ms, nil
 }
 
-// isCollection reports whether v is a decoded mapping or sequence.
-func isCollection(v any) bool {
-	switch v.(type) {
-	case map[string]any, []any, MapSlice:
-		return true
-	}
-	return false
-}
-
 func (d *decoder) scalarToAny(n *node) any {
 	val := n.value
 
@@ -985,8 +1242,12 @@ func (d *decoder) scalarToAny(n *node) any {
 		return val
 	}
 
-	if v, ok := resolveCoreTag(n.tag, val); ok {
-		return v
+	if isCoreTag(n.tag) {
+		if v, ok := resolveCoreTag(n.tag, val); ok {
+			return v
+		}
+		d.addTagError(n)
+		return nil
 	}
 
 	if n.implicit && val == "" {
@@ -1015,9 +1276,16 @@ const (
 	tagFloat = "tag:yaml.org,2002:float"
 )
 
+// isCoreTag reports whether tag is !!null, !!bool, !!int or !!float.
+func isCoreTag(tag string) bool {
+	return tag == tagNull || tag == tagBool || tag == tagInt || tag == tagFloat
+}
+
 // resolveCoreTag returns the value of a scalar explicitly tagged !!null,
-// !!bool, !!int or !!float. It reports false for other tags and for a value
-// the tag cannot represent, which then resolves as if untagged.
+// !!bool, !!int or !!float: an !!int is an int64, or a uint64 above the
+// int64 range, and a number beyond those ranges or the float64 range keeps
+// its text. It reports false for other tags and for a value that does not
+// fit its tag.
 func resolveCoreTag(tag, val string) (any, bool) {
 	switch tag {
 	case tagNull:
@@ -1029,38 +1297,145 @@ func resolveCoreTag(tag, val string) (any, bool) {
 			return b, true
 		}
 	case tagInt:
-		if i, err := parseInt(val); err == nil {
+		i, err := parseInt(val)
+		if err == nil {
 			return i, true
 		}
+		if u, uerr := parseUint(val); uerr == nil {
+			return u, true
+		}
+		if errors.Is(err, strconv.ErrRange) {
+			return val, true
+		}
 	case tagFloat:
-		if f, err := parseFloat(val); err == nil {
+		f, err := parseFloat(val)
+		if err == nil {
 			return f, true
+		}
+		if errors.Is(err, strconv.ErrRange) {
+			return val, true
 		}
 	}
 	return nil, false
 }
 
+// addTagError records that scalar n carries a !!null, !!bool, !!int or
+// !!float tag that its value does not fit.
+func (d *decoder) addTagError(n *node) {
+	msg := fmt.Sprintf("line %d, column %d: cannot unmarshal %q as %s", n.pos.Line, n.pos.Column, n.value, d.nodeTagName(n))
+	d.typeErrors = append(d.typeErrors, msg)
+}
+
 func scalarToAnyCore(val string) any {
-	if isNullValue(val) {
+	c := resolveCore(val)
+	switch c.kind {
+	case coreNull:
 		return nil
+	case coreBool:
+		return c.b
+	case coreInt:
+		return c.i
+	case coreUint:
+		return c.u
+	case coreFloat:
+		if coreIntSyntax(val) {
+			// An integer beyond the int64 and uint64 ranges keeps its
+			// exact text rather than losing digits as a float64.
+			return val
+		}
+		return c.f
 	}
-
-	if b, err := parseBool(val); err == nil {
-		return b
-	}
-
-	if i, ok := parseCoreInt(val); ok {
-		return i
-	}
-	if u, ok := parseCoreUint(val); ok {
-		return u
-	}
-
-	if f, ok := parseCoreFloat(val); ok {
-		return f
-	}
-
 	return val
+}
+
+// coreKind is the type a plain scalar resolves to under the Core schema.
+type coreKind uint8
+
+const (
+	coreStr coreKind = iota
+	coreNull
+	coreBool
+	coreInt  // fits int64
+	coreUint // fits uint64 but not int64
+	coreFloat
+)
+
+// coreValue is a plain scalar resolved under the Core schema: its kind and,
+// for a bool or number, its value.
+type coreValue struct {
+	kind coreKind
+	b    bool
+	i    int64
+	u    uint64
+	f    float64
+}
+
+// resolveCore resolves plain scalar s under the Core schema. It allocates
+// nothing for a string that cannot be a number.
+func resolveCore(s string) coreValue {
+	if isNullValue(s) {
+		return coreValue{kind: coreNull}
+	}
+	if b, ok := parseCoreBool(s); ok {
+		return coreValue{kind: coreBool, b: b}
+	}
+	// Every Core int and float starts with a digit, a sign or a dot.
+	if c := s[0]; c != '.' && c != '+' && c != '-' && (c < '0' || c > '9') {
+		return coreValue{}
+	}
+	if coreIntSyntax(s) {
+		if i, ok := parseCoreInt(s); ok {
+			return coreValue{kind: coreInt, i: i}
+		}
+		if u, ok := parseCoreUint(s); ok {
+			return coreValue{kind: coreUint, u: u}
+		}
+	}
+	if f, ok := parseCoreFloat(s); ok {
+		return coreValue{kind: coreFloat, f: f}
+	}
+	return coreValue{}
+}
+
+// coreIntSyntax reports whether s has the form parseCoreInt or
+// parseCoreUint accept, apart from range: an optionally signed decimal, or
+// digits after a lowercase 0x or 0o prefix.
+func coreIntSyntax(s string) bool {
+	digits, isDigit := s, isDecDigit
+	switch {
+	case strings.HasPrefix(s, "0x"):
+		digits, isDigit = s[2:], isHexDigit
+	case strings.HasPrefix(s, "0o"):
+		digits, isDigit = s[2:], isOctDigit
+	case s[0] == '+' || s[0] == '-':
+		digits = s[1:]
+	}
+	if digits == "" {
+		return false
+	}
+	for i := range len(digits) {
+		if !isDigit(digits[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isDecDigit(c byte) bool { return c >= '0' && c <= '9' }
+func isOctDigit(c byte) bool { return c >= '0' && c <= '7' }
+func isHexDigit(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+// parseCoreBool returns the value of a Core schema boolean spelling.
+func parseCoreBool(s string) (value, ok bool) {
+	switch s {
+	case trueLiteral, "True", "TRUE":
+		return true, true
+	case falseLiteral, "False", "FALSE":
+		return false, true
+	}
+	return false, false
 }
 
 func scalarToAnyJSON(val string) any {
@@ -1079,8 +1454,17 @@ func scalarToAnyJSON(val string) any {
 	if val == "" || val[0] == '+' {
 		return val
 	}
-	if i, err := strconv.ParseInt(val, 10, 64); err == nil {
+	i, err := strconv.ParseInt(val, 10, 64)
+	if err == nil {
 		return i
+	}
+	if errors.Is(err, strconv.ErrRange) {
+		// As under the Core schema: uint64 above the int64 range, and the
+		// exact text beyond it.
+		if u, err := strconv.ParseUint(val, 10, 64); err == nil {
+			return u
+		}
+		return val
 	}
 	if isDecimalFloat(val) {
 		if f, err := strconv.ParseFloat(val, 64); err == nil {
@@ -1092,14 +1476,110 @@ func scalarToAnyJSON(val string) any {
 }
 
 func (d *decoder) addTypeError(n *node, t reflect.Type) {
-	msg := fmt.Sprintf("line %d: cannot unmarshal %s into Go value of type %s", n.pos.Line, nodeKindName(n.kind), t)
+	msg := fmt.Sprintf("line %d, column %d: cannot unmarshal %s into Go value of type %s", n.pos.Line, n.pos.Column, d.nodeTagName(n), t)
 	d.typeErrors = append(d.typeErrors, msg)
+}
+
+// addOverflowError records that scalar n is out of range for type t.
+func (d *decoder) addOverflowError(n *node, t reflect.Type) {
+	msg := fmt.Sprintf("line %d, column %d: value %q overflows Go value of type %s", n.pos.Line, n.pos.Column, n.value, t)
+	d.typeErrors = append(d.typeErrors, msg)
+}
+
+// addRangeOrTypeError records why scalar n could not be parsed for type t:
+// out of range when err is [strconv.ErrRange], otherwise the wrong type.
+func (d *decoder) addRangeOrTypeError(n *node, t reflect.Type, err error) {
+	if errors.Is(err, strconv.ErrRange) {
+		d.addOverflowError(n, t)
+		return
+	}
+	d.addTypeError(n, t)
+}
+
+// addMergeError records that the merge value n is not a mapping or a
+// sequence of mappings.
+func (d *decoder) addMergeError(n *node) {
+	msg := fmt.Sprintf("line %d, column %d: merge value must be a mapping or a sequence of mappings", n.pos.Line, n.pos.Column)
+	d.typeErrors = append(d.typeErrors, msg)
+}
+
+// addEmbeddedPointerError records that field name of struct type t is
+// behind a nil pointer to an unexported embedded struct, which cannot be
+// allocated.
+func (d *decoder) addEmbeddedPointerError(n *node, t reflect.Type, name string) {
+	msg := fmt.Sprintf("line %d, column %d: cannot set field %q of %s: it is behind a nil pointer to an unexported embedded struct", n.pos.Line, n.pos.Column, name, t)
+	d.typeErrors = append(d.typeErrors, msg)
+}
+
+// nodeTagName returns the tag n resolves to, in short form, for messages.
+func (d *decoder) nodeTagName(n *node) string {
+	if n.tag != "" {
+		if rest, ok := strings.CutPrefix(n.tag, "tag:yaml.org,2002:"); ok {
+			return "!!" + rest
+		}
+		return n.tag
+	}
+	if n.kind != nodeScalar {
+		return nodeKindName(n.kind)
+	}
+	if n.style != scalarPlain || d.opts.schema == FailsafeSchema {
+		return "!!str"
+	}
+	var v any
+	if d.opts.schema == JSONSchema {
+		v = scalarToAnyJSON(n.value)
+	} else {
+		v = scalarToAnyCore(n.value)
+	}
+	switch v.(type) {
+	case nil:
+		return "!!null"
+	case bool:
+		return "!!bool"
+	case int64, uint64:
+		return "!!int"
+	case float64:
+		return "!!float"
+	}
+	// A number beyond the Go ranges decodes as its text but is a number.
+	if d.opts.schema != JSONSchema || isJSONNumber(n.value) {
+		switch {
+		case coreIntSyntax(n.value):
+			return "!!int"
+		case isDecimalFloat(n.value):
+			return "!!float"
+		}
+	}
+	return "!!str"
+}
+
+// unmarshalerError wraps err, returned by a custom unmarshaler decoding n,
+// in an [*UnmarshalerError] that gives n's position. It returns nil for a
+// nil err, and err itself when it already carries a position.
+func unmarshalerError(err error, n *node) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := errorPosition(err); ok {
+		return err
+	}
+	return &UnmarshalerError{Err: err, Pos: n.pos}
+}
+
+// bytesUnmarshalerError is unmarshalerError for an unmarshaler given n
+// re-encoded as bytes. Positions in its error refer to those bytes, not to
+// the source, so err is always wrapped with n's position.
+func bytesUnmarshalerError(err error, n *node) error {
+	if err == nil {
+		return nil
+	}
+	return &UnmarshalerError{Err: err, Pos: n.pos}
 }
 
 // addKeyTypeError records that the mapping or sequence key at n cannot be a
 // key of a map of type mapType.
 func (d *decoder) addKeyTypeError(n *node, kind nodeKind, mapType reflect.Type) {
-	msg := fmt.Sprintf("line %d: cannot use %s as a key of %s", n.pos.Line, nodeKindName(kind), mapType)
+	msg := fmt.Sprintf("line %d, column %d: cannot use %s as a key of %s", n.pos.Line, n.pos.Column, nodeKindName(kind), mapType)
 	d.typeErrors = append(d.typeErrors, msg)
 }
 
@@ -1140,11 +1620,8 @@ func isNullValue(s string) bool {
 }
 
 func parseBool(s string) (bool, error) {
-	switch s {
-	case trueLiteral, "True", "TRUE":
-		return true, nil
-	case falseLiteral, "False", "FALSE":
-		return false, nil
+	if b, ok := parseCoreBool(s); ok {
+		return b, nil
 	}
 	return false, fmt.Errorf("not a bool %q: %w", s, errNotBool)
 }
@@ -1303,10 +1780,16 @@ func parseTime(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("cannot parse %q as time: %w", s, errNotTime)
 }
 
+// fieldByIndex returns the field of struct v at index, allocating embedded
+// struct pointers on the way. It returns the zero Value when such a pointer
+// is nil and cannot be set, as for an unexported embedded struct.
 func fieldByIndex(v reflect.Value, index []int) reflect.Value {
 	for _, i := range index {
 		if v.Kind() == reflect.Pointer {
 			if v.IsNil() {
+				if !v.CanSet() {
+					return reflect.Value{}
+				}
 				v.Set(reflect.New(v.Type().Elem()))
 			}
 			v = v.Elem()
@@ -1321,9 +1804,63 @@ func marshalNode(n *node) ([]byte, error) {
 	return enc.encodeNode(n)
 }
 
+// rawBytes returns n re-encoded for an unmarshaler that takes bytes. Aliases
+// are replaced by their anchors' content and anchors are left out, so the
+// bytes parse on their own and hold only the value.
+func (d *decoder) rawBytes(n *node) ([]byte, error) {
+	if !hasAnchorOrAlias(n) {
+		return marshalNode(n)
+	}
+	expanded, err := d.expandAliases(n)
+	if err != nil {
+		return nil, err
+	}
+	return marshalNode(expanded)
+}
+
+func hasAnchorOrAlias(n *node) bool {
+	return n.anchor != "" || n.kind == nodeAlias || slices.ContainsFunc(n.children, hasAnchorOrAlias)
+}
+
+// expandAliases returns a copy of n with every alias replaced by a copy of
+// its anchor's node and no anchors. Expansion counts against the same limits
+// as decoding.
+func (d *decoder) expandAliases(n *node) (*node, error) {
+	if n.kind == nodeAlias {
+		target, err := d.aliasTarget(n)
+		if err != nil {
+			return nil, err
+		}
+		d.aliasDepth++
+		defer func() { d.aliasDepth-- }()
+		if d.aliasDepth > d.opts.maxAliasExpansion {
+			return nil, &CycleError{Anchor: n.alias, Pos: n.pos}
+		}
+		return d.expandAliases(target)
+	}
+	if err := d.countAliasNode(n); err != nil {
+		return nil, err
+	}
+	c := *n
+	c.anchor = ""
+	if len(n.children) > 0 {
+		c.children = make([]*node, len(n.children))
+		for i, child := range n.children {
+			e, err := d.expandAliases(child)
+			if err != nil {
+				return nil, err
+			}
+			c.children[i] = e
+		}
+	}
+	return &c, nil
+}
+
 // Unmarshaler is implemented by types that can decode themselves from YAML.
-// The unmarshal function may be called with a pointer to decode the
-// underlying YAML value into any Go type.
+// The unmarshal function decodes the underlying YAML value into any Go
+// type; its argument must be a non-nil pointer (or a non-nil map), or it
+// returns an error wrapping [ErrNilPointer]. An error UnmarshalYAML returns
+// is wrapped in an [*UnmarshalerError] giving the value's position.
 type Unmarshaler interface {
 	UnmarshalYAML(unmarshal func(any) error) error
 }

@@ -472,13 +472,13 @@ func TestMarshalSpecialFloats(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(data)
-	if !strings.Contains(s, "inf: .inf") {
+	if !strings.Contains(s, "\"inf\": .inf") {
 		t.Errorf("expected .inf, got:\n%s", s)
 	}
 	if !strings.Contains(s, "neg_inf: -.inf") {
 		t.Errorf("expected -.inf, got:\n%s", s)
 	}
-	if !strings.Contains(s, "nan: .nan") {
+	if !strings.Contains(s, "\"nan\": .nan") {
 		t.Errorf("expected .nan, got:\n%s", s)
 	}
 }
@@ -1248,14 +1248,13 @@ func TestIsEmpty(t *testing.T) {
 	}
 }
 
-func TestMarshalChannel(t *testing.T) {
-	ch := make(chan int)
-	data, err := Marshal(ch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(data)) == "" {
-		t.Error("expected some output for channel type")
+func TestMarshalUnsupportedKinds(t *testing.T) {
+	for _, v := range []any{make(chan int), func() {}, complex(1, 2), map[string]any{"f": func() {}}} {
+		for _, opts := range [][]EncodeOption{nil, {WithFlow(true)}} {
+			if data, err := MarshalWithOptions(v, opts...); !errors.Is(err, ErrUnsupported) {
+				t.Errorf("%T: got %q, %v; want ErrUnsupported", v, data, err)
+			}
+		}
 	}
 }
 
@@ -1268,11 +1267,8 @@ func TestMarshalMapSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(out)
-	zIdx := strings.Index(s, "z:")
-	aIdx := strings.Index(s, "a:")
-	if zIdx > aIdx {
-		t.Errorf("MapSlice should preserve insertion order, got %q", s)
+	if string(out) != "z: 1\na: 2\n" {
+		t.Errorf("MapSlice should be a mapping in insertion order, got %q", out)
 	}
 }
 
@@ -4310,8 +4306,8 @@ func TestMarshalInlineMapAllModes(t *testing.T) {
 		opts []EncodeOption
 		want string
 	}{
-		{"block", nil, "name: app\n\"1\": y\n\"a: b\": 2\nx:\n  g: h\nf: q\n"},
-		{"flow", []EncodeOption{WithFlow(true)}, "{name: app, \"1\": y, \"a: b\": 2, x: {g: h}, f: q}\n"},
+		{"block", nil, "name: app\n\"1\": \"y\"\n\"a: b\": 2\nx:\n  g: h\nf: q\n"},
+		{"flow", []EncodeOption{WithFlow(true)}, "{name: app, \"1\": \"y\", \"a: b\": 2, x: {g: h}, f: q}\n"},
 		{"json", []EncodeOption{WithJSON(true)}, "\"name\": \"app\"\n\"1\": \"y\"\n\"a: b\": 2\n\"x\":\n  \"g\": \"h\"\n\"f\": \"q\"\n"},
 		{"kyaml", []EncodeOption{WithKYAML()}, ""},
 	}
@@ -4525,7 +4521,7 @@ func TestSpecialFloatSpellingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"- inf\n", "- nan\n", "- Infinity\n", "- \".inf\"\n", "- \"0x1F\"\n"} {
+	for _, line := range []string{"- \"inf\"\n", "- \"nan\"\n", "- \"Infinity\"\n", "- \".inf\"\n", "- \"0x1F\"\n"} {
 		if !strings.Contains(string(data), line) {
 			t.Errorf("output missing %q:\n%s", line, data)
 		}
@@ -4615,7 +4611,7 @@ func TestCoreIntResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "- 0x-1\n- 0b101\n- \"0x1F\"\n- \"0o17\"\n- \"+5\"\n- 0x+1\n- \"-12\"\n"; string(data) != want {
+	if want := "- 0x-1\n- \"0b101\"\n- \"0x1F\"\n- \"0o17\"\n- \"+5\"\n- 0x+1\n- \"-12\"\n"; string(data) != want {
 		t.Errorf("got %q, want %q", data, want)
 	}
 	var back []any
@@ -4852,7 +4848,7 @@ func TestIntFormsForTypedAndUntypedTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := "- 0X1F\n- 0O7\n- 0B1\n- \"0x1F\"\n- \"0o7\"\n- \"18446744073709551615\"\n"; string(data) != w {
+	if w := "- \"0X1F\"\n- \"0O7\"\n- \"0B1\"\n- \"0x1F\"\n- \"0o7\"\n- \"18446744073709551615\"\n"; string(data) != w {
 		t.Errorf("got %q, want %q", data, w)
 	}
 	var back []any
@@ -4951,8 +4947,8 @@ func TestCollectionKeysIntoAny(t *testing.T) {
 		err := Unmarshal(src, target)
 		var typeErr *TypeError
 		if !errors.As(err, &typeErr) || len(typeErr.Errors) != 2 ||
-			!strings.HasPrefix(typeErr.Errors[0], "line 1: cannot ") || !strings.Contains(typeErr.Errors[0], "!!seq") ||
-			!strings.HasPrefix(typeErr.Errors[1], "line 3: cannot ") || !strings.Contains(typeErr.Errors[1], "!!map") {
+			!strings.HasPrefix(typeErr.Errors[0], "line 1, column ") || !strings.Contains(typeErr.Errors[0], "!!seq") ||
+			!strings.HasPrefix(typeErr.Errors[1], "line 3, column ") || !strings.Contains(typeErr.Errors[1], "!!map") {
 			t.Errorf("%T: got %v", target, err)
 		}
 	}

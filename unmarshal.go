@@ -4,14 +4,24 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 )
 
 // Unmarshal parses YAML data and stores the first document into the value
 // pointed to by v. If v is nil or not a pointer, Unmarshal returns an error.
+//
+// A number that does not fit the target type is reported in a [TypeError]
+// rather than wrapped or rounded; into any, numbers decode as int64, uint64
+// or float64, and one beyond those ranges keeps its text (see
+// [CoreSchema]). An alias must follow its anchor in the same document, or
+// name an anchor of a reference file. Mapping keys decoded into any keep
+// their source text, so "1" and "0x1" are different keys; an alias key
+// takes the text of the scalar it refers to.
 func Unmarshal(data []byte, v any) error {
 	return UnmarshalWithOptions(data, v)
 }
@@ -80,18 +90,26 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 		return fmt.Errorf("yaml: unmarshal requires a non-nil pointer, got %T: %w", v, ErrNilPointer)
 	}
 
-	docs, anchors, nodes, err := parseStream(data, o)
+	docs, refAnchors, nodes, err := parseStream(data, o)
 	if err != nil {
 		return err
 	}
+	return decodeFirst(docs, refAnchors, nodes, o, rv)
+}
+
+// decodeFirst decodes the first of the parsed docs into the value non-nil
+// pointer rv points to. refAnchors and nodes are as parseStream returns
+// them.
+func decodeFirst(docs []*node, refAnchors map[string]*node, nodes int, o *decoderOptions, rv reflect.Value) error {
+	d := newDecoder(o)
+	d.refAnchors = refAnchors
+	d.aliasLimit = aliasNodeLimit(o, nodes)
 
 	if len(docs) == 0 {
-		return nil
+		// An empty stream holds no value, but a struct target still gets
+		// its defaults and required checks.
+		return d.fillAbsent(derefTarget(rv.Elem()), Position{})
 	}
-
-	d := newDecoder(o)
-	d.anchors = anchors
-	d.aliasLimit = aliasNodeLimit(o, nodes)
 
 	if err := d.decode(docs[0], rv.Elem()); err != nil {
 		return err
@@ -104,10 +122,18 @@ func UnmarshalWithOptions(data []byte, v any, opts ...DecodeOption) error {
 	return nil
 }
 
+// derefTarget follows non-nil pointers from v to the value they point to.
+func derefTarget(v reflect.Value) reflect.Value {
+	for v.Kind() == reflect.Pointer && !v.IsNil() {
+		v = v.Elem()
+	}
+	return v
+}
+
 // parseStream applies the size limit, scans and parses data, validates it
 // when strict KYAML is on, and loads reference anchors. It returns the
-// documents, the anchors available to aliases, and the number of nodes
-// parsed (input plus reference files).
+// documents, the anchors loaded from reference files, and the number of
+// nodes parsed (input plus reference files).
 func parseStream(data []byte, o *decoderOptions) ([]*node, map[string]*node, int, error) {
 	if o.maxDocumentSize > 0 && len(data) > o.maxDocumentSize {
 		return nil, nil, 0, fmt.Errorf("yaml: document size %d exceeds maximum %d: %w", len(data), o.maxDocumentSize, ErrDocumentSize)
@@ -149,12 +175,12 @@ func parseStream(data []byte, o *decoderOptions) ([]*node, map[string]*node, int
 		}
 	}
 
-	refNodes, err := loadReferences(p.anchors, o)
+	refAnchors, refNodes, err := loadReferences(p.anchors, o)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 
-	return docs, p.anchors, p.nodeCount + refNodes, nil
+	return docs, refAnchors, p.nodeCount + refNodes, nil
 }
 
 // aliasNodeLimit returns the alias expansion node limit for an input of
@@ -173,7 +199,9 @@ func aliasNodeLimit(o *decoderOptions, parsed int) int {
 // successive calls to [Decoder.Decode] to iterate over a multi-document
 // stream; it returns [io.EOF] when no more documents remain.
 //
-// The entire input is consumed from the reader on the first call to Decode.
+// The entire input is consumed from the reader on the first call to Decode;
+// with [WithMaxDocumentSize], reading stops as soon as the input exceeds
+// the limit.
 // For streams where documents arrive incrementally (e.g. from a network
 // connection), callers should frame each document and decode individually
 // with [Unmarshal].
@@ -209,7 +237,11 @@ func (dec *Decoder) Decode(v any) error {
 // implement [UnmarshalerContext].
 func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 	if !dec.init {
-		data, err := io.ReadAll(dec.r)
+		r := dec.r
+		if limit := dec.opts.maxDocumentSize; limit > 0 && limit < math.MaxInt64 {
+			r = io.LimitReader(r, int64(limit)+1)
+		}
+		data, err := io.ReadAll(r)
 		if err != nil {
 			return fmt.Errorf("yaml: read input: %w", err)
 		}
@@ -232,7 +264,7 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 
 	d := newDecoder(dec.opts)
 	d.ctx = ctx
-	d.anchors = dec.anch
+	d.refAnchors = dec.anch
 	d.aliasLimit = aliasNodeLimit(dec.opts, dec.nodes)
 
 	doc := dec.docs[dec.pos]
@@ -249,91 +281,119 @@ func (dec *Decoder) DecodeContext(ctx context.Context, v any) error {
 	return nil
 }
 
-func loadReferences(anchors map[string]*node, o *decoderOptions) (int, error) {
-	files := o.referenceFiles
+// within reports whether path is dir or lies inside it. Both must be clean
+// and absolute or relative to the same directory.
+func within(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// referenceDirFiles returns the .yaml and .yml files in dir, and in its
+// subdirectories when recursive is set. A file whose symlink resolves
+// outside dir fails with [ErrPathEscape].
+func referenceDirFiles(dir string, recursive bool) ([]string, error) {
+	realDir, err := filepath.EvalSymlinks(filepath.Clean(dir))
+	if err != nil {
+		return nil, fmt.Errorf("yaml: cannot resolve reference dir %q: %w", dir, err)
+	}
+	var files []string
+	add := func(path string) error {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("yaml: cannot resolve symlink %q: %w", path, err)
+		}
+		if !within(realDir, resolved) {
+			return fmt.Errorf("yaml: reference file %q escapes directory %q: %w", resolved, realDir, ErrPathEscape)
+		}
+		// Read the file checked, not a path a symlink swap could redirect.
+		files = append(files, resolved)
+		return nil
+	}
+	isYAML := func(name string) bool {
+		return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
+	}
+
+	if recursive {
+		err = filepath.WalkDir(realDir, func(path string, d os.DirEntry, err error) error { //nolint:gosec // G703: walks the caller's reference dir by design
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !isYAML(d.Name()) {
+				return nil
+			}
+			return add(path)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("yaml: walk reference dir: %w", err)
+		}
+		return files, nil
+	}
+
+	entries, err := os.ReadDir(realDir)
+	if err != nil {
+		return nil, fmt.Errorf("yaml: cannot read reference dir %q: %w", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !isYAML(e.Name()) {
+			continue
+		}
+		if err := add(filepath.Join(realDir, e.Name())); err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}
+
+// loadReferences loads the anchors of the reference files and directories
+// in o. It returns them with the number of nodes parsed. An anchor also in
+// docAnchors, or in another reference file, fails with a
+// [DuplicateKeyError].
+func loadReferences(docAnchors map[string]*node, o *decoderOptions) (map[string]*node, int, error) {
+	files := slices.Clone(o.referenceFiles)
 	nodes := 0
+	if len(files) == 0 && len(o.referenceDirs) == 0 {
+		return nil, 0, nil
+	}
+	anchors := make(map[string]*node)
 
 	for _, dir := range o.referenceDirs {
-		clean := filepath.Clean(dir)
-		realClean, err := filepath.EvalSymlinks(clean)
+		dirFiles, err := referenceDirFiles(dir, o.recursiveDir)
 		if err != nil {
-			return 0, fmt.Errorf("yaml: cannot resolve reference dir %q: %w", dir, err)
+			return nil, 0, err
 		}
-		if o.recursiveDir {
-			err = filepath.WalkDir(realClean, func(path string, d os.DirEntry, err error) error { //nolint:gosec // G703: the directory is the caller's reference option
-				if err != nil {
-					return err
-				}
-				if d.IsDir() {
-					return nil
-				}
-				name := d.Name()
-				if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-					resolved, err := filepath.EvalSymlinks(path)
-					if err != nil {
-						return fmt.Errorf("yaml: cannot resolve symlink %q: %w", path, err)
-					}
-					if !strings.HasPrefix(resolved, realClean) {
-						return fmt.Errorf("yaml: reference file %q escapes directory %q: %w", resolved, realClean, ErrPathEscape)
-					}
-					files = append(files, path)
-				}
-				return nil
-			})
-			if err != nil {
-				return 0, fmt.Errorf("yaml: walk reference dir: %w", err)
-			}
-		} else {
-			entries, err := os.ReadDir(realClean)
-			if err != nil {
-				return 0, fmt.Errorf("yaml: cannot read reference dir %q: %w", dir, err)
-			}
-			for _, e := range entries {
-				if e.IsDir() {
-					continue
-				}
-				name := e.Name()
-				if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-					full := filepath.Join(realClean, name)
-					resolved, err := filepath.EvalSymlinks(full)
-					if err != nil {
-						return 0, fmt.Errorf("yaml: cannot resolve symlink %q: %w", full, err)
-					}
-					if !strings.HasPrefix(resolved, realClean) {
-						return 0, fmt.Errorf("yaml: reference file %q escapes directory %q: %w", resolved, realClean, ErrPathEscape)
-					}
-					files = append(files, full)
-				}
-			}
-		}
+		files = append(files, dirFiles...)
 	}
 
 	for _, file := range files {
-		data, err := os.ReadFile(file) //nolint:gosec // G703: the file is the caller's reference option
+		data, err := os.ReadFile(file) //nolint:gosec // G703: reads the caller's reference files by design
 		if err != nil {
-			return 0, fmt.Errorf("yaml: cannot read reference file %q: %w", file, err)
+			return nil, 0, fmt.Errorf("yaml: cannot read reference file %q: %w", file, err)
 		}
 
 		data, err = detectAndConvertEncoding(data)
 		if err != nil {
-			return 0, err
+			return nil, 0, err
 		}
 
 		tokens, err := newScanner(data).scan()
 		if err != nil {
-			return 0, fmt.Errorf("yaml: error scanning reference file %q: %w", file, err)
+			return nil, 0, fmt.Errorf("yaml: error scanning reference file %q: %w", file, err)
 		}
 
 		p := newParser(tokens)
 		_, err = p.parse()
 		if err != nil {
-			return 0, fmt.Errorf("yaml: error parsing reference file %q: %w", file, err)
+			return nil, 0, fmt.Errorf("yaml: error parsing reference file %q: %w", file, err)
 		}
 		nodes += p.nodeCount
 
 		for name, node := range p.anchors {
-			if _, exists := anchors[name]; exists {
-				return 0, &DuplicateKeyError{
+			_, inDoc := docAnchors[name]
+			if _, exists := anchors[name]; exists || inDoc {
+				return nil, 0, &DuplicateKeyError{
 					Key: name,
 					Pos: node.pos,
 				}
@@ -342,5 +402,5 @@ func loadReferences(anchors map[string]*node, o *decoderOptions) (int, error) {
 		}
 	}
 
-	return nodes, nil
+	return anchors, nodes, nil
 }

@@ -1,6 +1,10 @@
 package yaml
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+	"unicode/utf8"
+)
 
 type nodeKind int
 
@@ -9,7 +13,6 @@ const (
 	nodeMapping
 	nodeSequence
 	nodeScalar
-	nodeAnchor
 	nodeAlias
 	nodeMergeKey
 )
@@ -20,6 +23,7 @@ type node struct {
 	tag              string
 	anchor           string
 	alias            string
+	ref              *anchorSlot // the anchor an alias refers to, nil if not defined before it in its document
 	value            string
 	style            scalarStyle
 	children         []*node
@@ -170,7 +174,30 @@ func exportStyle(s scalarStyle) ScalarStyle {
 	}
 }
 
+// importNode converts the public tree n to the internal form, allocating
+// every node of the tree at once.
 func importNode(n *Node) *node {
+	if n == nil {
+		return nil
+	}
+	slab := make([]node, countNodes(n))
+	return importInto(n, &slab)
+}
+
+// countNodes returns the number of non-nil nodes in the tree n.
+func countNodes(n *Node) int {
+	if n == nil {
+		return 0
+	}
+	c := 1
+	for _, child := range n.Children {
+		c += countNodes(child)
+	}
+	return c
+}
+
+// importInto converts n using the next unused node of slab.
+func importInto(n *Node, slab *[]node) *node {
 	if n == nil {
 		return nil
 	}
@@ -178,7 +205,9 @@ func importNode(n *Node) *node {
 	if n.MergeKey {
 		k = nodeMergeKey
 	}
-	internal := &node{
+	internal := &(*slab)[0]
+	*slab = (*slab)[1:]
+	*internal = node{
 		kind:             k,
 		tag:              n.Tag,
 		anchor:           n.Anchor,
@@ -190,8 +219,11 @@ func importNode(n *Node) *node {
 		docEndExplicit:   n.ExplicitEnd,
 		pos:              n.Pos,
 	}
-	for _, child := range n.Children {
-		internal.children = append(internal.children, importNode(child))
+	if len(n.Children) > 0 {
+		internal.children = make([]*node, len(n.Children))
+		for i, child := range n.Children {
+			internal.children[i] = importInto(child, slab)
+		}
 	}
 	return internal
 }
@@ -249,29 +281,67 @@ func (n *Node) String() string {
 }
 
 // Validate checks the structural consistency of the node tree rooted at n.
-// It returns an error if a mapping has an odd number of children (missing value),
-// or if an alias node references an empty name.
+// It returns an error if a mapping has an odd number of children (missing
+// value), if an alias node references an empty name, if an anchor or alias
+// name holds a character a name cannot (white space, a flow indicator, a
+// non-printable character or invalid UTF-8), or, wrapping
+// [ErrUnsupported], if a node contains itself or the tree nests more than
+// 10,000 levels deep.
 func (n *Node) Validate() error {
-	var err error
-	Walk(n, func(node *Node) bool {
-		if err != nil {
+	return checkTree(n, true)
+}
+
+// checkTree returns an error for a tree that cannot be written as YAML: one
+// with a cycle, nested too deep, or with an anchor or alias name that does
+// not read back. structure also checks mappings and empty alias names.
+func checkTree(root *Node, structure bool) error {
+	onPath := make(map[*Node]bool)
+	var check func(n *Node, depth int) error
+	check = func(n *Node, depth int) error {
+		if n == nil {
+			return nil
+		}
+		if onPath[n] {
+			return fmt.Errorf("yaml: node at %s contains itself: %w", n.Pos, ErrUnsupported)
+		}
+		if depth > maxNestingDepth {
+			return fmt.Errorf("yaml: node tree nested more than %d levels deep: %w", maxNestingDepth, ErrUnsupported)
+		}
+		switch {
+		case structure && n.Kind == MappingNode && len(n.Children)%2 != 0:
+			return fmt.Errorf("yaml: mapping at %s has odd number of children (%d): %w", n.Pos, len(n.Children), errOddChildren)
+		case structure && n.Kind == AliasNode && n.Alias == "":
+			return fmt.Errorf("yaml: alias at %s has %w", n.Pos, errEmptyAlias)
+		case n.Anchor != "" && !validAnchorName(n.Anchor):
+			return fmt.Errorf("yaml: anchor %q at %s: %w", n.Anchor, n.Pos, errInvalidAnchor)
+		case n.Kind == AliasNode && !validAnchorName(n.Alias):
+			return fmt.Errorf("yaml: alias %q at %s: %w", n.Alias, n.Pos, errInvalidAnchor)
+		}
+		onPath[n] = true
+		for _, child := range n.Children {
+			if err := check(child, depth+1); err != nil {
+				return err
+			}
+		}
+		delete(onPath, n)
+		return nil
+	}
+	return check(root, 0)
+}
+
+// validAnchorName reports whether name can be written after & or * and
+// read back whole: it is not empty and holds no white space, line break,
+// flow indicator, non-printable character or invalid UTF-8.
+func validAnchorName(name string) bool {
+	if name == "" || !utf8.ValidString(name) {
+		return false
+	}
+	for _, r := range name {
+		if !isPrintableYAML(r) || strings.ContainsRune(" \t\n\r,[]{}", r) {
 			return false
 		}
-		switch node.Kind {
-		case MappingNode:
-			if len(node.Children)%2 != 0 {
-				err = fmt.Errorf("yaml: mapping at %s has odd number of children (%d): %w", node.Pos, len(node.Children), errOddChildren)
-				return false
-			}
-		case AliasNode:
-			if node.Alias == "" {
-				err = fmt.Errorf("yaml: alias at %s has %w", node.Pos, errEmptyAlias)
-				return false
-			}
-		}
-		return true
-	})
-	return err
+	}
+	return true
 }
 
 // WalkFunc is the callback for [Walk]. Return true to recurse into the
@@ -280,16 +350,23 @@ type WalkFunc func(n *Node) bool
 
 // Walk traverses the AST rooted at n in depth-first pre-order, calling fn
 // for each node. If fn returns false, the node's children are not visited.
+// A node that contains itself is not entered again below itself.
 func Walk(n *Node, fn WalkFunc) {
-	if n == nil {
+	walk(n, fn, make(map[*Node]bool))
+}
+
+func walk(n *Node, fn WalkFunc, onPath map[*Node]bool) {
+	if n == nil || onPath[n] {
 		return
 	}
 	if !fn(n) {
 		return
 	}
+	onPath[n] = true
 	for _, child := range n.Children {
-		Walk(child, fn)
+		walk(child, fn, onPath)
 	}
+	delete(onPath, n)
 }
 
 // Filter walks the AST rooted at n and returns all nodes for which fn
@@ -313,11 +390,11 @@ func Filter(n *Node, fn func(*Node) bool) []*Node {
 // number is written unquoted, and a mapping or sequence key uses the
 // explicit "? key" form. A tag the written form already implies, such as
 // !!int on a plain 5, is left out. Comments, flow style and the choice of
-// quote character are not preserved.
+// quote character are not preserved. An anchor or alias name that would not
+// read back is an error, and so is a node that contains itself or a tree
+// nested more than 10,000 levels deep (wrapping [ErrUnsupported]).
 func NodeToBytes(n *Node) ([]byte, error) {
-	internal := importNode(n)
-	enc := newEncoder(defaultEncodeOptions())
-	return enc.encodeNode(internal)
+	return NodeToBytesWithOptions(n)
 }
 
 // NodeToBytesWithOptions is like [NodeToBytes] but applies opts. Only the
@@ -327,6 +404,12 @@ func NodeToBytesWithOptions(n *Node, opts ...EncodeOption) ([]byte, error) {
 	o := defaultEncodeOptions()
 	for _, opt := range opts {
 		opt(o)
+	}
+	if err := checkBlockIndent(&encoderOptions{indent: o.indent}); err != nil {
+		return nil, err
+	}
+	if err := checkTree(n, false); err != nil {
+		return nil, err
 	}
 	internal := importNode(n)
 	enc := newEncoder(o)

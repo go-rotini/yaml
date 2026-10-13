@@ -80,6 +80,9 @@ func (recursiveSegment) match(n *Node) []*Node {
 //   - $       root node
 //   - .key    child mapping key
 //   - [n]     sequence index (negative indexes count from the end)
+//   - ['key'] or ["key"]  child mapping key that may hold '.', '[' or
+//     other characters; inside the quotes a backslash escapes the next
+//     character
 //   - .*, [*] wildcard (all children)
 //   - ..      recursive descent (the node and every node below it); follow
 //     it with a key, *, or [n], as in "$..host"
@@ -131,6 +134,14 @@ func PathString(expr string) (*Path, error) {
 				expr = expr[end:]
 			}
 
+		case strings.HasPrefix(expr, "['") || strings.HasPrefix(expr, `["`):
+			name, rest, err := parseQuotedPathKey(expr)
+			if err != nil {
+				return nil, err
+			}
+			p.segments = append(p.segments, childSegment{name: name})
+			expr = rest
+
 		case expr[0] == '[':
 			end := strings.IndexByte(expr, ']')
 			if end == -1 {
@@ -154,6 +165,28 @@ func PathString(expr string) (*Path, error) {
 	}
 
 	return p, nil
+}
+
+// parseQuotedPathKey reads a bracket-quoted key, ['name'] or ["name"], from
+// the start of expr and returns the key and the rest of expr.
+func parseQuotedPathKey(expr string) (name, rest string, err error) {
+	quote := expr[1]
+	var b strings.Builder
+	for i := 2; i < len(expr); i++ {
+		switch c := expr[i]; {
+		case c == '\\' && i+1 < len(expr):
+			i++
+			b.WriteByte(expr[i])
+		case c == quote:
+			if i+1 >= len(expr) || expr[i+1] != ']' {
+				return "", "", fmt.Errorf("yaml: expected ']' after quoted key in path: %w", ErrPathSyntax)
+			}
+			return b.String(), expr[i+2:], nil
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return "", "", fmt.Errorf("yaml: unclosed quoted key in path: %w", ErrPathSyntax)
 }
 
 // PathPointer compiles an RFC 6901 JSON Pointer into a [Path]. The empty
@@ -371,7 +404,8 @@ func (p *Path) Append(n, value *Node) error {
 }
 
 // Delete removes all nodes matching the path from the tree rooted at n.
-// For mappings, both the key and value are removed. The path must have at
+// For mappings, both the key and value are removed, for every entry with
+// the key, as [Path.Replace] replaces every one. The path must have at
 // least two segments (root + child), and its last segment must address a
 // mapping key or a sequence index (.key, [n], or a [PathPointer] token); a
 // path ending in a wildcard or recursive descent returns an error wrapping
@@ -392,11 +426,12 @@ func (p *Path) Delete(n *Node) error {
 			if !ok {
 				continue
 			}
-			for i := 0; i+1 < len(parent.Children); i += 2 {
+			for i := 0; i+1 < len(parent.Children); {
 				if parent.Children[i].Value == name {
 					parent.Children = append(parent.Children[:i], parent.Children[i+2:]...)
-					break
+					continue
 				}
+				i += 2
 			}
 		case SequenceNode:
 			if idx, ok := last.indexIn(parent); ok {
@@ -429,6 +464,12 @@ func (p *Path) String() string {
 		case rootSegment:
 			buf.WriteByte('$')
 		case childSegment:
+			if !isPlainPathKey(s.name) {
+				buf.WriteString("['")
+				buf.WriteString(pathKeyEscaper.Replace(s.name))
+				buf.WriteString("']")
+				continue
+			}
 			if i == 0 || !isRecursive(p.segments[i-1]) {
 				buf.WriteByte('.')
 			}
@@ -447,6 +488,11 @@ func (p *Path) String() string {
 	return buf.String()
 }
 
+// isPlainPathKey reports whether key can be written as ".key" in a path.
+func isPlainPathKey(key string) bool {
+	return key != "" && key != "*" && !strings.ContainsAny(key, ".[]'\"\\ ") && key[0] != '$'
+}
+
 func isRecursive(seg pathSegment) bool {
 	_, ok := seg.(recursiveSegment)
 	return ok
@@ -454,3 +500,6 @@ func isRecursive(seg pathSegment) bool {
 
 // pointerEscaper applies the RFC 6901 escaping rules to a reference token.
 var pointerEscaper = strings.NewReplacer("~", "~0", "/", "~1")
+
+// pathKeyEscaper escapes a key for a quoted ['key'] path segment.
+var pathKeyEscaper = strings.NewReplacer(`\`, `\\`, `'`, `\'`)

@@ -3,8 +3,7 @@ package yaml
 type tokenKind int
 
 const (
-	tokenError tokenKind = iota
-	tokenStreamStart
+	tokenStreamStart tokenKind = iota + 1
 	tokenStreamEnd
 	tokenDocumentStart
 	tokenDocumentEnd

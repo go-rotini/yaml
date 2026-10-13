@@ -31,6 +31,7 @@ type scanner struct {
 func newScanner(src []byte) *scanner {
 	return &scanner{
 		src:               src,
+		tokens:            make([]token, 0, len(src)/8+4),
 		line:              1,
 		col:               1,
 		indent:            -1,
@@ -41,6 +42,9 @@ func newScanner(src []byte) *scanner {
 }
 
 func (s *scanner) scan() ([]token, error) {
+	if err := checkPrintable(s.src); err != nil {
+		return nil, err
+	}
 	s.emit(tokenStreamStart, "", s.position())
 	s.skipBOM()
 
@@ -204,7 +208,9 @@ func (s *scanner) scanBlockToken() error {
 
 	if (ch == '&' || ch == '*' || ch == '!') && s.col-1 <= s.indent {
 		for _, tk := range slices.Backward(s.tokens) {
-			if tk.kind == tokenComment || tk.kind == tokenAnchor || tk.kind == tokenTag || tk.kind == tokenAlias {
+			// Properties before this one are skipped; an alias is a whole
+			// node, so one before this ends the check.
+			if tk.kind == tokenComment || tk.kind == tokenAnchor || tk.kind == tokenTag {
 				continue
 			}
 			if tk.kind == tokenValue && tk.pos.Line < s.line {
@@ -431,14 +437,13 @@ blockValueLoop:
 			break
 		}
 		if s.flow == 0 && keyCol > s.indent {
-			s.indents = append(s.indents, s.indent)
-			s.indent = keyCol
+			s.pushIndentLevel(keyCol)
 			mapToken := token{kind: tokenBlockMappingStart, pos: s.position()}
 			keyToken := token{kind: tokenKey, pos: s.position()}
-			s.tokens = append(s.tokens[:insertIdx], append([]token{mapToken, keyToken}, s.tokens[insertIdx:]...)...)
+			s.tokens = slices.Insert(s.tokens, insertIdx, mapToken, keyToken)
 		} else {
 			keyToken := token{kind: tokenKey, pos: s.position()}
-			s.tokens = append(s.tokens[:insertIdx], append([]token{keyToken}, s.tokens[insertIdx:]...)...)
+			s.tokens = slices.Insert(s.tokens, insertIdx, keyToken)
 		}
 	}
 	s.emit(tokenValue, "", s.position())
@@ -450,6 +455,9 @@ blockValueLoop:
 func (s *scanner) scanFlowStart(kind tokenKind) error {
 	if s.flow == 0 {
 		s.flowBlockIndent = s.indent
+	}
+	if s.flow+len(s.indents) >= maxNestingDepth {
+		return &SyntaxError{Message: fmt.Sprintf("exceeded max nesting depth %d", maxNestingDepth), Pos: s.position()}
 	}
 	s.flow++
 	s.emit(kind, "", s.position())
@@ -524,19 +532,18 @@ func (s *scanner) scanFlowEnd(kind tokenKind) error {
 			}
 			switch {
 			case s.flow == 0 && col > s.indent:
-				s.indents = append(s.indents, s.indent)
-				s.indent = col
+				s.pushIndentLevel(col)
 				mapToken := token{kind: tokenBlockMappingStart, pos: pos}
 				keyToken := token{kind: tokenKey, pos: pos}
 				if mapInsertIdx == keyInsertIdx {
-					s.tokens = append(s.tokens[:mapInsertIdx], append([]token{mapToken, keyToken}, s.tokens[mapInsertIdx:]...)...)
+					s.tokens = slices.Insert(s.tokens, mapInsertIdx, mapToken, keyToken)
 				} else {
-					s.tokens = append(s.tokens[:keyInsertIdx], append([]token{keyToken}, s.tokens[keyInsertIdx:]...)...)
-					s.tokens = append(s.tokens[:mapInsertIdx], append([]token{mapToken}, s.tokens[mapInsertIdx:]...)...)
+					s.tokens = slices.Insert(s.tokens, keyInsertIdx, keyToken)
+					s.tokens = slices.Insert(s.tokens, mapInsertIdx, mapToken)
 				}
 			default:
 				keyToken := token{kind: tokenKey, pos: pos}
-				s.tokens = append(s.tokens[:keyInsertIdx], append([]token{keyToken}, s.tokens[keyInsertIdx:]...)...)
+				s.tokens = slices.Insert(s.tokens, keyInsertIdx, keyToken)
 			}
 		}
 	}
@@ -555,6 +562,9 @@ func (s *scanner) scanAnchor() error {
 		}
 		s.advance(1)
 	}
+	if s.pos == start {
+		return &SyntaxError{Message: "anchor name must not be empty", Pos: pos}
+	}
 	s.emit(tokenAnchor, string(s.src[start:s.pos]), pos)
 	s.skipSpaces()
 	return nil
@@ -571,6 +581,9 @@ func (s *scanner) scanAlias() error {
 		}
 		s.advance(1)
 	}
+	if s.pos == start {
+		return &SyntaxError{Message: "alias name must not be empty", Pos: pos}
+	}
 	s.emit(tokenAlias, string(s.src[start:s.pos]), pos)
 	s.skipSpaces()
 	return nil
@@ -583,11 +596,25 @@ func (s *scanner) scanTag() error {
 
 	switch {
 	case !s.atEnd() && s.peek() == '<':
+		// A verbatim tag holds URI characters only and is followed by
+		// white space, a line end or, in flow context, a flow indicator.
+		s.advance(1)
 		for !s.atEnd() && s.peek() != '>' {
+			if !isURIChar(s.peek()) {
+				return &SyntaxError{Message: fmt.Sprintf("invalid character %q in verbatim tag", s.peek()), Pos: s.position()}
+			}
 			s.advance(1)
 		}
-		if !s.atEnd() {
-			s.advance(1)
+		if s.atEnd() {
+			return &SyntaxError{Message: "unterminated verbatim tag", Pos: pos}
+		}
+		if s.pos == start+2 {
+			return &SyntaxError{Message: "verbatim tag must not be empty", Pos: pos}
+		}
+		s.advance(1)
+		if !s.atEnd() && !isBlank(s.peek()) && s.peek() != '\n' && s.peek() != '\r' &&
+			(s.flow == 0 || !strings.ContainsRune(",]}", rune(s.peek()))) {
+			return &SyntaxError{Message: "a tag must be followed by a space or line break", Pos: s.position()}
 		}
 	case !s.atEnd() && s.peek() == '!':
 		s.advance(1)
@@ -1327,10 +1354,19 @@ func (s *scanner) checkTabIndentAt(p Position) {
 func (s *scanner) pushIndent(col int, kind tokenKind) {
 	if col > s.indent {
 		s.checkTabIndentAt(s.position())
-		s.indents = append(s.indents, s.indent)
-		s.indent = col
+		s.pushIndentLevel(col)
 		s.emit(kind, "", s.position())
 	}
+}
+
+// pushIndentLevel opens a block collection at column col. Nesting deeper
+// than maxNestingDepth stops the scan with a [SyntaxError].
+func (s *scanner) pushIndentLevel(col int) {
+	if s.flow+len(s.indents) >= maxNestingDepth && s.scanErr == nil {
+		s.scanErr = &SyntaxError{Message: fmt.Sprintf("exceeded max nesting depth %d", maxNestingDepth), Pos: s.position()}
+	}
+	s.indents = append(s.indents, s.indent)
+	s.indent = col
 }
 
 func (s *scanner) unwindIndents(col int) {
@@ -1423,20 +1459,19 @@ func (s *scanner) emitScalar(value string, pos Position) {
 		}
 		if s.flow == 0 && indentCol > s.indent {
 			s.checkTabIndentAt(pos)
-			s.indents = append(s.indents, s.indent)
-			s.indent = indentCol
+			s.pushIndentLevel(indentCol)
 			if pos.Line == s.docStartLine {
 				s.docStartMapIndent = indentCol
 			}
 			mapToken := token{kind: tokenBlockMappingStart, pos: pos}
 			keyToken := token{kind: tokenKey, pos: pos}
-			s.tokens = append(s.tokens[:insertIdx], append([]token{mapToken, keyToken}, s.tokens[insertIdx:]...)...)
+			s.tokens = slices.Insert(s.tokens, insertIdx, mapToken, keyToken)
 		} else {
 			if s.flow == 0 && s.line > s.docStartLine && s.docStartMapIndent >= 0 && indentCol == s.docStartMapIndent {
 				s.scanErr = &SyntaxError{Message: "block mapping on document start line cannot continue to next line", Pos: pos}
 			}
 			keyToken := token{kind: tokenKey, pos: pos}
-			s.tokens = append(s.tokens[:insertIdx], append([]token{keyToken}, s.tokens[insertIdx:]...)...)
+			s.tokens = slices.Insert(s.tokens, insertIdx, keyToken)
 		}
 	}
 
@@ -1552,4 +1587,18 @@ func (s *scanner) skipBOM() {
 
 func isBlank(ch byte) bool {
 	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
+}
+
+// isURIChar reports whether c may appear in a URI in a tag (ns-uri-char),
+// counting '%' on its own.
+func isURIChar(c byte) bool {
+	return isTagChar(c) || strings.IndexByte("%!,[]", c) >= 0
+}
+
+// isTagChar reports whether c may appear in a tag shorthand's suffix as
+// written (ns-tag-char): a URI character other than '%', '!' and the flow
+// indicators.
+func isTagChar(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		strings.IndexByte("-#;/?:@&=+$_.~*'()", c) >= 0
 }

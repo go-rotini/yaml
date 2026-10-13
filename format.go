@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"reflect"
@@ -29,6 +30,9 @@ type kyamlEmitter struct {
 	ctx  context.Context
 	seen map[uintptr]bool
 	keys keyTracker
+	// cycles finds map and slice cycles and bounds nesting; pointers are
+	// tracked in seen at every depth.
+	cycles cycleGuard
 }
 
 func newKYAMLEmitter(opts *encoderOptions) *kyamlEmitter {
@@ -94,6 +98,12 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 		break
 	}
 
+	key, err := e.cycles.enter(v)
+	if err != nil {
+		return err
+	}
+	defer e.cycles.leave(key)
+
 	// RawValue may carry non-KYAML constructs (anchors, tags, block
 	// style). Re-parse and re-emit so they don't flow through verbatim.
 	// Must run before dispatchMarshaler since RawValue implements BytesMarshaler.
@@ -128,6 +138,12 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 			s := t.String()
 			if s == "" {
 				e.buf = append(e.buf, '0')
+				return nil
+			}
+			if !isJSONNumber(s) {
+				// Text that is not a number is written as a string, never
+				// spliced into the output.
+				e.emitString(s, indent)
 				return nil
 			}
 			e.buf = append(e.buf, s...)
@@ -171,7 +187,7 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		e.buf = strconv.AppendInt(e.buf, v.Int(), 10)
 		return nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		e.buf = strconv.AppendUint(e.buf, v.Uint(), 10)
 		return nil
 	case reflect.Float32, reflect.Float64:
@@ -181,8 +197,8 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 			e.buf = append(e.buf, "null"...)
 			return nil
 		}
-		if v.Type() == reflect.TypeFor[MapSlice]() {
-			ms, _ := reflect.TypeAssert[MapSlice](v)
+		if isMapSliceType(v.Type()) {
+			ms, _ := reflect.TypeAssert[MapSlice](v.Convert(reflect.TypeFor[MapSlice]()))
 			return e.emitMapSlice(ms, indent)
 		}
 		if v.Type().Elem().Kind() == reflect.Uint8 {
@@ -192,11 +208,7 @@ func (e *kyamlEmitter) emit(v reflect.Value, indent int) error {
 		return e.emitSequence(v, indent)
 	case reflect.Array:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
-			buf := make([]byte, v.Len())
-			for i := range v.Len() {
-				buf[i] = byte(v.Index(i).Uint())
-			}
-			e.emitString(base64.StdEncoding.EncodeToString(buf), indent)
+			e.emitString(base64.StdEncoding.EncodeToString(byteArray(v)), indent)
 			return nil
 		}
 		return e.emitSequence(v, indent)
@@ -618,6 +630,17 @@ func (e *kyamlEmitter) formatKey(key string) string {
 	return key
 }
 
+// isJSONNumber reports whether s is a number in JSON syntax.
+func isJSONNumber(s string) bool {
+	if s == "" || (s[0] != '-' && (s[0] < '0' || s[0] > '9')) {
+		return false
+	}
+	if last := s[len(s)-1]; last < '0' || last > '9' {
+		return false
+	}
+	return json.Valid([]byte(s))
+}
+
 // emitString renders a string, always double-quoted. Long
 // multi-line strings use the flow-folded form; everything else uses a
 // single-line double-quoted scalar with embedded \n escapes.
@@ -898,11 +921,8 @@ func emitsAsCompound(v reflect.Value) bool {
 	}
 	switch v.Kind() {
 	case reflect.Slice, reflect.Array:
-		// []byte renders as a base64 string, not a sequence.
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			return false
-		}
-		return true
+		// []byte and [N]byte render as a base64 string, not a sequence.
+		return v.Type().Elem().Kind() != reflect.Uint8
 	case reflect.Map:
 		return true
 	case reflect.Struct:
@@ -984,108 +1004,39 @@ func getKYAMLStructFields(t reflect.Type) *structFields {
 		sf, _ := cached.(*structFields)
 		return sf
 	}
-	sf := &structFields{
-		byName: make(map[string]int),
-	}
-	collectKYAMLFields(t, nil, sf)
+	// Match encoding/json: untagged fields keep their exact Go name rather
+	// than the lowercased form yaml mode uses.
+	sf := buildStructFields(t, kyamlFieldTag, func(name string) string { return name })
 	kyamlStructFieldCache.Store(t, sf)
 	return sf
 }
 
-func collectKYAMLFields(t reflect.Type, index []int, sf *structFields) {
-	for i := range t.NumField() {
-		f := t.Field(i)
-		if !f.IsExported() && !f.Anonymous {
-			continue
-		}
+// kyamlFieldTag returns the field options of f under KYAML: the json tag
+// gives the name, and the yaml tag may still contribute omitempty, inline,
+// required, default= and "-".
+func kyamlFieldTag(f reflect.StructField) fieldInfo {
+	jsonTag := f.Tag.Get("json")
+	yamlTag := f.Tag.Get("yaml")
 
-		// json tag wins for the name; yaml tag may still contribute
-		// omitempty, inline, required, and default=.
-		jsonTag := f.Tag.Get("json")
-		yamlTag := f.Tag.Get("yaml")
-
-		var fi fieldInfo
-		if jsonTag != "" {
-			fi = parseTag(jsonTag)
-		}
-		if yamlTag != "" {
-			y := parseTag(yamlTag)
-			if jsonTag == "" {
-				fi = y
-			} else {
-				if y.omitEmpty {
-					fi.omitEmpty = true
-				}
-				if y.inline {
-					fi.inline = true
-				}
-				if y.required {
-					fi.required = true
-				}
-				if y.hasDefault {
-					fi.defaultValue = y.defaultValue
-					fi.hasDefault = true
-				}
-				if y.skip {
-					fi.skip = true
-				}
-			}
-		}
-
-		if fi.skip {
-			continue
-		}
-
-		fi.index = make([]int, len(index)+1)
-		copy(fi.index, index)
-		fi.index[len(index)] = i
-
-		if f.Anonymous && fi.name == "" && !fi.inline {
-			ft := f.Type
-			if ft.Kind() == reflect.Pointer {
-				ft = ft.Elem()
-			}
-			if ft.Kind() == reflect.Struct {
-				collectKYAMLFields(ft, fi.index, sf)
-				continue
-			}
-		}
-
-		if fi.inline {
-			ft := f.Type
-			if ft.Kind() == reflect.Pointer {
-				ft = ft.Elem()
-			}
-			if ft.Kind() == reflect.Struct {
-				collectKYAMLFields(ft, fi.index, sf)
-				continue
-			}
-			if f.Type.Kind() == reflect.Map {
-				sf.fields = append(sf.fields, fi)
-				sf.byName[fi.name] = len(sf.fields) - 1
-				continue
-			}
-		}
-
-		if fi.name == "" {
-			// Match encoding/json: untagged fields keep their exact Go
-			// name rather than the lowercased form yaml mode uses.
-			fi.name = f.Name
-		}
-
-		if idx, exists := sf.byName[fi.name]; exists {
-			existing := sf.fields[idx]
-			if len(fi.index) == len(existing.index) {
-				sf.conflicts = append(sf.conflicts, fi.name)
-			} else if len(fi.index) < len(existing.index) {
-				sf.fields[idx] = fi
-			}
-			continue
-		}
-
-		sf.fields = append(sf.fields, fi)
-		sf.byName[fi.name] = len(sf.fields) - 1
+	var fi fieldInfo
+	if jsonTag != "" {
+		fi = parseTag(jsonTag)
 	}
+	if yamlTag != "" {
+		y := parseTag(yamlTag)
+		if jsonTag == "" {
+			return y
+		}
+		fi.omitEmpty = fi.omitEmpty || y.omitEmpty
+		fi.inline = fi.inline || y.inline
+		fi.required = fi.required || y.required
+		if y.hasDefault {
+			fi.defaultValue = y.defaultValue
+			fi.hasDefault = true
+		}
+		fi.skip = fi.skip || y.skip
+	}
+	return fi
 }
 
 // ToJSON converts YAML bytes to JSON bytes. The YAML input is decoded
@@ -1103,11 +1054,17 @@ func ToJSON(yamlData []byte) ([]byte, error) {
 }
 
 // FromJSON converts JSON bytes to YAML bytes. The JSON input is decoded
-// into an untyped value and then re-encoded as YAML.
+// into an untyped value and then re-encoded as YAML. Numbers keep their
+// JSON text.
 func FromJSON(jsonData []byte) ([]byte, error) {
 	var v any
-	if err := json.Unmarshal(jsonData, &v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(jsonData))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
 		return nil, fmt.Errorf("yaml: json decode: %w", err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("yaml: json decode: %w", errJSONTrailingData)
 	}
 	return Marshal(v)
 }
@@ -1473,8 +1430,12 @@ func Format(data []byte, opts ...EncodeOption) ([]byte, error) {
 	}
 	comments := collectKYAMLComments(firstDoc)
 
+	// Decode the parsed documents as UnmarshalWithOptions(data, &v,
+	// WithOrderedMap()) would, without scanning and parsing data again.
 	var v any
-	if err := UnmarshalWithOptions(data, &v, WithOrderedMap()); err != nil {
+	o := defaultDecodeOptions()
+	WithOrderedMap()(o)
+	if err := decodeFirst(docs, nil, p.nodeCount, o, reflect.ValueOf(&v)); err != nil {
 		return nil, err
 	}
 

@@ -435,7 +435,7 @@ func ExampleWithComment() {
 }
 
 func ExampleWithAutoInt() {
-	v := map[string]float64{"count": 42.0}
+	v := map[string]string{"count": "42"}
 	data, _ := yaml.MarshalWithOptions(v, yaml.WithAutoInt(true))
 	fmt.Print(string(data))
 	// Output:

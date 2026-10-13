@@ -5,10 +5,23 @@ import (
 	"strings"
 )
 
+// maxNestingDepth is the deepest nesting of collections the scanner and
+// parser accept. Deeper input is rejected with a [SyntaxError] before it can
+// exhaust the stack, whatever decode options are set.
+const maxNestingDepth = 10_000
+
+// anchorSlot is an anchor definition. Its node is set once the anchored node
+// has been parsed, so an alias inside that node still finds it.
+type anchorSlot struct {
+	n *node
+}
+
 type parser struct {
 	tokens            []token
 	pos               int
+	depth             int
 	anchors           map[string]*node
+	docAnchors        map[string]*anchorSlot // anchors defined so far in the current document
 	tagHandles        map[string]string
 	maxNodes          int
 	nodeCount         int
@@ -24,13 +37,29 @@ type parser struct {
 
 func newParser(tokens []token) *parser {
 	return &parser{
-		tokens:  tokens,
-		anchors: make(map[string]*node),
+		tokens:     tokens,
+		anchors:    make(map[string]*node),
+		docAnchors: make(map[string]*anchorSlot),
 		tagHandles: map[string]string{
 			"!":  "!",
 			"!!": "tag:yaml.org,2002:",
 		},
 	}
+}
+
+// defineAnchor starts the definition of anchor name in the current document.
+// Aliases that follow refer to it, until the name is defined again.
+func (p *parser) defineAnchor(name string) *anchorSlot {
+	slot := &anchorSlot{}
+	p.docAnchors[name] = slot
+	return slot
+}
+
+// setAnchor records n as the node of anchor name, defined by slot.
+func (p *parser) setAnchor(slot *anchorSlot, name string, n *node) {
+	n.anchor = name
+	slot.n = n
+	p.anchors[name] = n
 }
 
 func (p *parser) parse() ([]*node, error) {
@@ -66,6 +95,7 @@ func (p *parser) parse() ([]*node, error) {
 			"!!": "tag:yaml.org,2002:",
 		}
 		p.seenYAMLDirective = false
+		clear(p.docAnchors)
 		hasDirectives := false
 		for p.peek().kind == tokenDirective {
 			hasDirectives = true
@@ -178,6 +208,7 @@ func (p *parser) resolveTag(raw string) (string, error) {
 		if prefix, ok := p.tagHandles["!"]; ok && prefix != "!" {
 			return prefix + decodeTagURI(raw[1:]), nil
 		}
+		return "!" + decodeTagURI(raw[1:]), nil
 	}
 	return raw, nil
 }
@@ -274,6 +305,15 @@ func (p *parser) parseNode() (*node, error) {
 	// about to parse can adopt them as its head comment.
 	p.collectIntoPending()
 
+	p.depth++
+	defer func() { p.depth-- }()
+	if p.depth > maxNestingDepth {
+		return nil, &SyntaxError{
+			Message: fmt.Sprintf("exceeded max nesting depth %d", maxNestingDepth),
+			Pos:     p.peek().pos,
+		}
+	}
+
 	p.nodeCount++
 	if p.maxNodes > 0 && p.nodeCount > p.maxNodes {
 		return nil, &SyntaxError{
@@ -283,6 +323,7 @@ func (p *parser) parseNode() (*node, error) {
 	}
 
 	var anchor string
+	var slot *anchorSlot
 	var tag string
 	propLine := 0
 
@@ -293,6 +334,7 @@ func (p *parser) parseNode() (*node, error) {
 				return nil, &SyntaxError{Message: "only one anchor is allowed per node", Pos: t.pos}
 			}
 			anchor = t.value
+			slot = p.defineAnchor(anchor)
 			if propLine == 0 {
 				propLine = t.pos.Line
 			}
@@ -334,8 +376,7 @@ func (p *parser) parseNode() (*node, error) {
 	if (anchor != "" || tag != "") && emptyTokens {
 		n := &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true}
 		if anchor != "" {
-			n.anchor = anchor
-			p.anchors[anchor] = n
+			p.setAnchor(slot, anchor, n)
 		}
 		if tag != "" {
 			resolved, err := p.resolveTag(tag)
@@ -359,6 +400,7 @@ func (p *parser) parseNode() (*node, error) {
 			kind:  nodeAlias,
 			alias: t.value,
 			pos:   t.pos,
+			ref:   p.docAnchors[t.value],
 		}
 		p.advance()
 
@@ -424,8 +466,7 @@ func (p *parser) parseNode() (*node, error) {
 
 	if n != nil {
 		if anchor != "" {
-			n.anchor = anchor
-			p.anchors[anchor] = n
+			p.setAnchor(slot, anchor, n)
 		}
 		if tag != "" {
 			resolved, err := p.resolveTag(tag)
@@ -469,8 +510,7 @@ func (p *parser) parseBlockMapping() (*node, error) {
 		}
 		if p.peek().kind == tokenKey || p.peek().kind == tokenValue {
 			if mapAnchor != "" {
-				mapping.anchor = mapAnchor
-				p.anchors[mapAnchor] = mapping
+				p.setAnchor(p.defineAnchor(mapAnchor), mapAnchor, mapping)
 			}
 			if mapTag != "" {
 				resolved, err := p.resolveTag(mapTag)
@@ -677,8 +717,7 @@ func (p *parser) parseBlockSequence() (*node, error) {
 			p.peek().kind == tokenDocumentStart || p.peek().kind == tokenDocumentEnd || p.peek().kind == tokenStreamEnd) {
 			empty := &node{kind: nodeScalar, value: "", pos: t.pos, implicit: true}
 			if peekAnchor != "" {
-				empty.anchor = peekAnchor
-				p.anchors[peekAnchor] = empty
+				p.setAnchor(p.defineAnchor(peekAnchor), peekAnchor, empty)
 			}
 			if peekTag != "" {
 				resolved, err := p.resolveTag(peekTag)
@@ -701,8 +740,15 @@ func (p *parser) parseBlockSequence() (*node, error) {
 		}
 	}
 
-	if started && p.peek().kind == tokenBlockEnd {
-		p.advance()
+	if started {
+		switch t := p.peek(); t.kind {
+		case tokenBlockEnd:
+			p.advance()
+		case tokenDocumentStart, tokenDocumentEnd, tokenStreamEnd:
+		default:
+			// Content at the sequence's indentation that is not an entry.
+			return nil, &SyntaxError{Message: "expected a block sequence entry (\"- \") at this indentation", Pos: t.pos}
+		}
 	}
 
 	return seq, nil

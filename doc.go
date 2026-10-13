@@ -65,12 +65,19 @@
 //     mapping; a map key that names a struct field is left out when encoding,
 //     and keys that name no field are decoded into the map
 //   - flow: encode the field in flow style (e.g. [a, b] or {k: v})
-//   - required: return an error during decoding if the key is absent
+//   - required: return a [RequiredFieldError] during decoding if the key is
+//     absent, including when the struct's whole mapping is absent
 //   - default=<value>: set field to <value> during decoding if the key is absent
 //     (requires [WithDefaults]; scalar types only)
 //
 // A tag of "-" excludes the field from encoding and decoding. A struct with
 // no fields left to write is encoded as an empty mapping ({}).
+//
+// The fields of embedded structs are promoted as in encoding/json: of
+// several fields with one name, the shallowest wins, then the one named by
+// a tag. A tie at the same depth is a conflict, reported when the struct is
+// encoded or decoded. Unexported embedded fields are used only to promote
+// the fields of a struct.
 //
 // # Custom Marshalers
 //

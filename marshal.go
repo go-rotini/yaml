@@ -10,7 +10,16 @@ import (
 
 // Marshal serializes v into YAML bytes using default encoding options.
 // YAML is text, so a string that is not valid UTF-8 is written with U+FFFD
-// in place of each invalid byte.
+// in place of each invalid byte. A whole float is written with a fraction
+// (450.0) so that it reads back as a float. A string is quoted when a YAML
+// 1.2 or YAML 1.1 reader would read it as another type (yes, on, 0b101,
+// 1_000, inf, 2024-01-01), so that it reads back as a string in both. Map
+// keys are sorted: numbers by value first, then other keys by their text. A
+// [MapSlice] is written as a mapping in item order.
+//
+// Channels, functions, complex numbers and unsafe pointers cannot be
+// encoded, and neither can a cyclic value or one nested more than 10,000
+// levels deep; each fails with an error wrapping [ErrUnsupported].
 func Marshal(v any) ([]byte, error) {
 	return MarshalWithOptions(v)
 }
@@ -49,7 +58,11 @@ func MarshalKYAMLWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
 
 // EncodeKYAMLFile encodes v as KYAML and writes the result to path. New
 // files are created with mode 0600 because configuration files often hold
-// secrets; callers needing wider permissions can chmod after writing.
+// secrets; callers needing wider permissions can chmod after writing. An
+// existing file is truncated and keeps its mode. The write is not atomic:
+// a failure part-way can leave a partial file. For an atomic replace,
+// marshal with [MarshalKYAMLWithOptions] and write with
+// github.com/go-rotini/fs.
 func EncodeKYAMLFile(path string, v any, opts ...EncodeOption) error {
 	data, err := MarshalKYAMLWithOptions(v, opts...)
 	if err != nil {

@@ -2,16 +2,18 @@ package yaml
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
 	"math/big"
 	"reflect"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +29,76 @@ type encoder struct {
 	// scalars are not allowed.
 	flowDepth int
 	keys      keyTracker
+	cycles    cycleGuard
+}
+
+// cycleCheckDepth is the nesting depth after which the encoders look for
+// cyclic values. Shallower values cannot hold a cycle that matters, so the
+// common case pays nothing.
+const cycleCheckDepth = 1000
+
+// cycleGuard detects cyclic values while encoding: values nested more than
+// [maxNestingDepth] deep, and, past cycleCheckDepth, a pointer, map, slice
+// or struct already being written further up.
+type cycleGuard struct {
+	depth int
+	seen  map[cycleKey]struct{}
+}
+
+// cycleKey identifies a value being written: where its data lives, its
+// length (for slices) and its type.
+type cycleKey struct {
+	p uintptr
+	n int
+	t reflect.Type
+}
+
+// enter counts one level of nesting for v. The caller must call leave with
+// the result when it is done with v.
+func (g *cycleGuard) enter(v reflect.Value) (cycleKey, error) {
+	g.depth++
+	if g.depth > maxNestingDepth {
+		return cycleKey{}, fmt.Errorf("yaml: value of type %s is nested more than %d deep, or is cyclic: %w", v.Type(), maxNestingDepth, ErrUnsupported)
+	}
+	if g.depth <= cycleCheckDepth {
+		return cycleKey{}, nil
+	}
+	var key cycleKey
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map:
+		if v.IsNil() {
+			return cycleKey{}, nil
+		}
+		key = cycleKey{p: v.Pointer(), t: v.Type()}
+	case reflect.Slice:
+		if v.IsNil() || v.Len() == 0 {
+			return cycleKey{}, nil
+		}
+		key = cycleKey{p: v.Pointer(), n: v.Len(), t: v.Type()}
+	case reflect.Struct:
+		if !v.CanAddr() {
+			return cycleKey{}, nil
+		}
+		key = cycleKey{p: v.UnsafeAddr(), t: v.Type()}
+	default:
+		return cycleKey{}, nil
+	}
+	if _, ok := g.seen[key]; ok {
+		return cycleKey{}, fmt.Errorf("yaml: cyclic value of type %s: %w", v.Type(), ErrUnsupported)
+	}
+	if g.seen == nil {
+		g.seen = make(map[cycleKey]struct{})
+	}
+	g.seen[key] = struct{}{}
+	return key, nil
+}
+
+// leave ends the level started by enter.
+func (g *cycleGuard) leave(key cycleKey) {
+	g.depth--
+	if key.t != nil {
+		delete(g.seen, key)
+	}
 }
 
 func newEncoder(opts *encoderOptions) *encoder {
@@ -47,6 +119,9 @@ func (e *encoder) encode(v reflect.Value) ([]byte, error) {
 		}
 		return out, nil
 	}
+	if err := checkBlockIndent(e.opts); err != nil {
+		return nil, err
+	}
 	e.buf = e.buf[:0]
 	e.keys = keyTracker{on: e.opts.comments != nil}
 	if err := e.marshalValue(v, 0, false); err != nil {
@@ -59,6 +134,16 @@ func (e *encoder) encode(v reflect.Value) ([]byte, error) {
 		e.buf = applyComments(e.buf, e.opts.comments, e.keys.positions)
 	}
 	return e.buf, nil
+}
+
+// checkBlockIndent reports an error when block-style output is selected
+// with an indent below 1, which would write nested collections at their
+// parent's column.
+func checkBlockIndent(o *encoderOptions) error {
+	if o.indent < 1 && !o.flow && !o.kyaml {
+		return fmt.Errorf("yaml: WithIndent(%d) must be at least 1 for block-style output: %w", o.indent, ErrOptionConflict)
+	}
+	return nil
 }
 
 // keyPos records where the entry at path was written, for placing
@@ -163,17 +248,27 @@ func applyComments(buf []byte, comments map[string][]Comment, positions []keyPos
 			continue
 		}
 		for _, c := range comments[path] {
+			// Every line of the text is a comment line of its own, so a
+			// line break cannot end the comment early.
+			text := commentLines(c.Text)
 			switch c.Position {
 			case HeadCommentPos:
-				at(kp.line).head = append(at(kp.line).head, indentOf(kp.line)+"# "+c.Text)
+				for _, t := range text {
+					at(kp.line).head = append(at(kp.line).head, indentOf(kp.line)+"# "+t)
+				}
 			case LineCommentPos:
 				l := kp.line
 				if kp.lineCommentAtEnd {
 					l = kp.end
 				}
-				at(l).tail = append(at(l).tail, " # "+c.Text)
+				at(l).tail = append(at(l).tail, " # "+text[0])
+				for _, t := range text[1:] {
+					at(l).foot = append(at(l).foot, indentOf(kp.line)+"# "+t)
+				}
 			case FootCommentPos:
-				at(kp.end).foot = append(at(kp.end).foot, indentOf(kp.line)+"# "+c.Text)
+				for _, t := range text {
+					at(kp.end).foot = append(at(kp.end).foot, indentOf(kp.line)+"# "+t)
+				}
 			}
 		}
 	}
@@ -194,6 +289,44 @@ func applyComments(buf []byte, comments map[string][]Comment, positions []keyPos
 	return []byte(strings.Join(out, "\n"))
 }
 
+// commentLines splits comment text at its line breaks (LF, CR, CRLF, NEL,
+// LS and PS). A comment cannot escape anything, so each other character
+// that is not printable, and each byte that is not valid UTF-8, becomes
+// U+FFFD.
+func commentLines(text string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(text); {
+		r, size := utf8.DecodeRuneInString(text[i:])
+		switch r {
+		case '\r', '\n', 0x85, 0x2028, 0x2029:
+			lines = append(lines, printableComment(text[start:i]))
+			if r == '\r' && i+1 < len(text) && text[i+1] == '\n' {
+				size++
+			}
+			start = i + size
+		}
+		i += size
+	}
+	return append(lines, printableComment(text[start:]))
+}
+
+// printableComment returns s with each character [hasUnsafeRune] rejects,
+// other than a tab, replaced by U+FFFD.
+func printableComment(s string) string {
+	if !hasUnsafeRune(s, true) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r != '\t' && unsafeRune(r) {
+			r = utf8.RuneError
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 	if !v.IsValid() {
 		e.buf = append(e.buf, "null"...)
@@ -205,7 +338,13 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 			e.buf = append(e.buf, "null"...)
 			return nil
 		}
-		return e.marshalValue(v.Elem(), indent, inline)
+		key, err := e.cycles.enter(v)
+		if err != nil {
+			return err
+		}
+		err = e.marshalValue(v.Elem(), indent, inline)
+		e.cycles.leave(key)
+		return err
 	}
 
 	if v.Kind() == reflect.Interface {
@@ -216,6 +355,17 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		return e.marshalValue(v.Elem(), indent, inline)
 	}
 
+	key, err := e.cycles.enter(v)
+	if err != nil {
+		return err
+	}
+	err = e.marshalNonPointer(v, indent, inline)
+	e.cycles.leave(key)
+	return err
+}
+
+// marshalNonPointer writes v, which is not a pointer or interface.
+func (e *encoder) marshalNonPointer(v reflect.Value, indent int, inline bool) error {
 	if v.CanInterface() && e.opts.customMarshalers != nil {
 		t := v.Type()
 		if fn, ok := e.opts.customMarshalers[t]; ok {
@@ -287,6 +437,12 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		}
 	}
 
+	if v.Type() == reflect.TypeFor[json.Number]() && isDecimalFloat(v.String()) {
+		// A JSON number is written as the number it holds.
+		e.buf = append(e.buf, v.String()...)
+		return nil
+	}
+
 	switch v.Kind() {
 	case reflect.String:
 		e.writeScalar(v.String(), indent)
@@ -303,7 +459,7 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		} else {
 			e.buf = strconv.AppendInt(e.buf, v.Int(), 10)
 		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		e.buf = strconv.AppendUint(e.buf, v.Uint(), 10)
 	case reflect.Float32, reflect.Float64:
 		f := v.Float()
@@ -315,12 +471,21 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		case math.IsNaN(f):
 			e.buf = append(e.buf, ".nan"...)
 		default:
-			e.buf = strconv.AppendFloat(e.buf, f, 'g', -1, 64)
+			start := len(e.buf)
+			e.buf = strconv.AppendFloat(e.buf, f, 'g', -1, v.Type().Bits())
+			// A whole number keeps a fraction so that it reads back as a
+			// float, not an integer.
+			if !bytes.ContainsAny(e.buf[start:], ".e") {
+				e.buf = append(e.buf, ".0"...)
+			}
 		}
 	case reflect.Slice:
 		if v.IsNil() {
 			e.buf = append(e.buf, "null"...)
 			return nil
+		}
+		if isMapSliceType(v.Type()) {
+			return e.marshalMapSlice(v, indent, inline)
 		}
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			e.buf = append(e.buf, "!!binary "...)
@@ -329,6 +494,11 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		}
 		return e.marshalSlice(v, indent, inline)
 	case reflect.Array:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			e.buf = append(e.buf, "!!binary "...)
+			e.buf = append(e.buf, base64.StdEncoding.EncodeToString(byteArray(v))...)
+			return nil
+		}
 		return e.marshalSlice(v, indent, inline)
 	case reflect.Map:
 		if v.IsNil() {
@@ -353,9 +523,100 @@ func (e *encoder) marshalValue(v reflect.Value, indent int, inline bool) error {
 		}
 		return e.marshalStruct(v, indent, inline)
 	default:
-		e.buf = append(e.buf, fmt.Sprintf("%v", v.Interface())...)
+		return fmt.Errorf("yaml: cannot encode value of type %s: %w", v.Type(), ErrUnsupported)
 	}
 
+	return nil
+}
+
+// byteArray returns the bytes of [N]byte value v.
+func byteArray(v reflect.Value) []byte {
+	b := make([]byte, v.Len())
+	reflect.Copy(reflect.ValueOf(b), v)
+	return b
+}
+
+// isMapSliceType reports whether t is [MapSlice] or another slice of
+// [MapItem], which is written as a mapping.
+func isMapSliceType(t reflect.Type) bool {
+	return t.Kind() == reflect.Slice && t.Elem() == reflect.TypeFor[MapItem]()
+}
+
+// mapSliceItems returns the indexes of the items of MapSlice v to write,
+// leaving out items with empty values when [WithOmitEmpty] is set.
+func (e *encoder) mapSliceItems(v reflect.Value) []int {
+	items := make([]int, 0, v.Len())
+	for i := range v.Len() {
+		if e.opts.omitEmpty && mapItemEmpty(v.Index(i).Field(1)) {
+			continue
+		}
+		items = append(items, i)
+	}
+	return items
+}
+
+// hasNonEmptyValue reports whether map v has an entry whose value is not
+// empty.
+func hasNonEmptyValue(v reflect.Value) bool {
+	iter := v.MapRange()
+	for iter.Next() {
+		if !isEmpty(iter.Value()) {
+			return true
+		}
+	}
+	return false
+}
+
+// mapItemEmpty reports whether the MapItem value val, an interface, is nil
+// or holds an empty value.
+func mapItemEmpty(val reflect.Value) bool {
+	return val.IsNil() || isEmpty(val.Elem())
+}
+
+// marshalMapSlice writes MapSlice v as a mapping, in item order.
+func (e *encoder) marshalMapSlice(v reflect.Value, indent int, inline bool) error {
+	items := e.mapSliceItems(v)
+	if len(items) == 0 {
+		e.buf = append(e.buf, "{}"...)
+		return nil
+	}
+	flow := e.opts.flow || inline
+	if flow {
+		e.flowDepth++
+		defer func() { e.flowDepth-- }()
+		e.buf = append(e.buf, '{')
+	}
+	for i, at := range items {
+		item := v.Index(at)
+		key, val := item.Field(0), item.Field(1)
+		switch {
+		case flow && i > 0:
+			e.buf = append(e.buf, ", "...)
+		case i > 0:
+			e.buf = append(e.buf, '\n')
+			e.writeIndent(indent)
+		}
+		var seg string
+		if e.keys.on {
+			seg = fmt.Sprint(key.Interface())
+		}
+		idx, parent := e.keys.enter(e.buf, seg)
+		if err := e.writeKey(key, indent); err != nil {
+			return err
+		}
+		if flow {
+			e.buf = append(e.buf, ": "...)
+			if err := e.marshalValue(val, indent, true); err != nil {
+				return err
+			}
+		} else if err := e.writeBlockValue(val, indent, false); err != nil {
+			return err
+		}
+		e.keys.leave(e.buf, idx, parent, false)
+	}
+	if flow {
+		e.buf = append(e.buf, '}')
+	}
 	return nil
 }
 
@@ -412,23 +673,96 @@ func (e *encoder) marshalFlowSequence(v reflect.Value, indent int) error {
 
 // mapKeys returns the keys of map v to encode, sorted, leaving out entries
 // with empty values when [WithOmitEmpty] is set.
-func (e *encoder) mapKeys(v reflect.Value) []reflect.Value {
-	keys := v.MapKeys()
-	if e.opts.omitEmpty {
-		keys = slices.DeleteFunc(keys, func(k reflect.Value) bool { return isEmpty(v.MapIndex(k)) })
+//
+// Numeric keys sort by value, before all other keys, which sort by their
+// text; keys with the same text sort by type name.
+func (e *encoder) mapKeys(v reflect.Value) []mapKey {
+	keys := make([]mapKey, 0, v.Len())
+	iter := v.MapRange()
+	for iter.Next() {
+		if e.opts.omitEmpty && isEmpty(iter.Value()) {
+			continue
+		}
+		k := iter.Key()
+		keys = append(keys, mapKey{v: k, text: mapKeyText(k)})
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface())
-	})
+	slices.SortStableFunc(keys, compareMapKeys)
 	return keys
+}
+
+// mapKey is a map key with its text.
+type mapKey struct {
+	v    reflect.Value
+	text string
+}
+
+func compareMapKeys(a, b mapKey) int {
+	av, bv := unwrapInterface(a.v), unwrapInterface(b.v)
+	an, aNum := numericKey(av)
+	bn, bNum := numericKey(bv)
+	switch {
+	case aNum && bNum:
+		if c := an.compare(bn); c != 0 {
+			return c
+		}
+	case aNum:
+		return -1
+	case bNum:
+		return 1
+	}
+	if c := strings.Compare(a.text, b.text); c != 0 {
+		return c
+	}
+	return strings.Compare(av.Type().String(), bv.Type().String())
+}
+
+// unwrapInterface returns the value held by interface v, or v itself.
+func unwrapInterface(v reflect.Value) reflect.Value {
+	if v.Kind() == reflect.Interface && !v.IsNil() {
+		return v.Elem()
+	}
+	return v
+}
+
+// keyNumber is the value of a numeric map key.
+type keyNumber struct {
+	kind reflect.Kind // reflect.Int, reflect.Uint or reflect.Float64
+	i    int64
+	u    uint64
+	f    float64
+}
+
+// numericKey returns the number v holds, if it is an integer or float.
+func numericKey(v reflect.Value) (keyNumber, bool) {
+	switch v.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return keyNumber{kind: reflect.Int, i: v.Int(), f: float64(v.Int())}, true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return keyNumber{kind: reflect.Uint, u: v.Uint(), f: float64(v.Uint())}, true
+	case reflect.Float32, reflect.Float64:
+		return keyNumber{kind: reflect.Float64, f: v.Float()}, true
+	}
+	return keyNumber{}, false
+}
+
+// compare orders n and m by value: exactly when both are signed or both
+// unsigned integers, otherwise as float64.
+func (n keyNumber) compare(m keyNumber) int {
+	switch {
+	case n.kind == reflect.Int && m.kind == reflect.Int:
+		return cmp.Compare(n.i, m.i)
+	case n.kind == reflect.Uint && m.kind == reflect.Uint:
+		return cmp.Compare(n.u, m.u)
+	}
+	return cmp.Compare(n.f, m.f)
 }
 
 // inlineMapKeys returns the keys of inline map field m to encode. A key
 // that names a field of the struct is left out: the field takes precedence,
 // as it does when decoding.
-func (e *encoder) inlineMapKeys(m reflect.Value, sf *structFields) []reflect.Value {
-	return slices.DeleteFunc(e.mapKeys(m), func(k reflect.Value) bool {
-		return sf.namesField(mapKeyText(k))
+func (e *encoder) inlineMapKeys(m reflect.Value, sf *structFields) []mapKey {
+	return slices.DeleteFunc(e.mapKeys(m), func(k mapKey) bool {
+		return sf.namesField(k.text)
 	})
 }
 
@@ -484,11 +818,11 @@ func (e *encoder) marshalMap(v reflect.Value, indent int, inline bool) error {
 			e.buf = append(e.buf, '\n')
 			e.writeIndent(indent)
 		}
-		idx, parent := e.keys.enter(e.buf, mapKeyText(key))
-		if err := e.writeKey(key, indent); err != nil {
+		idx, parent := e.keys.enter(e.buf, key.text)
+		if err := e.writeKey(key.v, indent); err != nil {
 			return err
 		}
-		if err := e.writeBlockValue(v.MapIndex(key), indent, false); err != nil {
+		if err := e.writeBlockValue(v.MapIndex(key.v), indent, false); err != nil {
 			return err
 		}
 		e.keys.leave(e.buf, idx, parent, false)
@@ -497,7 +831,7 @@ func (e *encoder) marshalMap(v reflect.Value, indent int, inline bool) error {
 	return nil
 }
 
-func (e *encoder) marshalFlowMapping(v reflect.Value, keys []reflect.Value, indent int) error {
+func (e *encoder) marshalFlowMapping(v reflect.Value, keys []mapKey, indent int) error {
 	e.flowDepth++
 	defer func() { e.flowDepth-- }()
 	e.buf = append(e.buf, '{')
@@ -506,12 +840,12 @@ func (e *encoder) marshalFlowMapping(v reflect.Value, keys []reflect.Value, inde
 		if i > 0 {
 			e.buf = append(e.buf, ", "...)
 		}
-		idx, parent := e.keys.enter(e.buf, mapKeyText(key))
-		if err := e.writeKey(key, indent); err != nil {
+		idx, parent := e.keys.enter(e.buf, key.text)
+		if err := e.writeKey(key.v, indent); err != nil {
 			return err
 		}
 		e.buf = append(e.buf, ": "...)
-		if err := e.marshalValue(v.MapIndex(key), indent, true); err != nil {
+		if err := e.marshalValue(v.MapIndex(key.v), indent, true); err != nil {
 			return err
 		}
 		e.keys.leave(e.buf, idx, parent, false)
@@ -716,9 +1050,9 @@ func isSequenceValue(v reflect.Value) bool {
 	}
 	switch v.Kind() {
 	case reflect.Array:
-		return true
-	case reflect.Slice:
 		return v.Type().Elem().Kind() != reflect.Uint8
+	case reflect.Slice:
+		return v.Type().Elem().Kind() != reflect.Uint8 && !isMapSliceType(v.Type())
 	}
 	return false
 }
@@ -738,9 +1072,20 @@ func (e *encoder) isBlockCompound(v reflect.Value) bool {
 	}
 	switch v.Kind() {
 	case reflect.Slice:
+		if isMapSliceType(v.Type()) {
+			if !e.opts.omitEmpty {
+				return true
+			}
+			for i := range v.Len() {
+				if !mapItemEmpty(v.Index(i).Field(1)) {
+					return true
+				}
+			}
+			return false
+		}
 		return isSequenceValue(v)
 	case reflect.Map:
-		return !e.opts.omitEmpty || len(e.mapKeys(v)) > 0
+		return !e.opts.omitEmpty || hasNonEmptyValue(v)
 	case reflect.Struct:
 		return e.hasStructEntries(v)
 	}
@@ -831,11 +1176,11 @@ func (e *encoder) marshalStruct(v reflect.Value, indent int, inline bool) error 
 		if fi.inline && field.Kind() == reflect.Map {
 			for _, key := range e.inlineMapKeys(field, sf) {
 				next()
-				idx, parent := e.keys.enter(e.buf, mapKeyText(key))
-				if err := e.writeKey(key, indent); err != nil {
+				idx, parent := e.keys.enter(e.buf, key.text)
+				if err := e.writeKey(key.v, indent); err != nil {
 					return err
 				}
-				if err := e.writeBlockValue(field.MapIndex(key), indent, false); err != nil {
+				if err := e.writeBlockValue(field.MapIndex(key.v), indent, false); err != nil {
 					return err
 				}
 				e.keys.leave(e.buf, idx, parent, false)
@@ -877,12 +1222,12 @@ func (e *encoder) marshalFlowStruct(v reflect.Value, sf *structFields, indent in
 		if fi.inline && field.Kind() == reflect.Map {
 			for _, key := range e.inlineMapKeys(field, sf) {
 				next()
-				idx, parent := e.keys.enter(e.buf, mapKeyText(key))
-				if err := e.writeKey(key, indent); err != nil {
+				idx, parent := e.keys.enter(e.buf, key.text)
+				if err := e.writeKey(key.v, indent); err != nil {
 					return err
 				}
 				e.buf = append(e.buf, ": "...)
-				if err := e.marshalValue(field.MapIndex(key), indent, true); err != nil {
+				if err := e.marshalValue(field.MapIndex(key.v), indent, true); err != nil {
 					return err
 				}
 				e.keys.leave(e.buf, idx, parent, false)
@@ -970,17 +1315,25 @@ func (e *encoder) writeQuotedScalar(s string) {
 // byte order mark or noncharacter, or invalid UTF-8. allowTab exempts tabs.
 func hasUnsafeRune(s string, allowTab bool) bool {
 	for _, r := range s {
-		switch {
-		case r == '\t':
+		if r == '\t' {
 			if !allowTab {
 				return true
 			}
-		case r < 0x20, r >= 0x7f && r <= 0x9f,
-			r == 0x2028, r == 0x2029, r == 0xfeff, r == 0xfffe, r == 0xffff, r == utf8.RuneError:
+			continue
+		}
+		if unsafeRune(r) {
 			return true
 		}
 	}
 	return false
+}
+
+// unsafeRune reports whether r, a tab apart, cannot be written as is: a
+// control character, a line or paragraph separator, a byte order mark or
+// noncharacter, or [utf8.RuneError] (which also stands for invalid UTF-8).
+func unsafeRune(r rune) bool {
+	return r < 0x20 || r >= 0x7f && r <= 0x9f ||
+		r == 0x2028 || r == 0x2029 || r == 0xfeff || r == 0xfffe || r == 0xffff || r == utf8.RuneError
 }
 
 // literalSafe reports whether multi-line s reads back unchanged from a
@@ -1076,6 +1429,9 @@ func (e *encoder) emitFlowNode(n *node) {
 				e.buf = append(e.buf, "? "...)
 			}
 			e.emitFlowNode(n.children[i])
+			if n.children[i].kind == nodeAlias {
+				e.buf = append(e.buf, ' ')
+			}
 			e.buf = append(e.buf, ": "...)
 			e.emitFlowNode(n.children[i+1])
 		}
@@ -1149,14 +1505,18 @@ func nodeTag(n *node) string {
 
 // coreTag returns the tag a plain scalar resolves to under the Core schema.
 func coreTag(s string) string {
-	switch scalarToAnyCore(s).(type) {
-	case nil:
+	switch resolveCore(s).kind {
+	case coreNull:
 		return tagNull
-	case bool:
+	case coreBool:
 		return tagBool
-	case int64:
+	case coreInt, coreUint:
 		return tagInt
-	case float64:
+	case coreFloat:
+		if coreIntSyntax(s) {
+			// An integer beyond the uint64 range.
+			return tagInt
+		}
 		return tagFloat
 	}
 	return tagStr
@@ -1164,24 +1524,55 @@ func coreTag(s string) string {
 
 // formatTag returns the shortest written form of a resolved tag: !!name for
 // the YAML tag namespace, the local tag itself, or the verbatim !<tag>.
+//
+// A YAML namespace or local tag whose name holds characters a shorthand
+// cannot is written as !! or ! with those characters percent-encoded, which
+// reads back as the same tag. Any other tag is written verbatim with its
+// characters outside the URI set percent-encoded, so that it is valid YAML.
 func formatTag(tag string) string {
-	if rest, ok := strings.CutPrefix(tag, "tag:yaml.org,2002:"); ok && isTagShorthand(rest) {
-		return "!!" + rest
+	if rest, ok := strings.CutPrefix(tag, "tag:yaml.org,2002:"); ok && rest != "" {
+		if isTagShorthand(rest) {
+			return "!!" + rest
+		}
+		return "!!" + escapeTagURI(rest, true)
 	}
-	if rest, ok := strings.CutPrefix(tag, "!"); ok && isTagShorthand(rest) {
-		return tag
+	if rest, ok := strings.CutPrefix(tag, "!"); ok && rest != "" {
+		if isTagShorthand(rest) {
+			return tag
+		}
+		return "!" + escapeTagURI(rest, true)
 	}
-	return "!<" + tag + ">"
+	return "!<" + escapeTagURI(tag, false) + ">"
+}
+
+// escapeTagURI percent-encodes the bytes of s that are not URI characters
+// (ns-uri-char). For a shorthand, which the parser percent-decodes, it also
+// encodes '%' itself, '!' and the flow indicators; a verbatim tag is read
+// as written, so its '%' is kept.
+func escapeTagURI(s string, shorthand bool) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := range len(s) {
+		c := s[i]
+		if shorthand && isTagChar(c) || !shorthand && isURIChar(c) {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0xf])
+	}
+	return b.String()
 }
 
 // isTagShorthand reports whether s can follow a tag handle as written:
-// non-empty, with no '!', '%', flow indicator, space or control character.
+// non-empty, and made of ns-tag-char bytes only.
 func isTagShorthand(s string) bool {
 	if s == "" {
 		return false
 	}
-	for _, r := range s {
-		if r <= ' ' || r == 0x7f || strings.ContainsRune("!%,[]{}", r) {
+	for i := range len(s) {
+		if !isTagChar(s[i]) {
 			return false
 		}
 	}
@@ -1216,6 +1607,10 @@ func (e *encoder) emitNodeBody(n *node, indent int) {
 				e.writeIndent(indent)
 			} else {
 				e.emitNode(key, indent)
+				if key.kind == nodeAlias {
+					// An alias name may end in ':', so the indicator is set apart.
+					e.buf = append(e.buf, ' ')
+				}
 			}
 			e.buf = append(e.buf, ':')
 			e.emitBlockChild(n.children[i+1], indent, true)
@@ -1253,7 +1648,7 @@ func (e *encoder) writeNodeScalar(n *node, indent int) {
 	case n.style != scalarPlain || isStrTag(n.tag):
 		e.writeScalar(n.value, indent)
 	case n.value == "" && tagged:
-		e.writeQuotedScalar("")
+		// The bare tag reads back as the same tagged empty scalar.
 	case n.value == "":
 		e.buf = append(e.buf, nullLiteral...)
 	case readsAsNonString(n.value), n.value == "<<":
@@ -1272,13 +1667,85 @@ func isStrTag(tag string) bool {
 // readsAsNonString reports whether the plain scalar s resolves to null, a
 // bool or a number under the Core schema.
 func readsAsNonString(s string) bool {
-	_, isStr := scalarToAnyCore(s).(string)
-	return !isStr
+	return resolveCore(s).kind != coreStr
+}
+
+// yaml11Words lists the plain scalars a YAML 1.1 reader resolves to a bool,
+// along with "=", its value key.
+var yaml11Words = map[string]struct{}{
+	"y": {}, "Y": {}, "yes": {}, "Yes": {}, "YES": {},
+	"n": {}, "N": {}, "no": {}, "No": {}, "NO": {},
+	"on": {}, "On": {}, "ON": {},
+	"off": {}, "Off": {}, "OFF": {},
+	"=": {},
+}
+
+// readsAsYAML11NonString reports whether a YAML 1.1 reader, or one that
+// parses numbers with Go literal syntax, would resolve the plain scalar s to
+// something other than a string: a 1.1 bool word, a number with a 0b, 0o or
+// 0x prefix in either case, underscores, a leading zero or an inf or nan
+// spelling, a number out of range, or a timestamp.
+func readsAsYAML11NonString(s string) bool {
+	if _, ok := yaml11Words[s]; ok {
+		return true
+	}
+	c := s[0]
+	if (c == '+' || c == '-') && len(s) > 1 {
+		c = s[1]
+	}
+	switch {
+	case c >= '0' && c <= '9', c == '.':
+	case c == 'i' || c == 'I' || c == 'n' || c == 'N':
+		_, err := strconv.ParseFloat(s, 64)
+		return err == nil
+	default:
+		return false
+	}
+	if _, err := strconv.ParseInt(s, 0, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+		return true
+	}
+	if _, err := strconv.ParseFloat(s, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+		return true
+	}
+	return isYAML11Date(s)
+}
+
+// isYAML11Date reports whether s starts with a YAML 1.1 timestamp's date,
+// yyyy-m-d with one or two digit month and day, followed by nothing or by a
+// time separator.
+func isYAML11Date(s string) bool {
+	digits := func(i, minN, maxN int) int {
+		n := 0
+		for i+n < len(s) && n < maxN && s[i+n] >= '0' && s[i+n] <= '9' {
+			n++
+		}
+		if n < minN {
+			return -1
+		}
+		return i + n
+	}
+	i := digits(0, 4, 4)
+	for range 2 {
+		if i < 0 || i >= len(s) || s[i] != '-' {
+			return false
+		}
+		i = digits(i+1, 1, 2)
+	}
+	if i < 0 {
+		return false
+	}
+	return i == len(s) || s[i] == 'T' || s[i] == 't' || s[i] == ' ' || s[i] == '\t'
 }
 
 func needsQuoting(s string) bool {
 	// "<<" as a plain key is a merge key.
 	if s == "" || s == "<<" || readsAsNonString(s) {
+		return true
+	}
+
+	// Quoting what a YAML 1.1 reader would type keeps the text a string for
+	// those readers too.
+	if readsAsYAML11NonString(s) {
 		return true
 	}
 
@@ -1327,7 +1794,7 @@ func isCompound(v reflect.Value) bool {
 		}
 		return true
 	case reflect.Array:
-		return v.Len() > 0
+		return v.Len() > 0 && v.Type().Elem().Kind() != reflect.Uint8
 	}
 	return false
 }
@@ -1340,7 +1807,7 @@ func isEmpty(v reflect.Value) bool {
 		return !v.Bool()
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return v.Int() == 0
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return v.Uint() == 0
 	case reflect.Float32, reflect.Float64:
 		return v.Float() == 0
