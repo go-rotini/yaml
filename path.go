@@ -453,7 +453,7 @@ func (p *Path) String() string {
 		for _, seg := range p.segments {
 			if s, ok := seg.(pointerSegment); ok {
 				buf.WriteByte('/')
-				buf.WriteString(pointerEscaper.Replace(s.name))
+				buf.WriteString(escapePointerToken(s.name))
 			}
 		}
 		return buf.String()
@@ -467,7 +467,7 @@ func (p *Path) String() string {
 		case childSegment:
 			if !isPlainPathKey(s.name) {
 				buf.WriteString("['")
-				buf.WriteString(pathKeyEscaper.Replace(s.name))
+				buf.WriteString(escapePathKey(s.name))
 				buf.WriteString("']")
 				continue
 			}
@@ -500,8 +500,14 @@ func isRecursive(seg pathSegment) bool {
 	return ok
 }
 
-// pointerEscaper applies the RFC 6901 escaping rules to a reference token.
-var pointerEscaper = strings.NewReplacer("~", "~0", "/", "~1")
+// escapePointerToken applies the RFC 6901 escaping rules to a reference token: ~ first, so the
+// ~1 written for / is not escaped again.
+func escapePointerToken(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "~", "~0"), "/", "~1")
+}
 
-// pathKeyEscaper escapes a key for a quoted ['key'] path segment.
-var pathKeyEscaper = strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+// escapePathKey escapes a key for a quoted ['key'] path segment: backslashes first, so the one
+// written before a quote is not doubled.
+func escapePathKey(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `'`, `\'`)
+}

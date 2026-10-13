@@ -1006,3 +1006,25 @@ func TestPathStringQuotesWhiteSpaceKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestEscapersMatchReplacers(t *testing.T) {
+	ptr := strings.NewReplacer("~", "~0", "/", "~1")
+	key := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+	alphabet := []string{"~", "/", `\`, `'`, "0", "1", "a", "~0", "~1", "é"}
+	var gen func(prefix string, n int)
+	gen = func(prefix string, n int) {
+		if got, want := escapePointerToken(prefix), ptr.Replace(prefix); got != want {
+			t.Fatalf("pointer %q: got %q want %q", prefix, got, want)
+		}
+		if got, want := escapePathKey(prefix), key.Replace(prefix); got != want {
+			t.Fatalf("key %q: got %q want %q", prefix, got, want)
+		}
+		if n == 0 {
+			return
+		}
+		for _, a := range alphabet {
+			gen(prefix+a, n-1)
+		}
+	}
+	gen("", 5)
+}

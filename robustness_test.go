@@ -1310,7 +1310,7 @@ func TestOmitEmptyZeroUintptr(t *testing.T) {
 
 func TestPathStringQuotedKeysRoundTrip(t *testing.T) {
 	for _, key := range []string{`it's`, `a\b`, `\'`, `x.y`, `a]b`, `\\`} {
-		p, err := PathString(`$['` + pathKeyEscaper.Replace(key) + `']`)
+		p, err := PathString(`$['` + escapePathKey(key) + `']`)
 		if err != nil {
 			t.Fatalf("%q: %v", key, err)
 		}

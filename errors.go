@@ -338,8 +338,6 @@ var (
 	errInvalidAnchor          = errors.New("invalid anchor name")
 	errNoDocuments            = errors.New("no documents in file")
 	errJSONTrailingData       = errors.New("invalid data after top-level value")
-	errPathTooShortReplace    = fmt.Errorf("yaml: path too short for replace: %w", ErrPathSyntax)
-	errPathTooShortDelete     = fmt.Errorf("yaml: path too short for delete: %w", ErrPathSyntax)
 	errInvalidNumber          = errors.New("yaml: invalid number")
 	errInvalidBoolDefault     = errors.New("invalid bool default")
 	errInvalidDurationDefault = errors.New("invalid duration default")
@@ -347,6 +345,11 @@ var (
 	errInvalidUintDefault     = errors.New("invalid uint default")
 	errInvalidFloatDefault    = errors.New("invalid float default")
 	errUnsupportedDefault     = errors.New("default tag is not supported for type")
+)
+
+var (
+	errPathTooShortReplace error = &wrapError{msg: "yaml: path too short for replace: yaml: invalid path syntax", err: ErrPathSyntax}
+	errPathTooShortDelete  error = &wrapError{msg: "yaml: path too short for delete: yaml: invalid path syntax", err: ErrPathSyntax}
 )
 
 // FormatError returns a human-readable rendering of err, including the
@@ -461,3 +464,14 @@ func repeatByte(b byte, n int) string {
 	}
 	return string(buf)
 }
+
+// wrapError is a package-level sentinel that wraps another: what fmt.Errorf with one %w
+// builds, laid out as static data so it costs nothing at init.
+type wrapError struct {
+	msg string
+	err error
+}
+
+func (e *wrapError) Error() string { return e.msg }
+
+func (e *wrapError) Unwrap() error { return e.err }

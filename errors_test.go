@@ -437,3 +437,24 @@ func TestKYAMLErrorIsSentinel(t *testing.T) {
 		t.Error("expected errors.Is(err, ErrSyntax) to be false")
 	}
 }
+
+func TestWrappedSentinelsMatchErrorf(t *testing.T) {
+	for _, c := range []struct {
+		got, want error
+		base      error
+	}{
+		{errPathTooShortReplace, fmt.Errorf("yaml: path too short for replace: %w", ErrPathSyntax), ErrPathSyntax},
+		{errPathTooShortDelete, fmt.Errorf("yaml: path too short for delete: %w", ErrPathSyntax), ErrPathSyntax},
+		{errTreeTooDeep, fmt.Errorf("yaml: node tree nested more than %d levels deep: %w", maxNestingDepth, ErrUnsupported), ErrUnsupported},
+	} {
+		if c.got.Error() != c.want.Error() {
+			t.Errorf("message %q, want %q", c.got.Error(), c.want.Error())
+		}
+		if !errors.Is(c.got, c.base) || errors.Unwrap(c.got) != c.base {
+			t.Errorf("%q does not wrap %v", c.got, c.base)
+		}
+		if fmt.Sprintf("%v|%s|%+v|%q", c.got, c.got, c.got, c.got) != fmt.Sprintf("%v|%s|%+v|%q", c.want, c.want, c.want, c.want) {
+			t.Errorf("formatting differs for %q", c.got)
+		}
+	}
+}

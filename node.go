@@ -364,7 +364,7 @@ func checkTree(root *Node, structure bool) error {
 const checkedMinSize = 16
 
 // errTreeTooDeep reports a node tree nested more than maxNestingDepth levels.
-var errTreeTooDeep = fmt.Errorf("yaml: node tree nested more than %d levels deep: %w", maxNestingDepth, ErrUnsupported)
+var errTreeTooDeep error = &wrapError{msg: "yaml: node tree nested more than 10000 levels deep: yaml: unsupported value", err: ErrUnsupported}
 
 // ancestorScan is the path length up to which ancestors searches its path
 // rather than keeping a set.
