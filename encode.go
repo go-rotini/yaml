@@ -479,6 +479,8 @@ func (e *encoder) marshalNonPointer(v reflect.Value, indent int, inline bool) er
 			e.buf = append(e.buf, "-.inf"...)
 		case math.IsNaN(f):
 			e.buf = append(e.buf, ".nan"...)
+		case e.opts.autoInt && f == math.Trunc(f) && math.Abs(f) < 1e16:
+			e.buf = strconv.AppendInt(e.buf, int64(f), 10)
 		default:
 			start := len(e.buf)
 			e.buf = strconv.AppendFloat(e.buf, f, 'g', -1, v.Type().Bits())

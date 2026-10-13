@@ -435,11 +435,12 @@ func ExampleWithComment() {
 }
 
 func ExampleWithAutoInt() {
-	v := map[string]string{"count": "42"}
+	v := map[string]any{"count": "42", "total": 450.0}
 	data, _ := yaml.MarshalWithOptions(v, yaml.WithAutoInt(true))
 	fmt.Print(string(data))
 	// Output:
 	// count: 42
+	// total: 450
 }
 
 // --- Decode Options ---

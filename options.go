@@ -113,9 +113,12 @@ func WithComment(comments map[string][]Comment) EncodeOption {
 	return func(o *encoderOptions) { o.comments = comments }
 }
 
-// WithAutoInt writes string values that are decimal integers (e.g. "42")
-// unquoted, so they decode back as integers rather than strings. It has no
-// effect under [WithJSON], [WithQuoteAllStrings] or [WithKYAML]. The
+// WithAutoInt writes whole-number floats with magnitude below 1e16 as
+// integers (42 rather than 42.0), and string values that are decimal
+// integers (e.g. "42") unquoted, so both decode back as integers. Without
+// it a whole-number float keeps a fraction so it decodes back as a float.
+// [WithKYAML] always writes such floats as integers. The string rule has no
+// effect under [WithJSON], [WithQuoteAllStrings] or [WithKYAML], and the
 // original text is not kept: "+42" and "042" both decode back as 42.
 func WithAutoInt(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.autoInt = b }

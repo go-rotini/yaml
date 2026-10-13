@@ -907,6 +907,50 @@ func TestWriteScalarAutoInt(t *testing.T) {
 	}
 }
 
+func TestAutoIntWholeFloat(t *testing.T) {
+	tests := []struct {
+		name string
+		v    any
+		opts []EncodeOption
+		want string
+	}{
+		{"default keeps fraction", map[string]float64{"count": 42}, nil, "count: 42.0\n"},
+		{"auto int", map[string]float64{"count": 42}, []EncodeOption{WithAutoInt(true)}, "count: 42\n"},
+		{"auto int off", map[string]float64{"count": 42}, []EncodeOption{WithAutoInt(false)}, "count: 42.0\n"},
+		{"auto int negative", map[string]float64{"num": -7}, []EncodeOption{WithAutoInt(true)}, "num: -7\n"},
+		{"auto int float32", map[string]float32{"num": 3}, []EncodeOption{WithAutoInt(true)}, "num: 3\n"},
+		{"auto int fraction kept", map[string]float64{"num": 1.5}, []EncodeOption{WithAutoInt(true)}, "num: 1.5\n"},
+		{"auto int large stays float", map[string]float64{"num": 1e20}, []EncodeOption{WithAutoInt(true)}, "num: 1e+20\n"},
+		{"auto int any", map[string]any{"num": 450.0}, []EncodeOption{WithAutoInt(true)}, "num: 450\n"},
+		{"auto int kyaml", map[string]float64{"count": 42}, []EncodeOption{WithAutoInt(true), WithKYAML()}, "---\n{\n  count: 42,\n}\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := MarshalWithOptions(tt.v, tt.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != tt.want {
+				t.Errorf("got %q, want %q", out, tt.want)
+			}
+		})
+	}
+}
+
+func TestAutoIntWholeFloatDecodesAsInt(t *testing.T) {
+	out, err := MarshalWithOptions(map[string]float64{"count": 42}, WithAutoInt(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["count"].(float64); ok {
+		t.Errorf("count decoded as float64 %v, want an integer", got["count"])
+	}
+}
+
 func TestWriteScalarAutoIntNonNumeric(t *testing.T) {
 	out, err := MarshalWithOptions("hello", WithAutoInt(true))
 	if err != nil {

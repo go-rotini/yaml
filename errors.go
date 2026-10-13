@@ -233,8 +233,8 @@ type KYAMLError struct {
 
 // KYAMLViolation describes a single KYAML rule violation.
 type KYAMLViolation struct {
-	// Rule is a stable identifier of the rule broken, for code that
-	// branches on the kind of violation. It is not part of the message.
+	// Rule is a stable identifier of the rule broken (e.g. "R12.1"), for
+	// code that branches on the kind of violation.
 	Rule    string
 	Message string
 	Pos     Position
@@ -242,6 +242,10 @@ type KYAMLViolation struct {
 	Token string
 }
 
+// Error lists each violation with its position, when known, and its rule ID
+// in parentheses, for example:
+//
+//	yaml: line 2, column 6: anchor "&a" not allowed in KYAML (R12.1)
 func (e *KYAMLError) Error() string {
 	if len(e.Errors) == 0 {
 		return "yaml: KYAML validation failed"
@@ -249,16 +253,16 @@ func (e *KYAMLError) Error() string {
 	if len(e.Errors) == 1 {
 		v := e.Errors[0]
 		if v.Pos.Line > 0 {
-			return fmt.Sprintf("yaml: line %d, column %d: %s", v.Pos.Line, v.Pos.Column, v.Message)
+			return fmt.Sprintf("yaml: line %d, column %d: %s (%s)", v.Pos.Line, v.Pos.Column, v.Message, v.Rule)
 		}
-		return "yaml: " + v.Message
+		return fmt.Sprintf("yaml: %s (%s)", v.Message, v.Rule)
 	}
 	parts := make([]string, 0, len(e.Errors))
 	for _, v := range e.Errors {
 		if v.Pos.Line > 0 {
-			parts = append(parts, fmt.Sprintf("line %d, column %d: %s", v.Pos.Line, v.Pos.Column, v.Message))
+			parts = append(parts, fmt.Sprintf("line %d, column %d: %s (%s)", v.Pos.Line, v.Pos.Column, v.Message, v.Rule))
 		} else {
-			parts = append(parts, v.Message)
+			parts = append(parts, fmt.Sprintf("%s (%s)", v.Message, v.Rule))
 		}
 	}
 	return fmt.Sprintf("yaml: %d KYAML violations:\n  %s", len(e.Errors), strings.Join(parts, "\n  "))
@@ -281,22 +285,22 @@ const (
 
 // LintIssue describes a single KYAML conformance deviation reported by [Lint].
 type LintIssue struct {
-	// Rule is a stable identifier of the rule broken, for code that
-	// branches on the kind of issue. It is not part of the message.
+	// Rule is a stable identifier of the rule broken (e.g. "R12.1"), for
+	// code that branches on the kind of issue.
 	Rule     string
 	Message  string
 	Pos      Position
 	Severity Severity
 }
 
-// String renders the issue with its source position, when known. LintIssue
-// is a finding rather than an error, so it implements [fmt.Stringer]
-// instead of error.
+// String renders the issue with its source position, when known, and its
+// rule ID in parentheses. LintIssue is a finding rather than an error, so
+// it implements [fmt.Stringer] instead of error.
 func (i LintIssue) String() string {
 	if i.Pos.Line > 0 {
-		return fmt.Sprintf("line %d, column %d: %s", i.Pos.Line, i.Pos.Column, i.Message)
+		return fmt.Sprintf("line %d, column %d: %s (%s)", i.Pos.Line, i.Pos.Column, i.Message, i.Rule)
 	}
-	return i.Message
+	return fmt.Sprintf("%s (%s)", i.Message, i.Rule)
 }
 
 // Sentinel errors for use with [errors.Is]. Never pass one's address to

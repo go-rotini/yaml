@@ -382,7 +382,7 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 				Message: "anchor not allowed",
 				Pos:     Position{Line: 5, Column: 7},
 			}}},
-			want:    `yaml: line 5, column 7: anchor not allowed`,
+			want:    `yaml: line 5, column 7: anchor not allowed (R12.1)`,
 			exactly: true,
 		},
 		{
@@ -391,7 +391,7 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 				Rule:    "R3.1",
 				Message: "missing header",
 			}}},
-			want:    `yaml: missing header`,
+			want:    `yaml: missing header (R3.1)`,
 			exactly: true,
 		},
 		{
@@ -400,7 +400,8 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 				{Rule: "R12.1", Message: "anchor", Pos: Position{Line: 1, Column: 2}},
 				{Rule: "R12.2", Message: "tag"},
 			}},
-			want: "yaml: 2 KYAML violations:",
+			want:    "yaml: 2 KYAML violations:\n  line 1, column 2: anchor (R12.1)\n  tag (R12.2)",
+			exactly: true,
 		},
 	}
 	for _, tc := range cases {
@@ -418,11 +419,11 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 
 func TestLintIssueString(t *testing.T) {
 	withPos := LintIssue{Rule: "R12.5", Message: "block style", Pos: Position{Line: 3, Column: 1}}
-	if got := withPos.String(); got != "line 3, column 1: block style" {
+	if got := withPos.String(); got != "line 3, column 1: block style (R12.5)" {
 		t.Errorf("String() with pos = %q", got)
 	}
 	noPos := LintIssue{Rule: "R3.1", Message: "no header"}
-	if got := noPos.String(); got != "no header" {
+	if got := noPos.String(); got != "no header (R3.1)" {
 		t.Errorf("String() no pos = %q", got)
 	}
 }
