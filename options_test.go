@@ -13,8 +13,8 @@ func TestDefaultEncodeOptions(t *testing.T) {
 	if o.lineWidth != 80 {
 		t.Errorf("expected lineWidth=80, got %d", o.lineWidth)
 	}
-	if o.indentSequence {
-		t.Error("expected indentSequence=false")
+	if !o.indentSequence {
+		t.Error("expected indentSequence=true")
 	}
 	if o.flow || o.jsonCompat || o.useLiteral || o.useSingleQuote || o.omitEmpty || o.autoInt {
 		t.Error("expected all bool options false by default")

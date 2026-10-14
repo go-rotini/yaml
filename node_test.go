@@ -1,12 +1,16 @@
 package yaml
 
 import (
+	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNodeKindConstants(t *testing.T) {
-	kinds := []nodeKind{nodeDocument, nodeMapping, nodeSequence, nodeScalar, nodeAnchor, nodeAlias, nodeMergeKey}
+	kinds := []nodeKind{nodeDocument, nodeMapping, nodeSequence, nodeScalar, nodeAlias, nodeMergeKey}
 	seen := make(map[nodeKind]bool)
 	for _, k := range kinds {
 		if seen[k] {
@@ -218,6 +222,47 @@ func TestNodeToBytesSequence(t *testing.T) {
 	}
 }
 
+func TestNodeToBytesAnchorsAndAliases(t *testing.T) {
+	input := "base: &b\n  x: z\nlist: &l\n  - &s one\n  - *s\nempty: &e {}\nref: *b\nlrefs:\n  - *l\n  - *e\n"
+	f, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := NodeToBytes(f.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "base: &b\n  x: z\nlist: &l\n  - &s one\n  - *s\nempty: &e {}\nref: *b\nlrefs:\n  - *l\n  - *e"
+	if string(data) != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", data, want)
+	}
+
+	var got, orig any
+	if err := Unmarshal(data, &got); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	if err := Unmarshal([]byte(input), &orig); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(orig) {
+		t.Fatalf("round trip: got %v, want %v", got, orig)
+	}
+
+	top := &Node{Kind: SequenceNode, Anchor: "top", Children: []*Node{
+		{Kind: MappingNode, Anchor: "m", Children: []*Node{
+			{Kind: ScalarNode, Value: "k"}, {Kind: ScalarNode, Value: "v"},
+		}},
+		{Kind: AliasNode, Alias: "m"},
+	}}
+	data, err = NodeToBytes(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "&top\n- &m\n  k: v\n- *m"; string(data) != want {
+		t.Fatalf("got %q, want %q", data, want)
+	}
+}
+
 func TestASTRoundTrip(t *testing.T) {
 	input := `name: hello
 items:
@@ -250,7 +295,6 @@ func TestExportKindAllValues(t *testing.T) {
 		{nodeSequence, SequenceNode},
 		{nodeScalar, ScalarNode},
 		{nodeAlias, AliasNode},
-		{nodeAnchor, ScalarNode},
 		{nodeMergeKey, ScalarNode},
 		{nodeKind(99), ScalarNode},
 	}
@@ -482,5 +526,190 @@ func TestNodeValidateValid(t *testing.T) {
 	}
 	if err := n.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNodeToBytesKeepsScalarTypes(t *testing.T) {
+	src := "i: 1\nneg: -7\nhex: 0x1F\nf: 1.5\ninf: .inf\nb: true\nB: False\nn: null\nt: ~\nempty:\n" +
+		"qi: \"1\"\nqf: '2.0'\nqb: \"true\"\nqn: 'null'\nqe: \"\"\nstr: !!str 3\nw: hello\n1: one\n"
+	file, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NodeToBytes(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"i: 1\n", "f: 1.5\n", "b: true\n", "\"n\": null\n", "empty: null\n", `qi: "1"`, `qe: ""`, `str: "3"`, "1: one\n"} {
+		if !strings.Contains(string(out)+"\n", line) {
+			t.Errorf("output missing %q:\n%s", line, out)
+		}
+	}
+	var want, got map[string]any
+	if err := Unmarshal([]byte(src), &want); err != nil {
+		t.Fatal(err)
+	}
+	if err := Unmarshal(out, &got); err != nil {
+		t.Fatalf("re-parse: %v\n%s", err, out)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip changed values:\n got %#v\nwant %#v\noutput:\n%s", got, want, out)
+	}
+}
+
+func TestNodeToBytesProgrammaticScalars(t *testing.T) {
+	n := &Node{Kind: MappingNode, Children: []*Node{
+		{Kind: ScalarNode, Value: "port"}, {Kind: ScalarNode, Value: "8080"},
+		{Kind: ScalarNode, Value: "id"}, {Kind: ScalarNode, Value: "8080", Style: DoubleQuotedStyle},
+		{Kind: ScalarNode, Value: "tagged"}, {Kind: ScalarNode, Value: "8080", Tag: "!!str"},
+		{Kind: ScalarNode, Value: "text"}, {Kind: ScalarNode, Value: "a: b"},
+	}}
+	out, err := NodeToBytes(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "port: 8080\nid: \"8080\"\ntagged: \"8080\"\ntext: \"a: b\""
+	if string(out) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestNodeToBytesMergeKey(t *testing.T) {
+	file, err := Parse([]byte("base: &b {x: 1}\nc:\n  <<: *b\n  y: 2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Docs[0].Children[0].Children[3].Children[0].MergeKey = true
+	out, err := NodeToBytes(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "<<: *b") {
+		t.Errorf("merge key not written:\n%s", out)
+	}
+	var got struct {
+		C map[string]int `yaml:"c"`
+	}
+	if err := Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.C["x"] != 1 || got.C["y"] != 2 {
+		t.Errorf("merge not applied: %v", got.C)
+	}
+}
+
+// sameNodes compares the parts of two node trees that NodeToBytes keeps.
+func sameNodes(t *testing.T, path string, a, b *Node) {
+	t.Helper()
+	if a.Kind != b.Kind || a.Value != b.Value || a.Tag != b.Tag || a.Anchor != b.Anchor || a.Alias != b.Alias {
+		t.Errorf("%s: got %+v, want %+v", path, b, a)
+		return
+	}
+	if len(a.Children) != len(b.Children) {
+		t.Errorf("%s: got %d children, want %d", path, len(b.Children), len(a.Children))
+		return
+	}
+	for i := range a.Children {
+		sameNodes(t, fmt.Sprintf("%s/%d", path, i), a.Children[i], b.Children[i])
+	}
+}
+
+func TestNodeToBytesKeepsTags(t *testing.T) {
+	src := "f: !!float 3\ni: !!int \"4\"\nb: !!bool \"true\"\nz: !!null \"\"\nbin: !!binary aGVsbG8=\n" +
+		"c: !foo bar\nm: !mymap {a: 1}\nset: !!set {a: null}\nv: !<tag:example.com,2000:x> q\n" +
+		"implied: !!int 5\nstr: !!str 6\n"
+	file, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NodeToBytes(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"f: !!float 3\n", "c: !foo bar\n", "m: !mymap\n", "v: !<tag:example.com,2000:x> q\n", "implied: 5\n", "str: \"6\"\n"} {
+		if !strings.Contains(string(out)+"\n", line) {
+			t.Errorf("output missing %q:\n%s", line, out)
+		}
+	}
+	again, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v\n%s", err, out)
+	}
+	// Tags implied by the written form are not written, so compare values
+	// and resolved types rather than tags.
+	var want, got map[string]any
+	if err := Unmarshal([]byte(src), &want); err != nil {
+		t.Fatal(err)
+	}
+	if err := Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip:\n got %#v\nwant %#v", got, want)
+	}
+	if got["f"] != 3.0 {
+		t.Errorf("!!float 3 decoded as %#v", got["f"])
+	}
+	sameNodes(t, "c", file.Docs[0].Children[0].Children[11], again.Docs[0].Children[0].Children[11])
+}
+
+func TestNodeToBytesComplexKeys(t *testing.T) {
+	src := "? [a, b]\n: 1\n? {k: v}\n: [x]\n? &k [c]\n: *k\nplain: 2\n"
+	file, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NodeToBytes(file.Docs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v\n%s", err, out)
+	}
+	sameNodes(t, "doc", file.Docs[0], again.Docs[0])
+}
+
+func TestValidateSharedSubtrees(t *testing.T) {
+	// 60 levels whose two children are the same node: 2^60 paths, 121 nodes.
+	n := &Node{Kind: ScalarNode, Value: "x"}
+	for range 60 {
+		n = &Node{Kind: SequenceNode, Children: []*Node{n, n}}
+	}
+	start := time.Now()
+	if err := n.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Validate took %v", elapsed)
+	}
+
+	// A shared subtree checked shallow is still too deep where it is
+	// reached again deeper down.
+	shared := &Node{Kind: ScalarNode, Value: "x"}
+	for range maxNestingDepth - 10 {
+		shared = &Node{Kind: SequenceNode, Children: []*Node{shared}}
+	}
+	deep := shared
+	for range 20 {
+		deep = &Node{Kind: SequenceNode, Children: []*Node{deep}}
+	}
+	root := &Node{Kind: SequenceNode, Children: []*Node{shared, deep}}
+	if err := root.Validate(); !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "levels deep") {
+		t.Errorf("deep shared subtree: got %v", err)
+	}
+
+	// A shared subtree that holds an invalid name fails wherever it is.
+	bad := &Node{Kind: SequenceNode, Children: []*Node{{Kind: AliasNode}}}
+	if err := (&Node{Kind: SequenceNode, Children: []*Node{bad, bad}}).Validate(); !errors.Is(err, errEmptyAlias) {
+		t.Errorf("shared invalid subtree: got %v", err)
+	}
+
+	// Walk visits a shared node once per path to it.
+	count := 0
+	leaf := &Node{Kind: ScalarNode, Value: "v"}
+	Walk(&Node{Kind: SequenceNode, Children: []*Node{leaf, leaf}}, func(*Node) bool { count++; return true })
+	if count != 3 {
+		t.Errorf("Walk: %d visits, want 3", count)
 	}
 }

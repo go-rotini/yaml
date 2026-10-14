@@ -1,10 +1,9 @@
 package yaml
 
-type tokenKind int
+type tokenKind uint16
 
 const (
-	tokenError tokenKind = iota
-	tokenStreamStart
+	tokenStreamStart tokenKind = iota + 1
 	tokenStreamEnd
 	tokenDocumentStart
 	tokenDocumentEnd
@@ -27,7 +26,7 @@ const (
 	tokenComment
 )
 
-type scalarStyle int
+type scalarStyle uint8
 
 const (
 	scalarPlain scalarStyle = iota
@@ -38,9 +37,9 @@ const (
 )
 
 type token struct {
-	kind  tokenKind
 	value string
 	pos   Position
+	kind  tokenKind
 	style scalarStyle
 }
 

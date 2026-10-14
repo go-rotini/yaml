@@ -28,7 +28,7 @@ func TestTokenString(t *testing.T) {
 		{token{kind: tokenScalar, value: "hello"}, "SCALAR(hello)"},
 		{token{kind: tokenComment, value: "note"}, "COMMENT(note)"},
 		{token{kind: tokenDirective, value: "%YAML"}, "DIRECTIVE(%YAML)"},
-		{token{kind: tokenError}, "UNKNOWN"},
+		{token{kind: tokenKind(0)}, "UNKNOWN"},
 	}
 	for _, tt := range tests {
 		got := tt.tok.String()
@@ -40,7 +40,7 @@ func TestTokenString(t *testing.T) {
 
 func TestTokenKindConstants(t *testing.T) {
 	kinds := []tokenKind{
-		tokenError, tokenStreamStart, tokenStreamEnd, tokenDocumentStart,
+		tokenStreamStart, tokenStreamEnd, tokenDocumentStart,
 		tokenDocumentEnd, tokenDirective, tokenBlockMappingStart,
 		tokenBlockSequenceStart, tokenBlockEnd, tokenFlowMappingStart,
 		tokenFlowMappingEnd, tokenFlowSequenceStart, tokenFlowSequenceEnd,

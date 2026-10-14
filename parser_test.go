@@ -284,14 +284,15 @@ func TestParserEmptyFlowSequence(t *testing.T) {
 func TestNewParserFields(t *testing.T) {
 	tokens := []token{{kind: tokenStreamStart}, {kind: tokenStreamEnd}}
 	p := newParser(tokens)
-	if p.anchors == nil {
-		t.Error("expected non-nil anchors map")
+	if p.anchors != nil || p.docAnchors != nil || p.tagHandles != nil {
+		t.Error("expected anchor and tag handle maps to be allocated lazily")
 	}
-	if p.tagHandles == nil {
-		t.Error("expected non-nil tagHandles map")
+	if got, err := p.resolveTag("!!str"); err != nil || got != "tag:yaml.org,2002:str" {
+		t.Errorf("expected default !! handle, got %q, %v", got, err)
 	}
-	if p.tagHandles["!!"] != "tag:yaml.org,2002:" {
-		t.Errorf("expected default !! handle, got %q", p.tagHandles["!!"])
+	p.setTagHandle("!e!", "tag:example.com,")
+	if p.tagHandles["!!"] != "tag:yaml.org,2002:" || p.tagHandles["!"] != "!" {
+		t.Errorf("expected default handles kept, got %v", p.tagHandles)
 	}
 }
 
@@ -344,7 +345,7 @@ func TestResolveTagEmpty(t *testing.T) {
 
 func TestResolveTagCustomHandle(t *testing.T) {
 	p := newParser(nil)
-	p.tagHandles["!e!"] = "tag:example.com,"
+	p.setTagHandle("!e!", "tag:example.com,")
 	got, err := p.resolveTag("!e!name")
 	if err != nil {
 		t.Fatal(err)
@@ -356,7 +357,7 @@ func TestResolveTagCustomHandle(t *testing.T) {
 
 func TestResolveTagCustomPrimaryHandle(t *testing.T) {
 	p := newParser(nil)
-	p.tagHandles["!"] = "tag:example.com,"
+	p.setTagHandle("!", "tag:example.com,")
 	got, err := p.resolveTag("!name")
 	if err != nil {
 		t.Fatal(err)
@@ -610,7 +611,7 @@ func TestParseBlockSequenceErrorInItem(t *testing.T) {
 
 func TestParseResolveTagCustomHandleFallthrough(t *testing.T) {
 	p := newParser(nil)
-	p.tagHandles["!custom!"] = "tag:custom.org,"
+	p.setTagHandle("!custom!", "tag:custom.org,")
 	got, err := p.resolveTag("!custom!type")
 	if err != nil {
 		t.Fatal(err)
@@ -909,5 +910,129 @@ func TestIsValidYAMLVersion(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isValidYAMLVersion(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestPropertiesStartKeyAfterEmptyValue(t *testing.T) {
+	valid := map[string]string{
+		"a: &x\n&k b: 1":         `{"a":null,"b":1}`,
+		"a: !t\n!u b: 1":         `{"a":null,"b":1}`,
+		"- a: !t\n  !u b: 1":     `[{"a":null,"b":1}]`,
+		"a:\n&k b: 1":            `{"a":null,"b":1}`,
+		"a: &x # c\n&k \"b\": 1": `{"a":null,"b":1}`,
+	}
+	for in, want := range valid {
+		if got, err := ToJSON([]byte(in)); err != nil || string(got) != want {
+			t.Errorf("%q: got %s, %v, want %s", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"a: &x\n&k b: 1", "a: !t\n!u b: 1", "- a: !t\n  !u b: 1", "a: &x\n&k [b]: 1\nc: 2", "{0: !0,!0 0}"} {
+		f, err := Parse([]byte(in))
+		if err != nil {
+			t.Errorf("%q: Parse: %v", in, err)
+			continue
+		}
+		out, err := NodeToBytes(f.Docs[0])
+		if err != nil {
+			t.Errorf("%q: NodeToBytes: %v", in, err)
+			continue
+		}
+		if _, err := Parse(out); err != nil {
+			t.Errorf("%q: NodeToBytes wrote %q, which does not parse: %v", in, out, err)
+		}
+	}
+	// A property that cannot start a key on its own line stays an error.
+	for _, in := range []string{"key: &x\n!!map\n  a: b", "a:\n&x b", "a: &x\n&k\nb: 1", "a:\n!t\nb: 1", "a:\n&k [1]"} {
+		var v any
+		if err := Unmarshal([]byte(in), &v); err == nil || !strings.Contains(err.Error(), "not indented enough") {
+			t.Errorf("%q: got %#v, %v", in, v, err)
+		}
+	}
+	// The raw bytes a BytesUnmarshaler receives parse.
+	var r struct {
+		V RawValue `yaml:"v"`
+	}
+	if err := Unmarshal([]byte("v: {0: !t, !u 1: 2}"), &r); err != nil {
+		t.Errorf("RawValue: %v", err)
+	}
+}
+
+func TestEmptyKeyAfterFlowValue(t *testing.T) {
+	valid := map[string]string{
+		"a: {}\n!t : 1\nb: 2":  `{"":1,"a":{},"b":2}`,
+		"a: [x]\n!!str : 1":    `{"":1,"a":["x"]}`,
+		"a: {}\n: 1":           `{"":1,"a":{}}`,
+		"a: &b {}\n!0 : 1":     `{"":1,"a":{}}`,
+		"a: !t []\n&k : 1":     `{"":1,"a":[]}`,
+		"a: {x: 1}\n: 2":       `{"":2,"a":{"x":1}}`,
+		"a:\n  b: [1]\n  : 2":  `{"a":{"":2,"b":[1]}}`,
+		"a: [x,\n  y]\n!t : 1": `{"":1,"a":["x","y"]}`,
+	}
+	for in, want := range valid {
+		if got, err := ToJSON([]byte(in)); err != nil || string(got) != want {
+			t.Errorf("%q: got %s, %v, want %s", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"a: {}\n? !t\n: 1", "a: &b {}\n? !t\n: 1", ": &b{}\n#00\n!0 :"} {
+		if err := nodeRoundTrip([]byte(in)); err != nil {
+			t.Errorf("%q: %v", in, err)
+		}
+	}
+}
+
+func TestNodeNotIndentedEnough(t *testing.T) {
+	for _, in := range []string{"a: !t\nb", "a: &x\nb", "q:\nx", "q:\n'x'", "q:\n|\n  x", "q:\n>\n  x", "- a: !t\n  b", "a:\n{b: 1}"} {
+		var v any
+		if err := Unmarshal([]byte(in), &v); err == nil || !strings.Contains(err.Error(), "not indented enough") {
+			t.Errorf("%q: got %#v, %v", in, v, err)
+		}
+	}
+	valid := map[string]string{
+		"a:\n- 1":          `{"a":[1]}`,
+		"a: !t\n- 1":       `{"a":[1]}`,
+		"a:\n# c\nb: 1":    `{"a":null,"b":1}`,
+		"a:\n'b': 1":       `{"a":null,"b":1}`,
+		"a:\n[b]: 1\nc: 2": "",
+	}
+	for in, want := range valid {
+		if want == "" {
+			if _, err := Parse([]byte(in)); err != nil {
+				t.Errorf("%q: %v", in, err)
+			}
+			continue
+		}
+		if got, err := ToJSON([]byte(in)); err != nil || string(got) != want {
+			t.Errorf("%q: got %s, %v, want %s", in, got, err, want)
+		}
+	}
+}
+
+func TestPlainScalarCannotStartWithComma(t *testing.T) {
+	for _, in := range []string{", : 1", "a: ,b", "- ,x", "a: &x\n&k , : 1", "? ,x\n: 1"} {
+		var v any
+		if err := Unmarshal([]byte(in), &v); err == nil || !strings.Contains(err.Error(), "cannot start with ','") {
+			t.Errorf("%q: got %#v, %v", in, v, err)
+		}
+	}
+	for in, want := range map[string]string{"a: x,y": `{"a":"x,y"}`, "a: b\n  ,x": `{"a":"b ,x"}`, "{a: ,x}": `{"a":null,"x":null}`} {
+		if got, err := ToJSON([]byte(in)); err != nil || string(got) != want {
+			t.Errorf("%q: got %s, %v, want %s", in, got, err, want)
+		}
+	}
+}
+
+func TestPropertiesBeforeFlowKeyOnDocumentStartLine(t *testing.T) {
+	for _, in := range []string{"--- !!map\n[b]: 1", "--- &a\n[b]: 1", "!!map\n[b]: 1", "--- !!map\n{b: 1}: 1\nc: 2"} {
+		var ms MapSlice
+		if err := Unmarshal([]byte(in), &ms); err != nil || len(ms) == 0 || ms[0].Value != int64(1) {
+			t.Errorf("%q: got %#v, %v", in, ms, err)
+		}
+	}
+	f, err := Parse([]byte("--- !!map\n[b]: 1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := f.Docs[0].Children[0]; m.Kind != MappingNode || m.Tag != "tag:yaml.org,2002:map" {
+		t.Errorf("got kind %v tag %q, want a !!map mapping", m.Kind, m.Tag)
 	}
 }

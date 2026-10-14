@@ -64,17 +64,10 @@ func TestParseTagRequired(t *testing.T) {
 	}
 }
 
-func TestParseTagAnchor(t *testing.T) {
-	fi := parseTag("name,anchor=foo")
-	if fi.anchor != "foo" {
-		t.Errorf("expected anchor=foo, got %q", fi.anchor)
-	}
-}
-
-func TestParseTagAlias(t *testing.T) {
-	fi := parseTag("ref,alias=bar")
-	if fi.alias != "bar" {
-		t.Errorf("expected alias=bar, got %q", fi.alias)
+func TestParseTagIgnoresUnknownOptions(t *testing.T) {
+	fi := parseTag("name,anchor=foo,alias=bar")
+	if fi.name != "name" || fi.omitEmpty || fi.hasDefault {
+		t.Errorf("unknown options changed the field: %+v", fi)
 	}
 }
 
@@ -338,17 +331,6 @@ func TestCollectFieldsByNameIndex(t *testing.T) {
 	}
 	if sf.fields[idx].name != "first" {
 		t.Errorf("expected first, got %q", sf.fields[idx].name)
-	}
-}
-
-func TestTagParsingAnchorAlias(t *testing.T) {
-	fi := parseTag("name,anchor=foo")
-	if fi.anchor != "foo" {
-		t.Errorf("expected anchor=foo, got %q", fi.anchor)
-	}
-	fi2 := parseTag("ref,alias=bar")
-	if fi2.alias != "bar" {
-		t.Errorf("expected alias=bar, got %q", fi2.alias)
 	}
 }
 

@@ -184,6 +184,18 @@ func TestFormatError(t *testing.T) {
 	}
 }
 
+func TestFormatErrorKYAMLWithoutPosition(t *testing.T) {
+	err := &KYAMLError{Errors: []KYAMLViolation{
+		{Message: "document must begin with ---"},
+		{Message: "plain scalar", Pos: Position{Line: 1, Column: 4}},
+	}}
+	got := FormatError([]byte("a: b\n"), err)
+	want := "yaml: document must begin with ---\n\nyaml: line 1, column 4: plain scalar\n  a: b\n     ^\n"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestFormatErrorNonSyntaxError(t *testing.T) {
 	err := fmt.Errorf("some error")
 	got := FormatError([]byte("test"), err)
@@ -370,7 +382,8 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 				Message: "anchor not allowed",
 				Pos:     Position{Line: 5, Column: 7},
 			}}},
-			want: `yaml: line 5, column 7: anchor not allowed (R12.1)`,
+			want:    `yaml: line 5, column 7: anchor not allowed (R12.1)`,
+			exactly: true,
 		},
 		{
 			name: "single-no-pos",
@@ -378,7 +391,8 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 				Rule:    "R3.1",
 				Message: "missing header",
 			}}},
-			want: `yaml: missing header (R3.1)`,
+			want:    `yaml: missing header (R3.1)`,
+			exactly: true,
 		},
 		{
 			name: "multi-mixed",
@@ -386,7 +400,8 @@ func TestKYAMLErrorErrorString(t *testing.T) {
 				{Rule: "R12.1", Message: "anchor", Pos: Position{Line: 1, Column: 2}},
 				{Rule: "R12.2", Message: "tag"},
 			}},
-			want: "yaml: 2 KYAML violations:",
+			want:    "yaml: 2 KYAML violations:\n  line 1, column 2: anchor (R12.1)\n  tag (R12.2)",
+			exactly: true,
 		},
 	}
 	for _, tc := range cases {
@@ -420,5 +435,26 @@ func TestKYAMLErrorIsSentinel(t *testing.T) {
 	}
 	if errors.Is(err, ErrSyntax) {
 		t.Error("expected errors.Is(err, ErrSyntax) to be false")
+	}
+}
+
+func TestWrappedSentinelsMatchErrorf(t *testing.T) {
+	for _, c := range []struct {
+		got, want error
+		base      error
+	}{
+		{errPathTooShortReplace, fmt.Errorf("yaml: path too short for replace: %w", ErrPathSyntax), ErrPathSyntax},
+		{errPathTooShortDelete, fmt.Errorf("yaml: path too short for delete: %w", ErrPathSyntax), ErrPathSyntax},
+		{errTreeTooDeep, fmt.Errorf("yaml: node tree nested more than %d levels deep: %w", maxNestingDepth, ErrUnsupported), ErrUnsupported},
+	} {
+		if c.got.Error() != c.want.Error() {
+			t.Errorf("message %q, want %q", c.got.Error(), c.want.Error())
+		}
+		if !errors.Is(c.got, c.base) || errors.Unwrap(c.got) != c.base {
+			t.Errorf("%q does not wrap %v", c.got, c.base)
+		}
+		if fmt.Sprintf("%v|%s|%+v|%q", c.got, c.got, c.got, c.got) != fmt.Sprintf("%v|%s|%+v|%q", c.want, c.want, c.want, c.want) {
+			t.Errorf("formatting differs for %q", c.got)
+		}
 	}
 }

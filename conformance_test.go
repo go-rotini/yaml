@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -387,6 +388,15 @@ func TestYAMLTestSuiteJSON(t *testing.T) {
 			}
 
 			if decErr != nil {
+				// A mapping or sequence key cannot be a key of the
+				// map[string]any these cases decode into; cases using one
+				// have no JSON form to compare against.
+				var typeErr *TypeError
+				if _, statErr := os.Stat(filepath.Join(tc.dir, "in.json")); statErr != nil &&
+					errors.As(decErr, &typeErr) && strings.Contains(decErr.Error(), "as a key of") {
+					passed++
+					return
+				}
 				t.Errorf("decode failed: %v", decErr)
 				failed++
 				return
@@ -495,11 +505,8 @@ func eventsEqual(expected, got []string) bool {
 
 func eventDiff(expected, got []string) string {
 	var sb strings.Builder
-	maxLen := len(expected)
-	if len(got) > maxLen {
-		maxLen = len(got)
-	}
-	for i := 0; i < maxLen; i++ {
+	maxLen := max(len(expected), len(got))
+	for i := range maxLen {
 		var e, g string
 		if i < len(expected) {
 			e = expected[i]
@@ -518,4 +525,148 @@ func eventDiff(expected, got []string) string {
 		fmt.Fprintf(&sb, "%s%3d: expected=%-40s got=%s\n", marker, i, e, g)
 	}
 	return sb.String()
+}
+
+// suiteValidInputs returns the in.yaml of every suite case that is not
+// expected to fail.
+func suiteValidInputs(t *testing.T) map[string][]byte {
+	t.Helper()
+	out := make(map[string][]byte)
+	for _, tc := range discoverTestDirs(t) {
+		if _, err := os.Stat(filepath.Join(tc.dir, "error")); err == nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(tc.dir, "in.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[tc.id] = data
+	}
+	return out
+}
+
+// decodeStream decodes every document of data into any.
+func decodeStream(data []byte, opts ...DecodeOption) ([]any, error) {
+	dec := NewDecoder(bytes.NewReader(data), opts...)
+	var docs []any
+	for {
+		var v any
+		if err := dec.Decode(&v); err != nil {
+			if errors.Is(err, io.EOF) {
+				return docs, nil
+			}
+			return nil, err
+		}
+		docs = append(docs, v)
+	}
+}
+
+// TestYAMLTestSuiteNodeRoundTrip checks that every valid suite input
+// written back with NodeToBytes decodes to the same values, and that
+// writing it again gives the same bytes.
+func TestYAMLTestSuiteNodeRoundTrip(t *testing.T) {
+	for id, data := range suiteValidInputs(t) {
+		if _, err := Parse(data); err != nil {
+			t.Errorf("%s: Parse: %v", id, err)
+			continue
+		}
+		if err := nodeRoundTrip(data); err != nil {
+			t.Errorf("%s: %v", id, err)
+		}
+	}
+}
+
+// nodeRoundTrip checks that each document of data, parsed and written back
+// with NodeToBytes, decodes to the values data decodes to, and that writing
+// the result again gives the same bytes. Input that does not parse or
+// decode is not checked.
+func nodeRoundTrip(data []byte) error {
+	f, parseErr := Parse(data)
+	want, decodeErr := decodeStream(data, WithOrderedMap())
+	// Not checked: e.g. an alias to a later anchor does not decode.
+	if decodes := parseErr == nil && decodeErr == nil; !decodes {
+		return nil
+	}
+	if len(want) != len(f.Docs) {
+		return fmt.Errorf("%d decoded documents, %d parsed", len(want), len(f.Docs))
+	}
+	for i, doc := range f.Docs {
+		out, err := NodeToBytes(doc)
+		if err != nil {
+			return fmt.Errorf("doc %d: NodeToBytes: %w", i, err)
+		}
+		var got any
+		if err := UnmarshalWithOptions(out, &got, WithOrderedMap()); err != nil {
+			return fmt.Errorf("doc %d: decoding %q: %w", i, out, err)
+		}
+		// Keys keep their source text, and an empty key is written as
+		// null, so null key spellings compare equal here.
+		if !sameValue(nullKeys(want[i]), nullKeys(got)) {
+			return fmt.Errorf("doc %d: wrote %q\nwant %#v\ngot  %#v", i, out, want[i], got)
+		}
+		f2, err := Parse(out)
+		if err != nil || len(f2.Docs) != 1 {
+			return fmt.Errorf("doc %d: reparsing %q: %w", i, out, err)
+		}
+		if again, _ := NodeToBytes(f2.Docs[0]); !bytes.Equal(out, again) {
+			return fmt.Errorf("doc %d: not stable:\n%s\n%s", i, out, again)
+		}
+	}
+	return nil
+}
+
+// TestYAMLTestSuiteAnyRoundTrip checks that every valid suite input decoded
+// into any, encoded with each encoder style and decoded again, gives the
+// same values.
+func TestYAMLTestSuiteAnyRoundTrip(t *testing.T) {
+	styles := [][]EncodeOption{
+		nil,
+		{WithFlow(true)},
+		{WithLiteralStyle(true)},
+		{WithSingleQuote(true)},
+		{WithJSON(true)},
+		{WithQuoteAllStrings(true)},
+		{WithIndent(3), WithIndentSequence(false)},
+	}
+	for id, data := range suiteValidInputs(t) {
+		var v any
+		if err := Unmarshal(data, &v); err != nil {
+			continue
+		}
+		for _, opts := range styles {
+			out, err := MarshalWithOptions(v, opts...)
+			if err != nil {
+				t.Errorf("%s: Marshal(%#v): %v", id, v, err)
+				continue
+			}
+			var got any
+			if err := Unmarshal(out, &got); err != nil || !sameValue(v, got) {
+				t.Errorf("%s: wrote %q\nwant %#v\ngot  %#v (%v)", id, out, v, got, err)
+			}
+		}
+	}
+}
+
+// nullKeys returns v with every MapSlice key that spells null replaced by
+// nil.
+func nullKeys(v any) any {
+	switch x := v.(type) {
+	case MapSlice:
+		out := make(MapSlice, len(x))
+		for i, item := range x {
+			k := nullKeys(item.Key)
+			if s, ok := k.(string); ok && isNullValue(s) {
+				k = nil
+			}
+			out[i] = MapItem{Key: k, Value: nullKeys(item.Value)}
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, item := range x {
+			out[i] = nullKeys(item)
+		}
+		return out
+	}
+	return v
 }

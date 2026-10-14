@@ -5,6 +5,41 @@ import (
 	"unicode/utf8"
 )
 
+// checkPrintable returns a [SyntaxError] at the first byte of src that is
+// not valid UTF-8 or not a printable YAML character (c-printable: tab, line
+// feed, carriage return, and the visible and space characters of Unicode
+// other than C0/C1 controls, DEL, surrogates, U+FFFE and U+FFFF).
+func checkPrintable(src []byte) error {
+	line, col := 1, 1
+	for i := 0; i < len(src); {
+		c := src[i]
+		if c < utf8.RuneSelf {
+			if c >= 0x20 && c < 0x7f || c == '\t' || c == '\r' {
+				i++
+				col++
+				continue
+			}
+			if c == '\n' {
+				i++
+				line++
+				col = 1
+				continue
+			}
+			return &SyntaxError{Message: "non-printable character in input", Pos: Position{Line: line, Column: col, Offset: i}}
+		}
+		r, size := utf8.DecodeRune(src[i:])
+		if r == utf8.RuneError && size == 1 {
+			return &SyntaxError{Message: "invalid UTF-8 in input", Pos: Position{Line: line, Column: col, Offset: i}}
+		}
+		if !isPrintableYAML(r) {
+			return &SyntaxError{Message: "non-printable character in input", Pos: Position{Line: line, Column: col, Offset: i}}
+		}
+		i += size
+		col += size
+	}
+	return nil
+}
+
 func detectAndConvertEncoding(src []byte) ([]byte, error) {
 	if len(src) >= 4 {
 		if src[0] == 0x00 && src[1] == 0x00 && src[2] == 0xFE && src[3] == 0xFF {

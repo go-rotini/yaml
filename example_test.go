@@ -414,8 +414,8 @@ func ExampleWithSingleQuote() {
 func ExampleWithOmitEmpty() {
 	type Config struct {
 		Name  string   `yaml:"name"`
-		Tags  []string `yaml:"tags,omitempty"`
-		Debug bool     `yaml:"debug,omitempty"`
+		Tags  []string `yaml:"tags"`
+		Debug bool     `yaml:"debug"`
 	}
 	data, _ := yaml.MarshalWithOptions(Config{Name: "app"}, yaml.WithOmitEmpty(true))
 	fmt.Print(string(data))
@@ -435,11 +435,12 @@ func ExampleWithComment() {
 }
 
 func ExampleWithAutoInt() {
-	v := map[string]float64{"count": 42.0}
+	v := map[string]any{"count": "42", "total": 450.0}
 	data, _ := yaml.MarshalWithOptions(v, yaml.WithAutoInt(true))
 	fmt.Print(string(data))
 	// Output:
 	// count: 42
+	// total: 450
 }
 
 // --- Decode Options ---

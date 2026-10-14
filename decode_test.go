@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"net/netip"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ─── newDecoder ─────────────────────────────────────────────────────────────
@@ -25,9 +28,6 @@ func TestNewDecoder(t *testing.T) {
 	}
 	if d.ctx == nil {
 		t.Fatal("expected non-nil context")
-	}
-	if d.anchors == nil {
-		t.Fatal("expected non-nil anchors map")
 	}
 }
 
@@ -974,7 +974,7 @@ func TestDecodeToAnyAliasCycle(t *testing.T) {
 	opts.maxAliasExpansion = 1
 	d := newDecoder(opts)
 	anchor := &node{kind: nodeScalar, value: "val", anchor: "a"}
-	d.anchors["a"] = anchor
+	addRef(d, "a", anchor)
 	alias := &node{kind: nodeAlias, alias: "a"}
 	d.aliasDepth = 2
 	_, err := d.decodeToAny(alias)
@@ -1038,9 +1038,11 @@ func TestDecodeToAnyNonScalarKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := result.(map[string]any)
-	if _, ok := m["complex_key"]; !ok {
-		t.Error("expected non-scalar key to be formatted as string")
+	if m := result.(map[string]any); len(m) != 0 {
+		t.Errorf("expected the mapping key to be left out, got %v", m)
+	}
+	if len(d.typeErrors) != 1 || !strings.Contains(d.typeErrors[0], "cannot use !!map as a key of map[string]interface {}") {
+		t.Errorf("expected a key type error, got %q", d.typeErrors)
 	}
 }
 
@@ -1095,8 +1097,8 @@ func TestDecodeMappingToOrderedMapNonScalarKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result[0].Key != "complex" {
-		t.Errorf("expected key 'complex', got %v", result[0].Key)
+	if key, ok := result[0].Key.(MapSlice); !ok || len(key) != 0 {
+		t.Errorf("expected the decoded empty mapping as key, got %#v", result[0].Key)
 	}
 }
 
@@ -2193,7 +2195,7 @@ func TestDecodeNullIntoTypedString(t *testing.T) {
 func TestDecodeAliasInternal(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	anchor := &node{kind: nodeScalar, value: "hello", anchor: "a"}
-	d.anchors["a"] = anchor
+	addRef(d, "a", anchor)
 	alias := &node{kind: nodeAlias, alias: "a"}
 
 	var v string
@@ -2224,7 +2226,7 @@ func TestDecodeAliasCycleInternal(t *testing.T) {
 	opts.maxAliasExpansion = 1
 	d := newDecoder(opts)
 	anchor := &node{kind: nodeScalar, value: "hello", anchor: "a"}
-	d.anchors["a"] = anchor
+	addRef(d, "a", anchor)
 	alias := &node{kind: nodeAlias, alias: "a"}
 	d.aliasDepth = 2
 
@@ -2287,7 +2289,7 @@ func TestDecodeMergeUnknownAlias(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	n := &node{kind: nodeAlias, alias: "unknown"}
 	v := reflect.MakeMap(reflect.TypeFor[map[string]any]())
-	err := d.decodeMerge(n, v)
+	err := d.decodeMerge(n, v, newMergeSet())
 	if err == nil {
 		t.Fatal("expected error for unknown alias")
 	}
@@ -2303,7 +2305,7 @@ func TestDecodeMergeSequenceInternal(t *testing.T) {
 			{kind: nodeScalar, value: "1"},
 		},
 	}
-	d.anchors["a"] = mapping1
+	addRef(d, "a", mapping1)
 
 	seqNode := &node{
 		kind: nodeSequence,
@@ -2312,7 +2314,7 @@ func TestDecodeMergeSequenceInternal(t *testing.T) {
 		},
 	}
 	v := reflect.MakeMap(reflect.TypeFor[map[string]any]())
-	err := d.decodeMerge(seqNode, v)
+	err := d.decodeMerge(seqNode, v, newMergeSet())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2328,7 +2330,7 @@ func TestDecodeMergeDirectMappingInternal(t *testing.T) {
 		},
 	}
 	v := reflect.MakeMap(reflect.TypeFor[map[string]any]())
-	err := d.decodeMerge(n, v)
+	err := d.decodeMerge(n, v, newMergeSet())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2338,7 +2340,7 @@ func TestDecodeMergeScalar(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	n := &node{kind: nodeScalar, value: "ignored"}
 	v := reflect.MakeMap(reflect.TypeFor[map[string]any]())
-	err := d.decodeMerge(n, v)
+	err := d.decodeMerge(n, v, newMergeSet())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2350,7 +2352,7 @@ func TestDecodeMappingMergeNonMapping(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	n := &node{kind: nodeScalar, value: "not a mapping"}
 	v := reflect.MakeMap(reflect.TypeFor[map[string]any]())
-	err := d.decodeMappingMerge(n, v)
+	err := d.decodeMappingMerge(n, v, newMergeSet())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2369,7 +2371,7 @@ func TestDecodeMappingMergeMapInternal(t *testing.T) {
 	}
 	v := reflect.MakeMap(reflect.TypeFor[map[string]string]())
 	v.SetMapIndex(reflect.ValueOf("x"), reflect.ValueOf("existing"))
-	err := d.decodeMappingMerge(n, v)
+	err := d.decodeMappingMerge(n, v, &mergeSet{keys: map[any]bool{"x": true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2401,7 +2403,7 @@ func TestDecodeMappingMergeStructInternal(t *testing.T) {
 	var s S
 	s.X = "existing"
 	rv := reflect.ValueOf(&s).Elem()
-	err := d.decodeMappingMerge(n, rv)
+	err := d.decodeMappingMerge(n, rv, &mergeSet{names: map[string]bool{"x": true}, keys: map[any]bool{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2425,7 +2427,7 @@ func TestDecodeMappingToMapMergeInternal(t *testing.T) {
 			{kind: nodeScalar, value: "1"},
 		},
 	}
-	d.anchors["defaults"] = defaults
+	addRef(d, "defaults", defaults)
 
 	n := &node{
 		kind: nodeMapping,
@@ -2459,7 +2461,7 @@ func TestDecodeMappingToStructMergeInternal(t *testing.T) {
 			{kind: nodeScalar, value: "1"},
 		},
 	}
-	d.anchors["defaults"] = defaults
+	addRef(d, "defaults", defaults)
 
 	n := &node{
 		kind: nodeMapping,
@@ -2550,8 +2552,8 @@ func TestDecodeToAnyMergeSequenceInternal(t *testing.T) {
 			{kind: nodeScalar, value: "2"},
 		},
 	}
-	d.anchors["a"] = m1
-	d.anchors["b"] = m2
+	addRef(d, "a", m1)
+	addRef(d, "b", m2)
 
 	n := &node{
 		kind: nodeMapping,
@@ -2654,7 +2656,7 @@ func TestDecodeMappingMergeStructNestedMergeInternal(t *testing.T) {
 			{kind: nodeScalar, value: "1"},
 		},
 	}
-	d.anchors["inner"] = innerDefaults
+	addRef(d, "inner", innerDefaults)
 
 	n := &node{
 		kind: nodeMapping,
@@ -2672,7 +2674,7 @@ func TestDecodeMappingMergeStructNestedMergeInternal(t *testing.T) {
 	}
 	var s S
 	rv := reflect.ValueOf(&s).Elem()
-	err := d.decodeMappingMerge(n, rv)
+	err := d.decodeMappingMerge(n, rv, &mergeSet{names: map[string]bool{"x": true}, keys: map[any]bool{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5263,9 +5265,9 @@ func BenchmarkUnmarshalMedium(b *testing.B) {
 }
 
 func BenchmarkUnmarshalLarge(b *testing.B) {
-	data, err := os.ReadFile("../../k8s.yaml")
+	data, err := os.ReadFile("testdata/acceptance/k8s.yaml")
 	if err != nil {
-		b.Skip("k8s.yaml not found")
+		b.Fatal(err)
 	}
 	var out map[string]any
 	b.ResetTimer()
@@ -5380,11 +5382,232 @@ func FuzzRoundTrip(f *testing.F) {
 		}
 		out, err := Marshal(v)
 		if err != nil {
-			return
+			t.Fatalf("Marshal(%#v): %v", v, err)
 		}
 		var v2 any
-		_ = Unmarshal(out, &v2)
+		if err := Unmarshal(out, &v2); err != nil {
+			t.Fatalf("decoding %q: %v", out, err)
+		}
+		if !sameValue(v, v2) {
+			t.Fatalf("value changed:\n%#v\n%#v\nwritten:\n%s", v, v2, out)
+		}
 	})
+}
+
+func FuzzNodeRoundTrip(f *testing.F) {
+	f.Add([]byte("key: value"))
+	f.Add([]byte("base: &b {x: 1}\n<<: *b\nlist: [!!str 1, !custom x, &a 2, *a]"))
+	f.Add([]byte("? [a, b]\n: c\n&k k: v\n*k : w"))
+	f.Add([]byte("!<tag:example.com,2000:x> v\n"))
+	f.Add([]byte("- |\n  literal\n- >-\n  folded\n- 'single'\n- \"double\\n\""))
+	f.Add([]byte("--- !!map\n!!str a: !!int 1\n--- !local%21 x"))
+	f.Add([]byte("{0: !0,!0 0}"))
+	f.Add([]byte("a: &x\n&k b: 1\n"))
+	f.Add([]byte(": &b{}\n#00\n!0 :"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 4096 {
+			return
+		}
+		if err := nodeRoundTrip(data); err != nil {
+			t.Fatalf("%v\ninput: %q", err, data)
+		}
+	})
+}
+
+// fuzzConfig exercises most decode paths of a typed target.
+type fuzzConfig struct {
+	*fuzzEmbedded
+	A    int                  `yaml:"a"`
+	F    float32              `yaml:"f"`
+	U    uint64               `yaml:"u"`
+	S    []string             `yaml:"s"`
+	Arr  [2]int               `yaml:"arr"`
+	BA   [4]byte              `yaml:"ba"`
+	M    map[string]fuzzInner `yaml:"m"`
+	MI   map[int]string       `yaml:"mi"`
+	In   fuzzInner            `yaml:"in"`
+	P    *fuzzInner           `yaml:"p"`
+	Any  any                  `yaml:"any"`
+	MS   MapSlice             `yaml:"ms"`
+	Addr netip.Addr           `yaml:"addr"`
+	T    time.Time            `yaml:"t"`
+	J    json.Number          `yaml:"j"`
+	X    map[string]any       `yaml:",inline"`
+}
+
+type fuzzEmbedded struct {
+	E int8 `yaml:"e"`
+}
+
+type fuzzInner struct {
+	Name string        `yaml:"name,required"`
+	Port uint16        `yaml:"port,default=8080"`
+	D    time.Duration `yaml:"d,default=1s"`
+}
+
+func FuzzTypedDecode(f *testing.F) {
+	f.Add([]byte("a: 1\nin: {name: x}\nm: {k: {name: y, port: 70000}}\n<<: {a: 2}\nms: {b: 1, a: 2}\nba: !!binary AQID\n"))
+	f.Add([]byte("e: 3\nmi: {01: a, <<: {1: b}}\naddr: 127.0.0.1\nt: 2024-01-02\nj: 1.5\nextra: [1, 2]\n"))
+	f.Add([]byte("p: ~\nin: ~\nany: &x {a: [*x]}\n"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 4096 {
+			return
+		}
+		for _, opts := range [][]DecodeOption{
+			nil,
+			{WithDefaults(), WithDisallowDuplicateKey(), WithStrict()},
+			{WithOrderedMap(), WithMaxDepth(0)},
+		} {
+			var c fuzzConfig
+			_ = UnmarshalWithOptions(data, &c, opts...)
+			if out, err := Marshal(&c); err == nil {
+				var again fuzzConfig
+				_ = Unmarshal(out, &again)
+			}
+			_, _ = MarshalKYAML(&c)
+		}
+	})
+}
+
+// rawAny decodes itself from the bytes a BytesUnmarshaler receives.
+type rawAny struct{ v any }
+
+func (r *rawAny) UnmarshalYAML(data []byte) error { return Unmarshal(data, &r.v) }
+
+// FuzzDecodeDifferential decodes each input into any, into an ordered map,
+// through a BytesUnmarshaler (whose bytes are the value re-encoded) and into
+// map[string]any, and checks that they agree.
+func FuzzDecodeDifferential(f *testing.F) {
+	f.Add([]byte("a: &a {x: 1, <<: {y: 2}}\nb:\n  <<: [*a, {x: 3, z: 4}]\n  x: 9\n"))
+	f.Add([]byte("k: &k key\nm:\n  *k : v\n  <<: {key: w}\n"))
+	f.Add([]byte("a: &x\n&k b: 1\nc: !t\n!u d: [1, 2]\n"))
+	f.Add([]byte("{0: !0,!0 0}"))
+	f.Add([]byte("m:\n  <<: [{z, z: 0}]\nbig: 18446744073709551616\n"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 2048 || !utf8.Valid(data) {
+			return
+		}
+		var direct any
+		if err := Unmarshal(data, &direct); err != nil || hasNullKey(direct) {
+			return
+		}
+		var ordered any
+		if err := UnmarshalWithOptions(data, &ordered, WithOrderedMap()); err != nil {
+			t.Fatalf("ordered map: %v", err)
+		}
+		if plain, ok := orderedToPlain(ordered); ok && !sameValue(direct, plain) {
+			t.Fatalf("ordered map differs\nany:     %#v\nordered: %#v", direct, ordered)
+		}
+		var raw rawAny
+		if err := Unmarshal(data, &raw); err != nil {
+			t.Fatalf("BytesUnmarshaler: %v", err)
+		}
+		if !sameValue(direct, raw.v) {
+			t.Fatalf("BytesUnmarshaler differs\nany: %#v\nraw: %#v", direct, raw.v)
+		}
+		if _, ok := direct.(map[string]any); ok {
+			var m map[string]any
+			if err := Unmarshal(data, &m); err != nil || !sameValue(direct, m) {
+				t.Fatalf("map[string]any differs: %v\nany: %#v\nmap: %#v", err, direct, m)
+			}
+		}
+	})
+}
+
+// hasNullKey reports whether v holds a mapping key that spells null, which
+// keeps its text in any but may be written back as a different spelling.
+func hasNullKey(v any) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, v := range x {
+			if isNullValue(k) || hasNullKey(v) {
+				return true
+			}
+		}
+	case []any:
+		return slices.ContainsFunc(x, hasNullKey)
+	}
+	return false
+}
+
+// orderedToPlain converts the MapSlice values in v to map[string]any,
+// reporting false when a key is not a string.
+func orderedToPlain(v any) (any, bool) {
+	switch x := v.(type) {
+	case MapSlice:
+		m := make(map[string]any, len(x))
+		for _, item := range x {
+			k, ok := item.Key.(string)
+			if !ok {
+				return nil, false
+			}
+			val, ok := orderedToPlain(item.Value)
+			if !ok {
+				return nil, false
+			}
+			m[k] = val
+		}
+		return m, true
+	case []any:
+		out := make([]any, len(x))
+		for i, item := range x {
+			val, ok := orderedToPlain(item)
+			if !ok {
+				return nil, false
+			}
+			out[i] = val
+		}
+		return out, true
+	}
+	return v, true
+}
+
+// sameValue reports whether decoded values a and b are equal, treating
+// every NaN as equal to every other.
+func sameValue(a, b any) bool {
+	switch x := a.(type) {
+	case float64:
+		y, ok := b.(float64)
+		return ok && (x == y && math.Signbit(x) == math.Signbit(y) || math.IsNaN(x) && math.IsNaN(y))
+	case []any:
+		y, ok := b.([]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !sameValue(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		y, ok := b.(map[string]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for k, v := range x {
+			w, ok := y[k]
+			if !ok || !sameValue(v, w) {
+				return false
+			}
+		}
+		return true
+	case MapSlice:
+		y, ok := b.(MapSlice)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !sameValue(x[i].Key, y[i].Key) || !sameValue(x[i].Value, y[i].Value) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // ─── CustomMarshaler / CustomUnmarshaler ────────────────────────────────────
@@ -5865,41 +6088,84 @@ func BenchmarkConformanceLarge(b *testing.B) {
 	}
 }
 
-// ─── NEL / LS / PS Line Break Normalization ─────────────────────────────────
+// ─── NEL / LS / PS are content, not line breaks (YAML 1.2) ──────────────────
 
-func TestNELLineBreak(t *testing.T) {
-	// U+0085 NEL = 0xC2 0x85
-	data := []byte("a: 1\xc2\x85b: 2\n")
-	var v map[string]int
-	if err := Unmarshal(data, &v); err != nil {
-		t.Fatal(err)
-	}
-	if v["a"] != 1 || v["b"] != 2 {
-		t.Fatalf("expected {a:1, b:2}, got %v", v)
+func TestUnicodeLineSeparatorsAreContent(t *testing.T) {
+	for name, sep := range map[string]string{"NEL": "\u0085", "LS": " ", "PS": " "} {
+		t.Run(name, func(t *testing.T) {
+			src := "plain: a" + sep + "b\nsingle: 'a" + sep + "b'\ndouble: \"a" + sep + "b\"\n" +
+				"lit: |\n  a" + sep + "b\nk" + sep + "ey: v\nflow: [a" + sep + "b]\n"
+			var got map[string]any
+			if err := Unmarshal([]byte(src), &got); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]any{
+				"plain": "a" + sep + "b", "single": "a" + sep + "b", "double": "a" + sep + "b",
+				"lit": "a" + sep + "b\n", "k" + sep + "ey": "v", "flow": []any{"a" + sep + "b"},
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
-func TestLSLineBreak(t *testing.T) {
-	// U+2028 LS = 0xE2 0x80 0xA8
-	data := []byte("a: 1\xe2\x80\xa8b: 2\n")
-	var v map[string]int
-	if err := Unmarshal(data, &v); err != nil {
+// ─── Ordered maps: merge keys and MapSlice targets ──────────────────────────
+
+func TestOrderedMapAppliesMergeKeys(t *testing.T) {
+	src := "base: &b {x: 1, y: 2}\nother: &o {z: 3, x: 9}\n" +
+		"one:\n  a: 0\n  <<: *b\n  y: 5\n" +
+		"many:\n  x: 7\n  <<: [*b, *o]\n"
+	var v any
+	if err := UnmarshalWithOptions([]byte(src), &v, WithOrderedMap()); err != nil {
 		t.Fatal(err)
 	}
-	if v["a"] != 1 || v["b"] != 2 {
-		t.Fatalf("expected {a:1, b:2}, got %v", v)
+	ms := v.(MapSlice)
+	one, many := ms[2].Value.(MapSlice), ms[3].Value.(MapSlice)
+	wantOne := MapSlice{{Key: "a", Value: int64(0)}, {Key: "x", Value: int64(1)}, {Key: "y", Value: int64(5)}}
+	wantMany := MapSlice{{Key: "x", Value: int64(7)}, {Key: "y", Value: int64(2)}, {Key: "z", Value: int64(3)}}
+	if !reflect.DeepEqual(one, wantOne) {
+		t.Errorf("one: got %#v, want %#v", one, wantOne)
+	}
+	if !reflect.DeepEqual(many, wantMany) {
+		t.Errorf("many: got %#v, want %#v", many, wantMany)
 	}
 }
 
-func TestPSLineBreak(t *testing.T) {
-	// U+2029 PS = 0xE2 0x80 0xA9
-	data := []byte("a: 1\xe2\x80\xa9b: 2\n")
-	var v map[string]int
-	if err := Unmarshal(data, &v); err != nil {
+func TestUnmarshalIntoMapSlice(t *testing.T) {
+	src := []byte("b: 1\na:\n  d: [1, {f: 2}]\n  c: x\nbase: &m {k: v}\nref: *m\n")
+	want := MapSlice{
+		{Key: "b", Value: int64(1)},
+		{Key: "a", Value: MapSlice{
+			{Key: "d", Value: []any{int64(1), MapSlice{{Key: "f", Value: int64(2)}}}},
+			{Key: "c", Value: "x"},
+		}},
+		{Key: "base", Value: MapSlice{{Key: "k", Value: "v"}}},
+		{Key: "ref", Value: MapSlice{{Key: "k", Value: "v"}}},
+	}
+
+	var ms MapSlice
+	if err := Unmarshal(src, &ms); err != nil || !reflect.DeepEqual(ms, want) {
+		t.Errorf("MapSlice: got %#v, %v", ms, err)
+	}
+	var p *MapSlice
+	if err := Unmarshal(src, &p); err != nil || p == nil || !reflect.DeepEqual(*p, want) {
+		t.Errorf("*MapSlice: got %#v, %v", p, err)
+	}
+	var s struct {
+		M     MapSlice       `yaml:"m"`
+		List  []MapSlice     `yaml:"list"`
+		Plain map[string]any `yaml:"plain"`
+	}
+	if err := Unmarshal([]byte("m: {z: 1, a: 2}\nlist: [{q: 1}, {p: {r: 2}}]\nplain: {n: {o: 1}}\n"), &s); err != nil {
 		t.Fatal(err)
 	}
-	if v["a"] != 1 || v["b"] != 2 {
-		t.Fatalf("expected {a:1, b:2}, got %v", v)
+	if !reflect.DeepEqual(s.M, MapSlice{{Key: "z", Value: int64(1)}, {Key: "a", Value: int64(2)}}) ||
+		!reflect.DeepEqual(s.List, []MapSlice{{{Key: "q", Value: int64(1)}}, {{Key: "p", Value: MapSlice{{Key: "r", Value: int64(2)}}}}}) {
+		t.Errorf("fields: got %#v", s)
+	}
+	if _, ok := s.Plain["n"].(map[string]any); !ok {
+		t.Errorf("a map[string]any field must not switch to MapSlice: got %#v", s.Plain)
 	}
 }
 
@@ -6056,7 +6322,7 @@ func TestDecodeMappingMergeMapErrorInDecode(t *testing.T) {
 		},
 	}
 	m := reflect.ValueOf(map[string]any{})
-	err := d.decodeMappingMerge(mergeNode, m)
+	err := d.decodeMappingMerge(mergeNode, m, newMergeSet())
 	if err == nil {
 		t.Error("expected error for missing alias in map merge")
 	}
@@ -6075,7 +6341,7 @@ func TestDecodeMappingMergeStructErrorInDecode(t *testing.T) {
 		A string `yaml:"a"`
 	}
 	var s S
-	err := d.decodeMappingMerge(mergeNode, reflect.ValueOf(&s).Elem())
+	err := d.decodeMappingMerge(mergeNode, reflect.ValueOf(&s).Elem(), newMergeSet())
 	if err == nil {
 		t.Error("expected error for missing alias in struct merge")
 	}
@@ -6121,12 +6387,8 @@ func TestDecodeSequenceToNonSlice(t *testing.T) {
 func TestDecodeScalarToAnyIntOverflow(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	n := &node{kind: nodeScalar, value: "99999999999999999999", style: scalarPlain}
-	result := d.scalarToAny(n)
-	// Should fall through to float or string
-	_, isString := result.(string)
-	_, isFloat := result.(float64)
-	if !isString && !isFloat {
-		t.Errorf("expected string or float for overflow int, got %T: %v", result, result)
+	if result := d.scalarToAny(n); result != Number("99999999999999999999") {
+		t.Errorf("got %T: %v, want the Number", result, result)
 	}
 }
 
@@ -6134,7 +6396,7 @@ func TestDecodeMergeScalarIgnored(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	scalarNode := &node{kind: nodeScalar, value: "123"}
 	m := reflect.ValueOf(make(map[string]any))
-	err := d.decodeMerge(scalarNode, m)
+	err := d.decodeMerge(scalarNode, m, newMergeSet())
 	if err != nil {
 		t.Errorf("expected nil error for scalar merge (ignored), got %v", err)
 	}
@@ -6149,7 +6411,7 @@ func TestDecodeMergeSequenceWithUnknownAlias(t *testing.T) {
 		},
 	}
 	m := reflect.ValueOf(make(map[string]any))
-	err := d.decodeMerge(seqNode, m)
+	err := d.decodeMerge(seqNode, m, newMergeSet())
 	if err == nil {
 		t.Error("expected error for unknown alias in merge sequence")
 	}
@@ -6159,7 +6421,7 @@ func TestDecodeMappingMergeNonMappingNode(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	n := &node{kind: nodeScalar, value: "notamap"}
 	m := reflect.ValueOf(make(map[string]any))
-	err := d.decodeMappingMerge(n, m)
+	err := d.decodeMappingMerge(n, m, newMergeSet())
 	if err != nil {
 		t.Errorf("expected nil for non-mapping merge, got %v", err)
 	}
@@ -6175,7 +6437,7 @@ func TestDecodeMappingMergeKeyDecodeError(t *testing.T) {
 		},
 	}
 	m := reflect.ValueOf(make(map[string]any))
-	err := d.decodeMappingMerge(mergeNode, m)
+	err := d.decodeMappingMerge(mergeNode, m, newMergeSet())
 	if err == nil {
 		t.Error("expected error for missing alias key in mapping merge")
 	}
@@ -6183,7 +6445,7 @@ func TestDecodeMappingMergeKeyDecodeError(t *testing.T) {
 
 func TestDecodeMappingMergeValueDecodeError(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
-	d.anchors["key"] = &node{kind: nodeScalar, value: "k"}
+	addRef(d, "key", &node{kind: nodeScalar, value: "k"})
 	mergeNode := &node{
 		kind: nodeMapping,
 		children: []*node{
@@ -6192,7 +6454,7 @@ func TestDecodeMappingMergeValueDecodeError(t *testing.T) {
 		},
 	}
 	m := reflect.MakeMap(reflect.TypeFor[map[string]any]())
-	err := d.decodeMappingMerge(mergeNode, m)
+	err := d.decodeMappingMerge(mergeNode, m, newMergeSet())
 	if err == nil {
 		t.Error("expected error for missing alias value in mapping merge")
 	}
@@ -6311,7 +6573,7 @@ func TestDecodeMappingMergeStructWithNestedMergeKey(t *testing.T) {
 			{kind: nodeScalar, value: "1"},
 		},
 	}
-	d.anchors["inner"] = innerAnchor
+	addRef(d, "inner", innerAnchor)
 	outerNode := &node{
 		kind: nodeMapping,
 		children: []*node{
@@ -6323,7 +6585,7 @@ func TestDecodeMappingMergeStructWithNestedMergeKey(t *testing.T) {
 		A string `yaml:"a"`
 	}
 	var s S
-	err := d.decodeMappingMerge(outerNode, reflect.ValueOf(&s).Elem())
+	err := d.decodeMappingMerge(outerNode, reflect.ValueOf(&s).Elem(), newMergeSet())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6332,7 +6594,7 @@ func TestDecodeMappingMergeStructWithNestedMergeKey(t *testing.T) {
 func TestDecodeToAnyMergeSequenceWithNonMapItem(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	scalarAnchor := &node{kind: nodeScalar, value: "just_a_string", style: scalarPlain}
-	d.anchors["str"] = scalarAnchor
+	addRef(d, "str", scalarAnchor)
 
 	mapAnchor := &node{
 		kind: nodeMapping,
@@ -6341,7 +6603,7 @@ func TestDecodeToAnyMergeSequenceWithNonMapItem(t *testing.T) {
 			{kind: nodeScalar, value: "1"},
 		},
 	}
-	d.anchors["map"] = mapAnchor
+	addRef(d, "map", mapAnchor)
 
 	seqNode := &node{
 		kind: nodeSequence,
@@ -6429,7 +6691,7 @@ func TestDecodeMappingMergeStructWithNestedMergeKeyInternal(t *testing.T) {
 			{kind: nodeAlias, alias: "nonexistent"},
 		},
 	}
-	d.anchors["inner"] = innerAnchor
+	addRef(d, "inner", innerAnchor)
 
 	outerNode := &node{
 		kind: nodeMapping,
@@ -6442,7 +6704,7 @@ func TestDecodeMappingMergeStructWithNestedMergeKeyInternal(t *testing.T) {
 		A string `yaml:"a"`
 	}
 	var s S
-	err := d.decodeMappingMerge(outerNode, reflect.ValueOf(&s).Elem())
+	err := d.decodeMappingMerge(outerNode, reflect.ValueOf(&s).Elem(), newMergeSet())
 	if err == nil {
 		t.Error("expected error for nested merge with unknown alias")
 	}
@@ -6594,8 +6856,8 @@ func TestBigNilPointer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal nil pointers: %v", err)
 	}
-	if len(data) != 0 {
-		t.Errorf("expected empty output for all-nil omitempty, got: %q", data)
+	if string(data) != "{}\n" {
+		t.Errorf("expected an empty mapping for all-nil omitempty, got: %q", data)
 	}
 
 	var s S
@@ -6653,16 +6915,12 @@ func TestDecodeScalarBigFloatError(t *testing.T) {
 	}
 }
 
-func TestDecodeScalarBigFloatValid(t *testing.T) {
-	d := newDecoder(defaultDecodeOptions())
-	n := &node{kind: nodeScalar, value: "3.14"}
+func TestUnmarshalBigFloatValid(t *testing.T) {
 	var bf big.Float
-	v := reflect.ValueOf(&bf).Elem()
-	if err := d.decodeScalar(n, v); err != nil {
+	if err := Unmarshal([]byte("3.14"), &bf); err != nil {
 		t.Fatal(err)
 	}
-	expected, _, _ := big.ParseFloat("3.14", 10, 256, big.ToNearestEven)
-	if bf.Cmp(expected) != 0 {
+	if bf.Text('g', 3) != "3.14" {
 		t.Errorf("expected 3.14, got %s", bf.Text('g', -1))
 	}
 }
@@ -6710,7 +6968,7 @@ func TestDecodeMappingToEmptyInterfaceNilResult(t *testing.T) {
 func TestDecodeMapSliceAliasKey(t *testing.T) {
 	d := newDecoder(defaultDecodeOptions())
 	d.opts.useOrderedMap = true
-	d.anchors["a"] = &node{kind: nodeScalar, value: "mykey"}
+	addRef(d, "a", &node{kind: nodeScalar, value: "mykey"})
 	n := &node{
 		kind: nodeMapping,
 		children: []*node{
@@ -7566,7 +7824,7 @@ func TestDefaultNestedStructChildApplied(t *testing.T) {
 	}
 }
 
-func TestDefaultNestedStructParentAbsent(t *testing.T) {
+func TestDefaultNestedStructParentAbsentAppliesDefaults(t *testing.T) {
 	type Server struct {
 		Port int `yaml:"port,default=8080"`
 	}
@@ -7579,8 +7837,8 @@ func TestDefaultNestedStructParentAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Server.Port != 0 {
-		t.Errorf("expected port=0 (parent absent, child defaults not applied), got %d", c.Server.Port)
+	if c.Server.Port != 8080 {
+		t.Errorf("expected port=8080 (defaults apply to an absent section), got %d", c.Server.Port)
 	}
 }
 
@@ -8061,7 +8319,7 @@ func TestDefaultFloatInvalid(t *testing.T) {
 	}
 }
 
-// TestKYAMLValidateRejections covers the full §2.12 forbidden-construct list.
+// TestKYAMLValidateRejections covers every construct KYAML forbids.
 // Each input should fail validation with the expected rule ID.
 func TestKYAMLValidateRejections(t *testing.T) {
 	cases := []struct {
@@ -8116,8 +8374,8 @@ func TestKYAMLValidateRejections(t *testing.T) {
 		},
 		{
 			// Block-style mapping with a literal block scalar value. The
-			// outer mapping triggers R12.5 and the literal scalar triggers
-			// R12.4 — we check for either.
+			// outer mapping triggers a block-mapping violation and the literal
+			// scalar a block-scalar violation; we check for the first.
 			name: "literal-block-scalar",
 			yaml: "---\nnote: |\n  multi\n  line\n",
 			rule: "R12.5",
@@ -8656,9 +8914,9 @@ func TestKYAMLValidateKYAMLNullVariants(t *testing.T) {
 	}
 }
 
-// TestKYAMLValidateExplicitComplexKey covers R12.14: explicit `?` complex
-// keys (used for non-string keys like sequences/mappings as keys) must be
-// rejected. The validator surfaces this as R4.4 (non-string mapping key)
+// TestKYAMLValidateExplicitComplexKey verifies that explicit `?` complex
+// keys (used for non-string keys like sequences/mappings as keys) are
+// rejected. The validator surfaces this as a non-string mapping key violation
 // since the underlying violation is the same: KYAML mapping keys must be
 // strings.
 func TestKYAMLValidateExplicitComplexKey(t *testing.T) {
@@ -8685,7 +8943,7 @@ func TestKYAMLValidateExplicitComplexKey(t *testing.T) {
 			if !errors.As(err, &k) {
 				t.Fatalf("expected *KYAMLError, got %v", err)
 			}
-			// R4.4 (non-string key) or R12.5/R12.6 (block style) or R12.14 — any
+			// A non-string-key, block-style or complex-key violation: any
 			// of these is an acceptable rejection.
 			ok := false
 			for _, v := range k.Errors {
@@ -8722,8 +8980,8 @@ func TestKYAMLValidateKYAMLBoolVariants(t *testing.T) {
 	}
 }
 
-// TestKYAMLDecodeRawValue covers R13.11: a struct field typed as RawValue
-// should receive the raw source bytes for that field's value, allowing
+// TestKYAMLDecodeRawValue verifies that a struct field typed as RawValue
+// receives that field's value as YAML bytes, allowing
 // deferred decoding.
 func TestKYAMLDecodeRawValue(t *testing.T) {
 	type S struct {
@@ -8779,4 +9037,145 @@ func TestKYAMLLastVisibleAfterCommaBranches(t *testing.T) {
 	if lastVisibleAfterCommaIsCloseBracket([]byte("abc,")) {
 		t.Error("buf ending in 'c,' should return false")
 	}
+}
+
+const billionLaughs = `
+a: &a ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]
+b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
+c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]
+d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]
+e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d]
+f: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e]
+g: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f]
+h: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g]
+i: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h]
+`
+
+func TestBillionLaughsDefaultLimit(t *testing.T) {
+	targets := map[string]func() any{
+		"any":     func() any { return new(any) },
+		"map":     func() any { return new(map[string][]any) },
+		"ordered": func() any { return new(any) },
+	}
+	for name, mk := range targets {
+		t.Run(name, func(t *testing.T) {
+			var opts []DecodeOption
+			if name == "ordered" {
+				opts = append(opts, WithOrderedMap())
+			}
+			start := time.Now()
+			err := UnmarshalWithOptions([]byte(billionLaughs), mk(), opts...)
+			if !errors.Is(err, ErrAliasExpansion) {
+				t.Fatalf("err = %v, want ErrAliasExpansion", err)
+			}
+			var ae *AliasExpansionError
+			if !errors.As(err, &ae) || ae.Limit <= 0 {
+				t.Fatalf("err = %#v, want *AliasExpansionError with a limit", err)
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Fatalf("took %v, want fast failure", d)
+			}
+
+			dec := NewDecoder(strings.NewReader(billionLaughs), opts...)
+			if err := dec.Decode(mk()); !errors.Is(err, ErrAliasExpansion) {
+				t.Fatalf("Decoder err = %v, want ErrAliasExpansion", err)
+			}
+		})
+	}
+}
+
+func TestBillionLaughsMergeKeys(t *testing.T) {
+	input := `
+a: &a {k0: x, k1: x, k2: x, k3: x, k4: x, k5: x, k6: x, k7: x, k8: x}
+b: &b {k0: *a, k1: *a, k2: *a, k3: *a, k4: *a, k5: *a, k6: *a, k7: *a, k8: *a}
+c: &c {k0: *b, k1: *b, k2: *b, k3: *b, k4: *b, k5: *b, k6: *b, k7: *b, k8: *b}
+d: &d {k0: *c, k1: *c, k2: *c, k3: *c, k4: *c, k5: *c, k6: *c, k7: *c, k8: *c}
+e: &e {k0: *d, k1: *d, k2: *d, k3: *d, k4: *d, k5: *d, k6: *d, k7: *d, k8: *d}
+f: &f {k0: *e, k1: *e, k2: *e, k3: *e, k4: *e, k5: *e, k6: *e, k7: *e, k8: *e}
+g: &g {k0: *f, k1: *f, k2: *f, k3: *f, k4: *f, k5: *f, k6: *f, k7: *f, k8: *f}
+h: &h {k0: *g, k1: *g, k2: *g, k3: *g, k4: *g, k5: *g, k6: *g, k7: *g, k8: *g}
+z:
+  <<: *h
+`
+	var out struct {
+		Z map[string]any `yaml:"z"`
+	}
+	if err := UnmarshalWithOptions([]byte(input), &out); !errors.Is(err, ErrAliasExpansion) {
+		t.Fatalf("err = %v, want ErrAliasExpansion", err)
+	}
+}
+
+func TestMaxAliasNodesOption(t *testing.T) {
+	input := `
+a: &a [1, 2, 3]
+b: [*a, *a, *a]
+`
+	var out any
+	if err := UnmarshalWithOptions([]byte(input), &out); err != nil {
+		t.Fatalf("default limit: %v", err)
+	}
+	if err := UnmarshalWithOptions([]byte(input), &out, WithMaxAliasNodes(5)); !errors.Is(err, ErrAliasExpansion) {
+		t.Fatalf("limit 5: err = %v, want ErrAliasExpansion", err)
+	}
+	if err := UnmarshalWithOptions([]byte(input), &out, WithMaxAliasNodes(12)); err != nil {
+		t.Fatalf("limit 12: %v", err)
+	}
+	if err := UnmarshalWithOptions([]byte(billionLaughs[:strings.Index(billionLaughs, "\nf:")]), &out, WithMaxAliasNodes(-1)); err != nil {
+		t.Fatalf("no limit: %v", err)
+	}
+}
+
+func TestDecoderStrictKYAML(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("a: plain\n"), WithStrictKYAML())
+	var out any
+	if err := dec.Decode(&out); !errors.Is(err, ErrKYAML) {
+		t.Fatalf("err = %v, want ErrKYAML", err)
+	}
+
+	dec = NewDecoder(strings.NewReader("---\n{\n  a: \"x\",\n}\n"), WithStrictKYAML())
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("valid KYAML: %v", err)
+	}
+}
+
+func TestDecoderReferences(t *testing.T) {
+	dir := t.TempDir()
+	file := dir + "/file.yaml"
+	if err := os.WriteFile(file, []byte("f: &fromfile 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := t.TempDir()
+	if err := os.WriteFile(sub+"/dir.yaml", []byte("d: &fromdir 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dec := NewDecoder(strings.NewReader("a: *fromfile\nb: *fromdir\n---\nc: *fromfile\n"),
+		WithReferenceFiles(file), WithReferenceDirs(sub))
+	var first map[string]int
+	if err := dec.Decode(&first); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if first["a"] != 1 || first["b"] != 2 {
+		t.Fatalf("first = %v", first)
+	}
+	var second map[string]int
+	if err := dec.Decode(&second); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if second["c"] != 1 {
+		t.Fatalf("second = %v", second)
+	}
+}
+
+// addRef makes n the reference anchor name of d.
+func addRef(d *decoder, name string, n *node) {
+	if d.refAnchors == nil {
+		d.refAnchors = make(map[string]*node)
+	}
+	d.refAnchors[name] = n
+}
+
+// newMergeSet returns an empty set of merged entries.
+func newMergeSet() *mergeSet {
+	return &mergeSet{names: map[string]bool{}, keys: map[any]bool{}}
 }

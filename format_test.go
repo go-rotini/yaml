@@ -151,3 +151,16 @@ count: 99
 		t.Errorf("name: got %v", m["name"])
 	}
 }
+
+func TestFormatIdempotentWithCommentUnderAlias(t *testing.T) {
+	for _, in := range []string{"A: &id001\n  A0: #0\n: *id001", "a: &x\n  # c\n  k: 1\nb:\n  <<: *x\n"} {
+		once, err := Format([]byte(in))
+		if err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		twice, err := Format(once)
+		if err != nil || string(twice) != string(once) {
+			t.Errorf("%q: Format is not idempotent:\n%s\nthen\n%s (%v)", in, once, twice, err)
+		}
+	}
+}

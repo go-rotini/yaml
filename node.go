@@ -1,35 +1,40 @@
 package yaml
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+	"strings"
+	"unicode/utf8"
+)
 
-type nodeKind int
+type nodeKind uint8
 
 const (
 	nodeDocument nodeKind = iota
 	nodeMapping
 	nodeSequence
 	nodeScalar
-	nodeAnchor
 	nodeAlias
 	nodeMergeKey
 )
 
 type node struct {
-	kind             nodeKind
 	pos              Position
 	tag              string
 	anchor           string
 	alias            string
+	ref              *anchorSlot // the anchor an alias refers to, nil if not defined before it in its document
 	value            string
-	style            scalarStyle
 	children         []*node
+	headComment      string
+	lineComment      string
+	footComment      string
+	kind             nodeKind
+	style            scalarStyle
 	implicit         bool
 	flow             bool
 	docStartExplicit bool
 	docEndExplicit   bool
-	headComment      string
-	lineComment      string
-	footComment      string
 }
 
 // NodeKind identifies the type of a YAML [Node] in the AST.
@@ -70,7 +75,7 @@ type Node struct {
 	MergeKey      bool // node represents a merge key (<<)
 	Children      []*Node
 	Pos           Position
-	Comment       string
+	Comment       string // line comment, on the same line as the node
 	HeadComment   string
 	FootComment   string
 }
@@ -78,7 +83,9 @@ type Node struct {
 // File is the result of parsing a YAML byte stream. It contains one [Node]
 // per document in the stream.
 type File struct {
-	Docs     []*Node
+	Docs []*Node
+	// Warnings lists non-fatal problems found while parsing, such as
+	// unknown directives.
 	Warnings []string
 }
 
@@ -128,6 +135,9 @@ func exportNode(n *node) *Node {
 		Comment:       n.lineComment,
 		FootComment:   n.footComment,
 	}
+	if len(n.children) > 0 {
+		pub.Children = make([]*Node, 0, len(n.children))
+	}
 	for _, child := range n.children {
 		pub.Children = append(pub.Children, exportNode(child))
 	}
@@ -168,7 +178,30 @@ func exportStyle(s scalarStyle) ScalarStyle {
 	}
 }
 
+// importNode converts the public tree n to the internal form, allocating
+// every node of the tree at once.
 func importNode(n *Node) *node {
+	if n == nil {
+		return nil
+	}
+	slab := make([]node, countNodes(n))
+	return importInto(n, &slab)
+}
+
+// countNodes returns the number of non-nil nodes in the tree n.
+func countNodes(n *Node) int {
+	if n == nil {
+		return 0
+	}
+	c := 1
+	for _, child := range n.Children {
+		c += countNodes(child)
+	}
+	return c
+}
+
+// importInto converts n using the next unused node of slab.
+func importInto(n *Node, slab *[]node) *node {
 	if n == nil {
 		return nil
 	}
@@ -176,7 +209,9 @@ func importNode(n *Node) *node {
 	if n.MergeKey {
 		k = nodeMergeKey
 	}
-	internal := &node{
+	internal := &(*slab)[0]
+	*slab = (*slab)[1:]
+	*internal = node{
 		kind:             k,
 		tag:              n.Tag,
 		anchor:           n.Anchor,
@@ -188,8 +223,11 @@ func importNode(n *Node) *node {
 		docEndExplicit:   n.ExplicitEnd,
 		pos:              n.Pos,
 	}
-	for _, child := range n.Children {
-		internal.children = append(internal.children, importNode(child))
+	if len(n.Children) > 0 {
+		internal.children = make([]*node, len(n.Children))
+		for i, child := range n.Children {
+			internal.children[i] = importInto(child, slab)
+		}
 	}
 	return internal
 }
@@ -247,29 +285,144 @@ func (n *Node) String() string {
 }
 
 // Validate checks the structural consistency of the node tree rooted at n.
-// It returns an error if a mapping has an odd number of children (missing value),
-// or if an alias node references an empty name.
+// It returns an error if a mapping has an odd number of children (missing
+// value), if an alias node references an empty name, if an anchor or alias
+// name holds a character a name cannot (white space, a flow indicator, a
+// non-printable character or invalid UTF-8), or, wrapping
+// [ErrUnsupported], if a node contains itself or the tree nests more than
+// 10,000 levels deep.
 func (n *Node) Validate() error {
-	var err error
-	Walk(n, func(node *Node) bool {
-		if err != nil {
+	return checkTree(n, true)
+}
+
+// checkTree returns an error for a tree that cannot be written as YAML: one
+// with a cycle, nested too deep, or with an anchor or alias name that does
+// not read back. structure also checks mappings and empty alias names. A
+// large subtree reached by more than one path is checked once, so a tree
+// that shares subtrees is checked in time linear in its distinct nodes.
+func checkTree(root *Node, structure bool) error {
+	var onPath ancestors
+	// checked holds the height, in levels below it, of each subtree of at
+	// least checkedMinSize nodes already checked in full.
+	var checked map[*Node]int
+	var check func(n *Node, depth int) (height, size int, err error)
+	check = func(n *Node, depth int) (height, size int, err error) {
+		if n == nil {
+			return 0, 0, nil
+		}
+		if len(n.Children) > 0 {
+			if onPath.has(n) {
+				return 0, 0, fmt.Errorf("yaml: node at %s contains itself: %w", n.Pos, ErrUnsupported)
+			}
+			if h, ok := checked[n]; ok {
+				if depth+h > maxNestingDepth {
+					return 0, 0, errTreeTooDeep
+				}
+				return h, 1, nil
+			}
+		}
+		if depth > maxNestingDepth {
+			return 0, 0, errTreeTooDeep
+		}
+		switch {
+		case structure && n.Kind == MappingNode && len(n.Children)%2 != 0:
+			return 0, 0, fmt.Errorf("yaml: mapping at %s has odd number of children (%d): %w", n.Pos, len(n.Children), errOddChildren)
+		case structure && n.Kind == AliasNode && n.Alias == "":
+			return 0, 0, fmt.Errorf("yaml: alias at %s has %w", n.Pos, errEmptyAlias)
+		case n.Anchor != "" && !validAnchorName(n.Anchor):
+			return 0, 0, fmt.Errorf("yaml: anchor %q at %s: %w", n.Anchor, n.Pos, errInvalidAnchor)
+		case n.Kind == AliasNode && !validAnchorName(n.Alias):
+			return 0, 0, fmt.Errorf("yaml: alias %q at %s: %w", n.Alias, n.Pos, errInvalidAnchor)
+		}
+		size = 1
+		if len(n.Children) == 0 {
+			return 0, size, nil
+		}
+		onPath.push(n)
+		for _, child := range n.Children {
+			h, sz, err := check(child, depth+1)
+			if err != nil {
+				return 0, 0, err
+			}
+			if child != nil {
+				height = max(height, h+1)
+				size += sz
+			}
+		}
+		onPath.pop()
+		if size >= checkedMinSize {
+			if checked == nil {
+				checked = make(map[*Node]int)
+			}
+			checked[n] = height
+		}
+		return height, size, nil
+	}
+	_, _, err := check(root, 0)
+	return err
+}
+
+// checkedMinSize is the size of the smallest subtree checkTree remembers:
+// checking a smaller one again costs less than remembering every one.
+const checkedMinSize = 16
+
+// errTreeTooDeep reports a node tree nested more than maxNestingDepth levels.
+var errTreeTooDeep error = &wrapError{msg: "yaml: node tree nested more than 10000 levels deep: yaml: unsupported value", err: ErrUnsupported}
+
+// ancestorScan is the path length up to which ancestors searches its path
+// rather than keeping a set.
+const ancestorScan = 32
+
+// ancestors is the set of nodes on the path from the root to the node being
+// visited. Only a node with children can contain itself, so only those are
+// pushed. A short path is searched directly, which is cheaper than a map.
+type ancestors struct {
+	path []*Node
+	set  map[*Node]bool // the nodes in path, once it has grown past ancestorScan
+}
+
+func (a *ancestors) has(n *Node) bool {
+	if a.set != nil {
+		return a.set[n]
+	}
+	return slices.Contains(a.path, n)
+}
+
+func (a *ancestors) push(n *Node) {
+	a.path = append(a.path, n)
+	if a.set != nil {
+		a.set[n] = true
+		return
+	}
+	if len(a.path) > ancestorScan {
+		a.set = make(map[*Node]bool, 2*len(a.path))
+		for _, p := range a.path {
+			a.set[p] = true
+		}
+	}
+}
+
+func (a *ancestors) pop() {
+	n := a.path[len(a.path)-1]
+	a.path = a.path[:len(a.path)-1]
+	if a.set != nil {
+		delete(a.set, n)
+	}
+}
+
+// validAnchorName reports whether name can be written after & or * and
+// read back whole: it is not empty and holds no white space, line break,
+// flow indicator, non-printable character or invalid UTF-8.
+func validAnchorName(name string) bool {
+	if name == "" || !utf8.ValidString(name) {
+		return false
+	}
+	for _, r := range name {
+		if !isPrintableYAML(r) || strings.ContainsRune(" \t\n\r,[]{}", r) {
 			return false
 		}
-		switch node.Kind {
-		case MappingNode:
-			if len(node.Children)%2 != 0 {
-				err = fmt.Errorf("yaml: mapping at %s has odd number of children (%d): %w", node.Pos, len(node.Children), errOddChildren)
-				return false
-			}
-		case AliasNode:
-			if node.Alias == "" {
-				err = fmt.Errorf("yaml: alias at %s has %w", node.Pos, errEmptyAlias)
-				return false
-			}
-		}
-		return true
-	})
-	return err
+	}
+	return true
 }
 
 // WalkFunc is the callback for [Walk]. Return true to recurse into the
@@ -278,16 +431,30 @@ type WalkFunc func(n *Node) bool
 
 // Walk traverses the AST rooted at n in depth-first pre-order, calling fn
 // for each node. If fn returns false, the node's children are not visited.
+// A node that appears in more than one place in the tree is visited once
+// for each place, and a node that contains itself is not entered again
+// below itself.
 func Walk(n *Node, fn WalkFunc) {
+	var onPath ancestors
+	walk(n, fn, &onPath)
+}
+
+func walk(n *Node, fn WalkFunc, onPath *ancestors) {
 	if n == nil {
 		return
 	}
-	if !fn(n) {
+	if len(n.Children) == 0 {
+		fn(n)
 		return
 	}
-	for _, child := range n.Children {
-		Walk(child, fn)
+	if onPath.has(n) || !fn(n) {
+		return
 	}
+	onPath.push(n)
+	for _, child := range n.Children {
+		walk(child, fn, onPath)
+	}
+	onPath.pop()
 }
 
 // Filter walks the AST rooted at n and returns all nodes for which fn
@@ -303,20 +470,34 @@ func Filter(n *Node, fn func(*Node) bool) []*Node {
 	return result
 }
 
-// NodeToBytes serializes a [Node] tree back into YAML bytes using default
-// encoding options.
+// NodeToBytes serializes a [Node] tree back into block-style YAML bytes using
+// default encoding options. Structure, scalar values, anchors, aliases,
+// merge keys and tags are written, and the output parses back to the same
+// values and types: a scalar with a quoted [ScalarStyle] or a !!str tag
+// reads back as a string, a plain scalar that reads as null, a bool or a
+// number is written unquoted, and a mapping or sequence key uses the
+// explicit "? key" form. A tag the written form already implies, such as
+// !!int on a plain 5, is left out. Comments, flow style and the choice of
+// quote character are not preserved. An anchor or alias name that would not
+// read back is an error, and so is a node that contains itself or a tree
+// nested more than 10,000 levels deep (wrapping [ErrUnsupported]).
 func NodeToBytes(n *Node) ([]byte, error) {
-	internal := importNode(n)
-	enc := newEncoder(defaultEncodeOptions())
-	return enc.encodeNode(internal)
+	return NodeToBytesWithOptions(n)
 }
 
-// NodeToBytesWithOptions serializes a [Node] tree back into YAML bytes using
-// the provided encoding options.
+// NodeToBytesWithOptions is like [NodeToBytes] but applies opts. Only the
+// options that affect scalars and indentation apply; [WithKYAML] and
+// [WithFlow] do not change the block-style output.
 func NodeToBytesWithOptions(n *Node, opts ...EncodeOption) ([]byte, error) {
 	o := defaultEncodeOptions()
 	for _, opt := range opts {
 		opt(o)
+	}
+	if err := checkBlockIndent(&encoderOptions{indent: o.indent}); err != nil {
+		return nil, err
+	}
+	if err := checkTree(n, false); err != nil {
+		return nil, err
 	}
 	internal := importNode(n)
 	enc := newEncoder(o)

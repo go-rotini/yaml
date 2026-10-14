@@ -45,18 +45,20 @@ func defaultEncodeOptions() *encoderOptions {
 	return &encoderOptions{
 		indent:         2,
 		lineWidth:      80,
-		indentSequence: false,
+		indentSequence: true,
 	}
 }
 
 // WithIndent sets the number of spaces per indentation level (default 2).
+// Block-style output needs at least 1; a smaller value fails with an error
+// wrapping [ErrOptionConflict].
 func WithIndent(n int) EncodeOption {
 	return func(o *encoderOptions) { o.indent = n }
 }
 
-// WithIndentSequence controls whether sequence items are indented relative to
-// their parent key. When false (the default), the "- " prefix aligns with
-// the parent's indentation level.
+// WithIndentSequence controls whether a block sequence under a mapping key is
+// indented one level from the key (true, the default) or starts at the
+// key's column ("key:" then "- item").
 func WithIndentSequence(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.indentSequence = b }
 }
@@ -80,7 +82,7 @@ func WithLiteralStyle(b bool) EncodeOption {
 }
 
 // WithSingleQuote prefers single-quoted scalars over double-quoted when
-// the value contains no characters requiring escape sequences.
+// the value contains no single quote or newline.
 func WithSingleQuote(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.useSingleQuote = b }
 }
@@ -99,18 +101,33 @@ func WithOmitEmpty(b bool) EncodeOption {
 
 // WithComment attaches comments to nodes by dot-path key (e.g. "server.port").
 // Each key maps to a slice of [Comment] values specifying position and text.
+// A path names the entry from the root, with "." between keys and "[i]" for
+// a sequence item (e.g. "servers[0].port"); a leading "$" or "$." is
+// allowed. Comments are placed at the entry itself, never inside a scalar:
+// a head comment on the line before it, a line comment at the end of its
+// first line, and a foot comment after its value. A path that names no entry
+// falls back to the first entry whose last segment matches, and is otherwise
+// not placed. Text with line breaks is written as one comment line per
+// line, and any other non-printable character or invalid UTF-8 as U+FFFD.
 func WithComment(comments map[string][]Comment) EncodeOption {
 	return func(o *encoderOptions) { o.comments = comments }
 }
 
-// WithAutoInt encodes float64 values that have no fractional part as integers
-// (e.g. 42 instead of 42.0).
+// WithAutoInt writes whole-number floats with magnitude below 1e16 as
+// integers (42 rather than 42.0), and string values that are decimal
+// integers (e.g. "42") unquoted, so both decode back as integers. Without
+// it a whole-number float keeps a fraction so it decodes back as a float.
+// [WithKYAML] always writes such floats as integers. The string rule has no
+// effect under [WithJSON], [WithQuoteAllStrings] or [WithKYAML], and the
+// original text is not kept: "+42" and "042" both decode back as 42.
 func WithAutoInt(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.autoInt = b }
 }
 
-// WithLineWidth sets the preferred line width for scalar wrapping (default 80).
-// The encoder may exceed this width when a single word is longer than the limit.
+// WithLineWidth sets the line width (default 80) above which [WithKYAML]
+// output may write a string with two or more newlines in flow-folded form, one
+// source line per output line. Zero or less disables folding. Other output
+// is not wrapped.
 func WithLineWidth(n int) EncodeOption {
 	return func(o *encoderOptions) { o.lineWidth = n }
 }
@@ -145,13 +162,13 @@ func WithKYAMLAlwaysQuoteKeys() EncodeOption {
 	return func(o *encoderOptions) { o.kyamlAlwaysQuoteKeys = true }
 }
 
-// WithDurationAsString controls how [time.Duration] values are encoded.
-// When false (the default), durations encode as int64 nanoseconds, matching
-// [encoding/json]. When true, durations encode using their human-readable
-// String() form (e.g. "1h30m") wrapped as a quoted string under KYAML mode.
+// WithDurationAsString controls how [time.Duration] values are encoded under
+// [WithKYAML]. When false (the default), durations encode as int64
+// nanoseconds, matching [encoding/json]. When true, they encode as their
+// quoted String() form (e.g. "1h30m").
 //
-// The string form is more readable for config files; the int64 form is
-// stable for machine-to-machine interchange and matches stdlib behavior.
+// Outside KYAML mode durations always encode in their String() form, and
+// this option has no effect.
 func WithDurationAsString(b bool) EncodeOption {
 	return func(o *encoderOptions) { o.durationAsString = b }
 }
@@ -181,12 +198,23 @@ type Schema int
 
 const (
 	// CoreSchema resolves plain scalars using the YAML 1.2 Core schema:
-	// null (~, null, Null, NULL, empty), bool (true/false in any case),
-	// int (decimal, hex 0x, octal 0o), float (including .inf, .nan).
+	// null (~, null, Null, NULL, empty), bool (true, True, TRUE and the same
+	// for false), int (decimal, hex 0x, octal 0o), float (decimal with an
+	// optional exponent, and .inf, -.inf, .nan in lower, title or upper case).
+	// Plain inf, nan and infinity are strings. Into any, an int decodes as an
+	// int64, or as a uint64 above the int64 range, and a float as a float64;
+	// a number beyond those ranges decodes as a [Number] holding its exact
+	// text rather than losing digits. Scalars tagged !!null, !!bool, !!int or !!float
+	// resolve to that type under every schema, and one whose value does not
+	// fit its tag is reported in a [TypeError]. Timestamps are not resolved,
+	// so a date decodes into any as a string (decode into time.Time for a
+	// time), and a !!binary scalar decodes into any as its base64 text
+	// (decode into []byte for the bytes).
 	CoreSchema Schema = iota
 
 	// JSONSchema resolves plain scalars like JSON: null (lowercase only),
-	// true/false (lowercase only), and JSON-format numbers.
+	// true/false (lowercase only), and JSON-format numbers, with the same Go
+	// types as [CoreSchema].
 	JSONSchema
 
 	// FailsafeSchema treats all plain scalars as strings with no type
@@ -206,6 +234,7 @@ type decoderOptions struct {
 	maxAliasExpansion  int
 	maxDocumentSize    int
 	maxNodes           int
+	maxAliasNodes      int
 	recursiveDir       bool
 	schema             Schema
 	validator          StructValidator
@@ -230,9 +259,11 @@ func WithSchema(s Schema) DecodeOption {
 }
 
 // WithDefaults enables applying default values from struct tags when a YAML
-// key is absent from the input. Default values are specified with the
-// "default=<value>" tag option (e.g. `yaml:"port,default=8080"`).
-// Only scalar types are supported: string, bool, int/uint variants, float
+// key is absent from the input and the field still holds its zero value.
+// Defaults also apply in a struct whose whole mapping is absent or null,
+// including an empty document.
+// Default values are specified with the "default=<value>" tag option (e.g.
+// `yaml:"port,default=8080"`). Only scalar types are supported: string, bool, int/uint variants, float
 // variants, and time.Duration. Without this option, default tags are ignored.
 func WithDefaults() DecodeOption {
 	return func(o *decoderOptions) { o.applyDefaults = true }
@@ -245,13 +276,18 @@ func WithStrict() DecodeOption {
 }
 
 // WithDisallowDuplicateKey causes decoding to return a [DuplicateKeyError] if a
-// mapping contains the same key more than once.
+// mapping contains the same key more than once, whatever the target type.
+// Entries a target map already holds, and keys set by a merge, are not
+// duplicates; two spellings that decode to the same map key (1 and 01 into
+// map[int]T) are.
 func WithDisallowDuplicateKey() DecodeOption {
 	return func(o *decoderOptions) { o.disallowDuplicates = true }
 }
 
 // WithOrderedMap causes decoding into any (interface{}) to produce [MapSlice]
-// values for mappings instead of map[string]any, preserving key order.
+// values for mappings instead of map[string]any, preserving key order. A
+// mapping or sequence used as a key is kept as the [MapItem] key, while
+// map[string]any and map[any]any cannot hold one and report a [TypeError].
 func WithOrderedMap() DecodeOption {
 	return func(o *decoderOptions) { o.useOrderedMap = true }
 }
@@ -262,17 +298,34 @@ func WithJSONUnmarshaler() DecodeOption {
 	return func(o *decoderOptions) { o.useJSONUnmarshaler = true }
 }
 
-// WithMaxDepth limits the nesting depth of the decoded value (default 100).
-// Deeply nested documents are rejected with a [SyntaxError].
+// WithMaxDepth limits the nesting depth of the decoded value (default 100),
+// for every target type including any. Deeper documents are rejected with a
+// [SyntaxError]. Zero or less means no limit here, but input nested more
+// than 10,000 levels is always rejected while it is parsed, so that it
+// cannot exhaust the stack.
 func WithMaxDepth(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDepth = n }
 }
 
-// WithMaxAliasExpansion limits the total number of alias expansions during
-// decoding (default 1000). This prevents denial-of-service via
-// exponentially expanding aliases (the "billion laughs" attack).
+// WithMaxAliasExpansion limits how deeply alias expansions may nest during
+// decoding (default 1000): an alias inside an anchored value that is itself
+// being expanded counts one level deeper. Exceeding the limit, which a
+// cyclic alias always does, fails with a [CycleError]. The limit applies to
+// nesting depth; [WithMaxAliasNodes] limits the total number of expanded
+// nodes.
 func WithMaxAliasExpansion(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxAliasExpansion = n }
+}
+
+// WithMaxAliasNodes limits the total number of nodes that alias expansion may
+// produce while decoding one document; exceeding it fails with an
+// [AliasExpansionError]. This stops "billion laughs" documents, where a few
+// nested aliases expand to an enormous value. The default, also selected by
+// zero, scales with the input: 100 times the number of nodes parsed
+// (including reference files), and at least 10,000. A negative n means no
+// limit.
+func WithMaxAliasNodes(n int) DecodeOption {
+	return func(o *decoderOptions) { o.maxAliasNodes = n }
 }
 
 // WithValidator registers a [StructValidator] that is called after each struct
@@ -282,38 +335,44 @@ func WithValidator(v StructValidator) DecodeOption {
 }
 
 // WithReferenceFiles loads the given YAML files and makes their anchors
-// available for alias resolution in the primary document.
+// available for alias resolution in the primary document. An anchor name
+// defined in more than one place fails with a [DuplicateKeyError]. With a
+// [Decoder], the anchors are available to every document in the stream.
 func WithReferenceFiles(files ...string) DecodeOption {
 	return func(o *decoderOptions) { o.referenceFiles = append(o.referenceFiles, files...) }
 }
 
 // WithReferenceDirs loads all .yaml and .yml files in the given directories
-// and makes their anchors available for alias resolution. By default only
-// the top level of each directory is scanned; use [WithRecursiveDir] to walk
-// subdirectories.
+// and makes their anchors available for alias resolution, as
+// [WithReferenceFiles] does. By default only the top level of each directory
+// is scanned; use [WithRecursiveDir] to walk subdirectories. A file whose
+// symlink resolves outside the directory fails with [ErrPathEscape].
 func WithReferenceDirs(dirs ...string) DecodeOption {
 	return func(o *decoderOptions) { o.referenceDirs = append(o.referenceDirs, dirs...) }
 }
 
 // WithRecursiveDir controls whether [WithReferenceDirs] walks subdirectories
-// recursively. Symlinks that escape the directory root are rejected.
+// recursively.
 func WithRecursiveDir(b bool) DecodeOption {
 	return func(o *decoderOptions) { o.recursiveDir = b }
 }
 
-// WithMaxDocumentSize rejects input that exceeds n bytes before parsing begins.
+// WithMaxDocumentSize rejects input that exceeds n bytes before parsing
+// begins, with an error wrapping [ErrDocumentSize]. A [Decoder] stops
+// reading once more than n bytes have arrived. Zero means no limit.
 func WithMaxDocumentSize(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxDocumentSize = n }
 }
 
-// WithMaxNodes limits the total number of AST nodes the parser may create.
-// Zero means no limit.
+// WithMaxNodes limits the total number of AST nodes the parser may create;
+// exceeding it fails with a [SyntaxError]. Zero, the default, means no limit.
 func WithMaxNodes(n int) DecodeOption {
 	return func(o *decoderOptions) { o.maxNodes = n }
 }
 
 // WithCustomMarshaler registers a function that encodes values of type T to YAML
-// bytes, overriding the default encoding for that type.
+// bytes, overriding the default encoding for that type. The bytes are
+// handled as for [BytesMarshaler].
 func WithCustomMarshaler[T any](fn func(T) ([]byte, error)) EncodeOption {
 	return func(o *encoderOptions) {
 		if o.customMarshalers == nil {
@@ -353,7 +412,8 @@ func WithTagResolver(resolver *TagResolver) DecodeOption {
 // begin with the "---" header.
 //
 // Errors are returned as [*KYAMLError] carrying every violation with source
-// positions. Use [errors.Is](err, [ErrKYAML]) to test generically.
+// positions. Use [errors.Is](err, [ErrKYAML]) to test generically. A
+// [Decoder] checks the whole stream on its first Decode call.
 //
 // See [KEP-5295] for the full KYAML format definition.
 //
@@ -362,12 +422,12 @@ func WithStrictKYAML() DecodeOption {
 	return func(o *decoderOptions) { o.strictKYAML = true }
 }
 
-// WithKYAMLLintCosmetic additionally enforces the cosmetic rules of KYAML:
-// indentation, bracket cuddling, trailing commas, key ordering, and key
-// quoting. Used primarily by linters that want to assert byte-equivalence
-// with kubectl's KYAML output.
+// WithKYAMLLintCosmetic makes [Lint] also check the cosmetic rules of KYAML
+// (indentation, bracket cuddling, trailing commas, key ordering and key
+// quoting) by reporting a [SeverityWarning] issue when the input differs
+// from the output of [Format].
 //
-// Has no effect unless [WithStrictKYAML] is also set.
+// It affects only [Lint]; decoding ignores it.
 func WithKYAMLLintCosmetic() DecodeOption {
 	return func(o *decoderOptions) { o.kyamlLintCosmetic = true }
 }

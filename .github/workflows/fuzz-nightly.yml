@@ -1,0 +1,78 @@
+# Every fuzz target for ten minutes each, every night. Pushes run every fuzz target for 60 seconds
+# (make test-fuzz); this longer run reaches inputs a short one doesn't. A failing input is kept as
+# an artifact: put it under testdata/fuzz/<target>/ to reproduce it with go test.
+name: Nightly fuzz
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+
+      # The matrix is every fuzz target go test finds, so a new or renamed target runs here too.
+      - name: List the fuzz targets
+        id: list
+        run: |
+          targets=$(go test -list '^Fuzz' . | grep '^Fuzz' | jq -R . | jq -cs .)
+          if [ "$targets" = "[]" ]; then
+            echo "::error::no fuzz targets found"
+            exit 1
+          fi
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.targets) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+
+      # go test can race with its own deadline and fail with a bare "context deadline exceeded"
+      # and no failing input; as in make test-fuzz, that outcome counts as a pass.
+      - name: Fuzz for 10 minutes
+        run: |
+          set +e
+          go test -run='^$' -fuzz="^${TARGET}\$" -fuzztime=10m . 2>&1 | tee fuzz.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            if grep -q '^    context deadline exceeded$' fuzz.log && ! grep -q 'Failing input written' fuzz.log; then
+              echo "fuzz time elapsed; deadline race in go test, no failing input"
+              exit 0
+            fi
+            exit "$status"
+          fi
+
+      - name: Keep the failing input
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: testdata/fuzz/${{ matrix.target }}/
+          if-no-files-found: ignore

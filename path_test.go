@@ -423,11 +423,109 @@ func TestPathErrors(t *testing.T) {
 }
 
 func TestPathRecursiveDescentThenField(t *testing.T) {
-	_, err := PathString("$..foo")
+	file, err := Parse([]byte("foo: 1\na:\n  foo: 2\n  b: [{foo: 3}, {x: 4}]\n"))
 	if err != nil {
-		// The parser sees ".." as recursive, then "foo" is unexpected
-		// because it expects a dot or bracket prefix. This is expected behavior.
-		_ = err
+		t.Fatal(err)
+	}
+	for _, expr := range []string{"$..foo", "$...foo"} {
+		p, err := PathString(expr)
+		if err != nil {
+			t.Fatalf("PathString(%q): %v", expr, err)
+		}
+		if got := p.String(); got != "$..foo" {
+			t.Errorf("String() = %q, want $..foo", got)
+		}
+		nodes, err := p.Read(file.Docs[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var vals []string
+		for _, n := range nodes {
+			vals = append(vals, n.Value)
+		}
+		if strings.Join(vals, ",") != "1,2,3" {
+			t.Errorf("%s matched %v, want [1 2 3]", expr, vals)
+		}
+	}
+
+	for expr, want := range map[string]string{"$..*": "$..*", "$.a..[0]": "$.a..[0]", "$..[*]": "$..*"} {
+		p, err := PathString(expr)
+		if err != nil {
+			t.Fatalf("PathString(%q): %v", expr, err)
+		}
+		if got := p.String(); got != want {
+			t.Errorf("PathString(%q).String() = %q, want %q", expr, got, want)
+		}
+	}
+}
+
+func TestPathPointerString(t *testing.T) {
+	for _, ptr := range []string{"", "/a", "/a~1b/c~0d/0", "/"} {
+		p, err := PathPointer(ptr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := p.String(); got != ptr {
+			t.Errorf("PathPointer(%q).String() = %q", ptr, got)
+		}
+	}
+}
+
+func TestPathPointerReplaceDelete(t *testing.T) {
+	file, err := Parse([]byte("a:\n  b: [x, y, z]\n  c: keep\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := file.Docs[0]
+
+	p, _ := PathPointer("/a/b/1")
+	if err := p.Replace(root, &Node{Kind: ScalarNode, Value: "Y"}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = PathPointer("/a/c")
+	if err := p.Replace(root, &Node{Kind: ScalarNode, Value: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = PathPointer("/a/b/0")
+	if err := p.Delete(root); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := PathString("$.a.b")
+	nodes, _ := got.Read(root)
+	if len(nodes) != 1 || len(nodes[0].Children) != 2 || nodes[0].Children[0].Value != "Y" || nodes[0].Children[1].Value != "z" {
+		t.Fatalf("a.b = %+v", nodes)
+	}
+	c, _ := PathString("$.a.c")
+	if v, _ := c.Read(root); len(v) != 1 || v[0].Value != "new" {
+		t.Fatalf("a.c = %+v", v)
+	}
+
+	p, _ = PathPointer("/a/c")
+	if err := p.Delete(root); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := c.Read(root); len(v) != 0 {
+		t.Fatalf("a.c not deleted: %+v", v)
+	}
+}
+
+func TestPathReplaceDeleteRejectWildcardAndRecursive(t *testing.T) {
+	file, err := Parse([]byte("a: [1, 2]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expr := range []string{"$.a.*", "$.a[*]", "$.a.."} {
+		p, err := PathString(expr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Replace(file.Docs[0], &Node{Kind: ScalarNode, Value: "x"}); !errors.Is(err, ErrPathSyntax) {
+			t.Errorf("Replace(%s) err = %v, want ErrPathSyntax", expr, err)
+		}
+		if err := p.Delete(file.Docs[0]); !errors.Is(err, ErrPathSyntax) {
+			t.Errorf("Delete(%s) err = %v, want ErrPathSyntax", expr, err)
+		}
 	}
 }
 
@@ -639,14 +737,15 @@ func TestPathReadRecursive(t *testing.T) {
 	}
 	p, err := PathString("$..c")
 	if err != nil {
-		// If $..c isn't valid syntax, try $.a..c or use the manual path
-		p = &Path{segments: []pathSegment{rootSegment{}, recursiveSegment{}, childSegment{name: "c"}}}
+		t.Fatal(err)
 	}
 	nodes, err := p.Read(file.Docs[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = nodes
+	if len(nodes) != 1 || nodes[0].Value != "deep" {
+		t.Fatalf("$..c = %+v", nodes)
+	}
 }
 
 func TestPathReadStringParseError(t *testing.T) {
@@ -886,4 +985,46 @@ func TestPathPointerNotFound(t *testing.T) {
 	if len(nodes) != 0 {
 		t.Errorf("expected no matches, got %+v", nodes)
 	}
+}
+
+func TestPathStringQuotesWhiteSpaceKeys(t *testing.T) {
+	for _, key := range []string{"a\t", "\ta", "a\n", "a b", "a "} {
+		doc := &Node{Kind: MappingNode, Children: []*Node{
+			{Kind: ScalarNode, Value: key}, {Kind: ScalarNode, Value: "v"},
+		}}
+		p, err := PathString("$['" + key + "']")
+		if err != nil {
+			t.Fatalf("%q: %v", key, err)
+		}
+		again, err := PathString(p.String())
+		if err != nil {
+			t.Errorf("%q: String %q does not parse: %v", key, p.String(), err)
+			continue
+		}
+		if got, err := again.Read(doc); err != nil || len(got) != 1 || got[0].Value != "v" {
+			t.Errorf("%q: String %q reads %v, %v", key, p.String(), got, err)
+		}
+	}
+}
+
+func TestEscapersMatchReplacers(t *testing.T) {
+	ptr := strings.NewReplacer("~", "~0", "/", "~1")
+	key := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+	alphabet := []string{"~", "/", `\`, `'`, "0", "1", "a", "~0", "~1", "é"}
+	var gen func(prefix string, n int)
+	gen = func(prefix string, n int) {
+		if got, want := escapePointerToken(prefix), ptr.Replace(prefix); got != want {
+			t.Fatalf("pointer %q: got %q want %q", prefix, got, want)
+		}
+		if got, want := escapePathKey(prefix), key.Replace(prefix); got != want {
+			t.Fatalf("key %q: got %q want %q", prefix, got, want)
+		}
+		if n == 0 {
+			return
+		}
+		for _, a := range alphabet {
+			gen(prefix+a, n-1)
+		}
+	}
+	gen("", 5)
 }
