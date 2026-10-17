@@ -720,18 +720,21 @@ func (s *scanner) scanBlockScalar() error {
 
 	chomp := 0
 	explicitIndent := 0
+	// One indentation indicator and one chomping indicator at most, directly after | or >.
+	sawChomp, sawBlank := false, false
 
 headerLoop:
 	for !s.atEnd() && s.peek() != '\n' && s.peek() != '\r' {
 		c := s.peek()
 		switch {
-		case c == '-':
+		case (c == '-' || c == '+') && !sawChomp && !sawBlank:
 			chomp = -1
+			if c == '+' {
+				chomp = 1
+			}
+			sawChomp = true
 			s.advance(1)
-		case c == '+':
-			chomp = 1
-			s.advance(1)
-		case c >= '1' && c <= '9':
+		case c >= '1' && c <= '9' && explicitIndent == 0 && !sawBlank:
 			explicitIndent = int(c - '0')
 			s.advance(1)
 		case c == '#':
@@ -741,6 +744,7 @@ headerLoop:
 			}
 			return &SyntaxError{Message: "comment must be preceded by whitespace", Pos: s.position()}
 		case c == ' ' || c == '\t':
+			sawBlank = true
 			s.advance(1)
 		default:
 			return &SyntaxError{Message: "invalid content after block scalar indicator", Pos: s.position()}
