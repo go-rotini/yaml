@@ -627,6 +627,39 @@ func TestAliasKeyUsesAnchorText(t *testing.T) {
 	}
 }
 
+// An alias key whose anchor is a merge key is the literal key "<<", however
+// the mapping is decoded, including through the bytes a BytesUnmarshaler
+// receives.
+func TestAliasKeyToMergeKeyIsLiteral(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want any
+	}{
+		{"&k <<: *k :", map[string]any{"<<": nil}},
+		{"a: &k <<\nb:\n  *k : {c: 1}", map[string]any{"a": "<<", "b": map[string]any{"<<": map[string]any{"c": int64(1)}}}},
+		{"a: &k !!merge <<\nb: {*k : c}", map[string]any{"a": "<<", "b": map[string]any{"<<": "c"}}},
+	} {
+		var direct any
+		if err := Unmarshal([]byte(tc.in), &direct); err != nil || !reflect.DeepEqual(direct, tc.want) {
+			t.Errorf("%q into any: got %#v, %v", tc.in, direct, err)
+		}
+		var ordered any
+		if err := UnmarshalWithOptions([]byte(tc.in), &ordered, WithOrderedMap()); err != nil {
+			t.Errorf("%q ordered: %v", tc.in, err)
+		} else if plain, _ := orderedToPlain(ordered); !reflect.DeepEqual(plain, tc.want) {
+			t.Errorf("%q ordered: got %#v", tc.in, ordered)
+		}
+		var raw rawAny
+		if err := Unmarshal([]byte(tc.in), &raw); err != nil || !reflect.DeepEqual(raw.v, tc.want) {
+			t.Errorf("%q through BytesUnmarshaler: got %#v, %v", tc.in, raw.v, err)
+		}
+		var m map[string]any
+		if err := Unmarshal([]byte(tc.in), &m); err != nil || !reflect.DeepEqual(m, tc.want) {
+			t.Errorf("%q into map[string]any: got %#v, %v", tc.in, m, err)
+		}
+	}
+}
+
 func TestCommentWithLineBreaks(t *testing.T) {
 	for _, text := range []string{"hello\nb: 99", "hello\rb: 99", "hello\r\nb: 99", "hello\u2028b: 99", "hello\u0085b: 99"} {
 		for _, pos := range []CommentPosition{HeadCommentPos, LineCommentPos, FootCommentPos} {

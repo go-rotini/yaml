@@ -2072,6 +2072,11 @@ func (d *decoder) expandAliases(n *node) (*node, error) {
 			if err != nil {
 				return nil, err
 			}
+			if n.kind == nodeMapping && i%2 == 0 && child.kind == nodeAlias && isMergeKey(e) {
+				// An alias key is the anchor's text, never a merge key, so
+				// the copy must not read back as one.
+				e = &node{kind: nodeScalar, value: "<<", style: scalarDoubleQuoted, pos: e.pos}
+			}
 			c.children[i] = e
 		}
 	}

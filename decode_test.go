@@ -4668,6 +4668,30 @@ func TestBlockScalarExplicitIndent(t *testing.T) {
 	}
 }
 
+func TestBlockScalarHeaderIndicators(t *testing.T) {
+	valid := map[string]string{
+		"v: |2-\n   x\n": " x",
+		"v: |-2\n   x\n": " x",
+		"v: >+1\n  x\n":  " x\n",
+		"v: | # c\n x\n": "x\n",
+	}
+	for input, want := range valid {
+		var out map[string]string
+		if err := Unmarshal([]byte(input), &out); err != nil {
+			t.Errorf("%q: %v", input, err)
+		} else if out["v"] != want {
+			t.Errorf("%q: got %q, want %q", input, out["v"], want)
+		}
+	}
+	for _, input := range []string{"v: |21\n  x\n", "v: |+-\n x\n", "v: >1-2\n  x\n", "v: | 2\n  x\n", "v: |- +\n x\n"} {
+		var out any
+		var se *SyntaxError
+		if err := Unmarshal([]byte(input), &out); !errors.As(err, &se) {
+			t.Errorf("%q: got %v (%v), want a SyntaxError", input, out, err)
+		}
+	}
+}
+
 // ─── Encode Coverage: marshalSlice with compound elements ────────────────────
 
 // ─── Decode Coverage: scalarToAny edge cases ─────────────────────────────────
