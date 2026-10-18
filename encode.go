@@ -129,7 +129,7 @@ func (e *encoder) encode(v reflect.Value) ([]byte, error) {
 		e.buf = append(e.buf, '\n')
 	}
 	if e.opts.comments != nil {
-		e.buf = applyComments(e.buf, e.opts.comments, e.keys.positions)
+		e.buf = e.opts.applyComments(e.buf, e.opts.comments, e.keys.positions)
 	}
 	return e.buf, nil
 }
@@ -1690,14 +1690,18 @@ func readsAsNonString(s string) bool {
 	return resolveCore(s).kind != coreStr
 }
 
-// yaml11Words lists the plain scalars a YAML 1.1 reader resolves to a bool,
-// along with "=", its value key.
-var yaml11Words = map[string]struct{}{
-	"y": {}, "Y": {}, "yes": {}, "Yes": {}, "YES": {},
-	"n": {}, "N": {}, "no": {}, "No": {}, "NO": {},
-	"on": {}, "On": {}, "ON": {},
-	"off": {}, "Off": {}, "OFF": {},
-	"=": {},
+// isYAML11Word reports whether s is one of the plain scalars a YAML 1.1
+// reader resolves to a bool, or "=" (the 1.1 value key).
+func isYAML11Word(s string) bool {
+	switch s {
+	case "y", "Y", "yes", "Yes", "YES",
+		"n", "N", "no", "No", "NO",
+		"on", "On", "ON",
+		"off", "Off", "OFF",
+		"=":
+		return true
+	}
+	return false
 }
 
 // readsAsYAML11NonString reports whether a YAML 1.1 reader, or one that
@@ -1707,7 +1711,7 @@ var yaml11Words = map[string]struct{}{
 // either case, underscores, a leading zero or an inf or nan spelling, a
 // number out of range, or a timestamp.
 func readsAsYAML11NonString(s string) bool {
-	if _, ok := yaml11Words[s]; ok {
+	if isYAML11Word(s) {
 		return true
 	}
 	c := s[0]

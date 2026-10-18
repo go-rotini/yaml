@@ -57,7 +57,7 @@ func encodeKYAML(e *encoder, v reflect.Value) ([]byte, error) {
 		return nil, err
 	}
 	if e.opts.comments != nil {
-		out = applyComments(out, e.opts.comments, ke.keys.positions)
+		out = e.opts.applyComments(out, e.opts.comments, ke.keys.positions)
 	}
 	return out, nil
 }

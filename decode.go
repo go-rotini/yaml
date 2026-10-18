@@ -197,13 +197,13 @@ func (d *decoder) decode(n *node, v reflect.Value) error {
 		}
 	}
 
-	if d.opts.useJSONUnmarshaler && v.CanAddr() {
+	if d.opts.jsonEncode != nil && v.CanAddr() {
 		if u, ok := reflect.TypeAssert[jsonUnmarshaler](v.Addr()); ok {
 			raw, err := d.rawBytes(n)
 			if err != nil {
 				return err
 			}
-			jsonBytes, err := jsonEncodeYAML(raw)
+			jsonBytes, err := d.opts.jsonEncode(raw)
 			if err != nil {
 				return err
 			}
@@ -624,8 +624,8 @@ func (d *decoder) decodeMappingToStruct(n *node, v reflect.Value) error {
 // keys in seen have been decoded into it, and does the same for each struct
 // field that was absent. validate runs the validator on v.
 func (d *decoder) finishStruct(v reflect.Value, sf *structFields, seen map[string]bool, pos Position, validate bool) error {
-	if d.opts.applyDefaults {
-		if err := d.applyDefaults(v, sf, seen); err != nil {
+	if d.opts.applyDefaults != nil {
+		if err := d.opts.applyDefaults(d, v, sf, seen); err != nil {
 			return err
 		}
 	}
@@ -642,7 +642,7 @@ func (d *decoder) finishStruct(v reflect.Value, sf *structFields, seen map[strin
 			continue
 		}
 		field := fieldForEncode(v, fi.index)
-		if field.Kind() != reflect.Struct || !field.CanSet() || !hasFillRules(field.Type(), d.opts.applyDefaults) {
+		if field.Kind() != reflect.Struct || !field.CanSet() || !hasFillRules(field.Type(), d.opts.applyDefaults != nil) {
 			continue
 		}
 		if err := d.finishStruct(field, getStructFields(field.Type()), nil, pos, false); err != nil {
@@ -663,7 +663,7 @@ func (d *decoder) finishStruct(v reflect.Value, sf *structFields, seen map[strin
 // fillAbsent applies defaults and required checks to struct v, whose
 // mapping is absent from the input or null.
 func (d *decoder) fillAbsent(v reflect.Value, pos Position) error {
-	if v.Kind() != reflect.Struct || !v.CanSet() || !hasFillRules(v.Type(), d.opts.applyDefaults) {
+	if v.Kind() != reflect.Struct || !v.CanSet() || !hasFillRules(v.Type(), d.opts.applyDefaults != nil) {
 		return nil
 	}
 	sf := getStructFields(v.Type())
