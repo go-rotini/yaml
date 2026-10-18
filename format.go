@@ -23,8 +23,9 @@ import (
 
 // kyamlEmitter produces strict KYAML output per KEP-5295.
 //
-// The emitter is invoked from the existing encoder when opts.kyaml is set.
-// It is not safe for concurrent use; callers create one per Marshal call.
+// The emitter is invoked from the existing encoder through opts.kyaml, which
+// only [WithKYAML] sets. It is not safe for concurrent use; callers create
+// one per Marshal call.
 type kyamlEmitter struct {
 	opts *encoderOptions
 	buf  []byte
@@ -42,6 +43,23 @@ func newKYAMLEmitter(opts *encoderOptions) *kyamlEmitter {
 		ctx:  context.Background(),
 		seen: make(map[uintptr]bool),
 	}
+}
+
+// encodeKYAML encodes v as KYAML in place of e's block or flow output. It
+// is reached only through opts.kyaml, so a program that never uses
+// [WithKYAML] does not link the emitter.
+func encodeKYAML(e *encoder, v reflect.Value) ([]byte, error) {
+	ke := newKYAMLEmitter(e.opts)
+	ke.ctx = e.ctx
+	ke.keys.on = e.opts.comments != nil
+	out, err := ke.encode(v)
+	if err != nil {
+		return nil, err
+	}
+	if e.opts.comments != nil {
+		out = applyComments(out, e.opts.comments, ke.keys.positions)
+	}
+	return out, nil
 }
 
 // encode produces the full KYAML document, including the leading "---" header

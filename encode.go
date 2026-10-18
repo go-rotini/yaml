@@ -106,18 +106,8 @@ func newEncoder(opts *encoderOptions) *encoder {
 }
 
 func (e *encoder) encode(v reflect.Value) ([]byte, error) {
-	if e.opts.kyaml {
-		ke := newKYAMLEmitter(e.opts)
-		ke.ctx = e.ctx
-		ke.keys.on = e.opts.comments != nil
-		out, err := ke.encode(v)
-		if err != nil {
-			return nil, err
-		}
-		if e.opts.comments != nil {
-			out = applyComments(out, e.opts.comments, ke.keys.positions)
-		}
-		return out, nil
+	if e.opts.kyaml != nil {
+		return e.opts.kyaml(e, v)
 	}
 	if err := checkBlockIndent(e.opts); err != nil {
 		return nil, err
@@ -148,7 +138,7 @@ func (e *encoder) encode(v reflect.Value) ([]byte, error) {
 // with an indent below 1, which would write nested collections at their
 // parent's column.
 func checkBlockIndent(o *encoderOptions) error {
-	if o.indent < 1 && !o.flow && !o.kyaml {
+	if o.indent < 1 && !o.flow && o.kyaml == nil {
 		return fmt.Errorf("yaml: WithIndent(%d) must be at least 1 for block-style output: %w", o.indent, ErrOptionConflict)
 	}
 	return nil

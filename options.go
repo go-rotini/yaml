@@ -37,7 +37,7 @@ type encoderOptions struct {
 	durationAsString     bool
 	comments             map[string][]Comment
 	customMarshalers     map[reflect.Type]any
-	kyaml                bool
+	kyaml                func(*encoder, reflect.Value) ([]byte, error) // set by WithKYAML
 	kyamlAlwaysQuoteKeys bool
 }
 
@@ -149,7 +149,7 @@ func WithLineWidth(n int) EncodeOption {
 // [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
 func WithKYAML() EncodeOption {
 	return func(o *encoderOptions) {
-		o.kyaml = true
+		o.kyaml = encodeKYAML
 		o.flow = true
 	}
 }
