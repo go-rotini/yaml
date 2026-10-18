@@ -36,6 +36,7 @@ type encoderOptions struct {
 	autoInt              bool
 	durationAsString     bool
 	comments             map[string][]Comment
+	applyComments        func([]byte, map[string][]Comment, []keyPos) []byte // set by WithComment, so an encoder without it doesn't link comment placement
 	customMarshalers     map[reflect.Type]any
 	kyaml                func(*encoder, reflect.Value) ([]byte, error) // set by WithKYAML
 	kyamlAlwaysQuoteKeys bool
@@ -110,7 +111,10 @@ func WithOmitEmpty(b bool) EncodeOption {
 // not placed. Text with line breaks is written as one comment line per
 // line, and any other non-printable character or invalid UTF-8 as U+FFFD.
 func WithComment(comments map[string][]Comment) EncodeOption {
-	return func(o *encoderOptions) { o.comments = comments }
+	return func(o *encoderOptions) {
+		o.comments = comments
+		o.applyComments = applyComments
+	}
 }
 
 // WithAutoInt writes whole-number floats with magnitude below 1e16 as
@@ -224,12 +228,12 @@ const (
 
 type decoderOptions struct {
 	strict             bool
-	strictKYAML        bool
+	strictKYAML        func([]*node) error // validateKYAMLBytes when WithStrictKYAML is set, so a decoder without it doesn't link the KYAML checks
 	kyamlLintCosmetic  bool
 	disallowDuplicates bool
 	useOrderedMap      bool
-	useJSONUnmarshaler bool
-	applyDefaults      bool
+	jsonEncode         func([]byte) ([]byte, error)                                        // jsonEncodeYAML, set by WithJSONUnmarshaler, so a decoder without it doesn't link encoding/json
+	applyDefaults      func(*decoder, reflect.Value, *structFields, map[string]bool) error // set by WithDefaults; nil leaves default tags unread and unlinked
 	maxDepth           int
 	maxAliasExpansion  int
 	maxDocumentSize    int
@@ -240,6 +244,7 @@ type decoderOptions struct {
 	validator          StructValidator
 	referenceFiles     []string
 	referenceDirs      []string
+	loadReferences     func(map[string]*node, *decoderOptions) (map[string]*node, int, error) // set by WithReferenceFiles and WithReferenceDirs, so a decoder without them doesn't link the reference loading
 	customUnmarshalers map[reflect.Type]any
 	tagResolvers       map[string]*TagResolver
 }
@@ -266,7 +271,7 @@ func WithSchema(s Schema) DecodeOption {
 // `yaml:"port,default=8080"`). Only scalar types are supported: string, bool, int/uint variants, float
 // variants, and time.Duration. Without this option, default tags are ignored.
 func WithDefaults() DecodeOption {
-	return func(o *decoderOptions) { o.applyDefaults = true }
+	return func(o *decoderOptions) { o.applyDefaults = (*decoder).applyDefaults }
 }
 
 // WithStrict causes decoding to return an [UnknownFieldError] if a YAML key does
@@ -295,7 +300,7 @@ func WithOrderedMap() DecodeOption {
 // WithJSONUnmarshaler causes the decoder to try a type's UnmarshalJSON method
 // if no YAML-specific unmarshaler is found.
 func WithJSONUnmarshaler() DecodeOption {
-	return func(o *decoderOptions) { o.useJSONUnmarshaler = true }
+	return func(o *decoderOptions) { o.jsonEncode = jsonEncodeYAML }
 }
 
 // WithMaxDepth limits the nesting depth of the decoded value (default 100),
@@ -339,7 +344,10 @@ func WithValidator(v StructValidator) DecodeOption {
 // defined in more than one place fails with a [DuplicateKeyError]. With a
 // [Decoder], the anchors are available to every document in the stream.
 func WithReferenceFiles(files ...string) DecodeOption {
-	return func(o *decoderOptions) { o.referenceFiles = append(o.referenceFiles, files...) }
+	return func(o *decoderOptions) {
+		o.referenceFiles = append(o.referenceFiles, files...)
+		o.loadReferences = loadReferences
+	}
 }
 
 // WithReferenceDirs loads all .yaml and .yml files in the given directories
@@ -348,7 +356,10 @@ func WithReferenceFiles(files ...string) DecodeOption {
 // is scanned; use [WithRecursiveDir] to walk subdirectories. A file whose
 // symlink resolves outside the directory fails with [ErrPathEscape].
 func WithReferenceDirs(dirs ...string) DecodeOption {
-	return func(o *decoderOptions) { o.referenceDirs = append(o.referenceDirs, dirs...) }
+	return func(o *decoderOptions) {
+		o.referenceDirs = append(o.referenceDirs, dirs...)
+		o.loadReferences = loadReferences
+	}
 }
 
 // WithRecursiveDir controls whether [WithReferenceDirs] walks subdirectories
@@ -419,7 +430,7 @@ func WithTagResolver(resolver *TagResolver) DecodeOption {
 //
 // [KEP-5295]: https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/5295-kyaml
 func WithStrictKYAML() DecodeOption {
-	return func(o *decoderOptions) { o.strictKYAML = true }
+	return func(o *decoderOptions) { o.strictKYAML = validateKYAMLBytes }
 }
 
 // WithKYAMLLintCosmetic makes [Lint] also check the cosmetic rules of KYAML

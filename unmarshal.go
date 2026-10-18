@@ -149,7 +149,7 @@ func parseStream(data []byte, o *decoderOptions) ([]*node, map[string]*node, int
 		return nil, nil, 0, err
 	}
 
-	if o.strictKYAML {
+	if o.strictKYAML != nil {
 		for _, tok := range tokens {
 			if tok.kind == tokenDirective {
 				return nil, nil, 0, &KYAMLError{Errors: []KYAMLViolation{{
@@ -169,15 +169,18 @@ func parseStream(data []byte, o *decoderOptions) ([]*node, map[string]*node, int
 		return nil, nil, 0, err
 	}
 
-	if o.strictKYAML {
-		if err := validateKYAMLBytes(docs); err != nil {
+	if o.strictKYAML != nil {
+		if err := o.strictKYAML(docs); err != nil {
 			return nil, nil, 0, err
 		}
 	}
 
-	refAnchors, refNodes, err := loadReferences(p.anchors, o)
-	if err != nil {
-		return nil, nil, 0, err
+	var refAnchors map[string]*node
+	var refNodes int
+	if o.loadReferences != nil {
+		if refAnchors, refNodes, err = o.loadReferences(p.anchors, o); err != nil {
+			return nil, nil, 0, err
+		}
 	}
 
 	return docs, refAnchors, p.nodeCount + refNodes, nil

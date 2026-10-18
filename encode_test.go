@@ -60,6 +60,7 @@ func TestEncodeWithComments(t *testing.T) {
 		comments: map[string][]Comment{
 			"$.name": {{Position: LineCommentPos, Text: "the name"}},
 		},
+		applyComments: applyComments,
 	})
 	data, err := enc.encode(reflect.ValueOf(map[string]string{"name": "alice"}))
 	if err != nil {
