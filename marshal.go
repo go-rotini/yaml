@@ -31,7 +31,7 @@ func MarshalWithOptions(v any, opts ...EncodeOption) ([]byte, error) {
 	for _, opt := range opts {
 		opt(o)
 	}
-	if o.kyaml && o.flowExplicit && !o.flow {
+	if o.kyaml != nil && o.flowExplicit && !o.flow {
 		return nil, fmt.Errorf("yaml: WithFlow(false) cannot be combined with WithKYAML(): %w", ErrOptionConflict)
 	}
 	enc := newEncoder(o)
@@ -111,7 +111,7 @@ func (enc *Encoder) EncodeContext(ctx context.Context, v any) error {
 	// Block-style YAML separates documents with "---\n". KYAML already
 	// begins each document with its own "---\n" header, so adding
 	// the separator again would produce a duplicate marker.
-	if enc.n > 0 && !enc.opts.kyaml {
+	if enc.n > 0 && enc.opts.kyaml == nil {
 		if _, err := enc.w.Write([]byte("---\n")); err != nil {
 			return err
 		}
