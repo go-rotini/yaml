@@ -1,5 +1,5 @@
 # Minor and patch updates come grouped, and merge themselves once CI passes on them
-# (dependabot-merge.yml); a major version gets its own pull request, for review.
+# (auto-merge.yml); a major version gets its own pull request, for review.
 version: 2
 updates:
   # fix(deps) so semantic-release ships each dependency bump as a patch release. go-rotini
